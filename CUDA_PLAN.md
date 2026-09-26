@@ -128,7 +128,7 @@ Ein `CUDA=yes`-Build von `libindigo` braucht `libcudart` beim Start. Das ist bew
    Graustufen (Mono-Kameras): 1039 ms, 4322 KB. `JDCT_IFAST` bringt nur 7 %, die Zeit hängt an der Huffman-Codierung des verrauschten Bildes.
 
    Schlussfolgerungen:
-   - **Umgesetzt:** `do_fancy_downsampling = FALSE` und `dct_method = JDCT_FLOAT` in `indigo_raw_to_jpeg` (1,63× bei gleichem PSNR). Verhaltensänderung: Die JPEG-Bytes ändern sich (klassischer Chroma-Filter, die Gleitkomma-DCT ist plattformabhängig). Abgesichert durch `test_raw_to_jpeg` (ruft `indigo_raw_to_jpeg` auf einem Fake-Gerät auf, 40 Fälle: 8/16 Bit Mono, alle Bayer-Muster, 24/48 Bit RGB, ungerade Größen, Histogramm; dekodiert und prüft PSNR ≥ 36 dB gegen das gestretchte Bild). Das Guard `JPEG_LIB_VERSION >= 80` schützt vor Systembibliotheken ohne `do_fancy_downsampling`.
+   - **Umgesetzt:** `do_fancy_downsampling = FALSE` und `dct_method = JDCT_FLOAT` in `indigo_raw_to_jpeg`. Verhaltensänderung: Die JPEG-Bytes ändern sich (klassischer Chroma-Filter, die Gleitkomma-DCT ist plattformabhängig). **Korrektur:** Der erste Commit (`639a57892`) hatte die Float-DCT hinter `#ifdef DCT_FLOAT_SUPPORTED` gesetzt. Dieses Makro steht in `jmorecfg.h` nur für libjpegs eigene Quellen, für Anwendungen ist es nie definiert: Die Float-DCT war damit wirkungslos, das Profil zeigte weiter `jpeg_fdct_islow`. Behoben in Phase 2 (siehe unten). Seitdem pinnt `test_raw_to_jpeg` die Einstellungen byte-genau: Es komprimiert das gestretchte Bild direkt mit libjpeg (Qualität 90, ohne Fancy-Downsampling, Float-DCT) und verlangt exakt dieselben Bytes wie `indigo_raw_to_jpeg`.
    - Der größte Hebel ist, Farbumrechnung und Unterabtastung aus libjpeg zu entfernen: 3,3× für den libjpeg-Teil. Die Umrechnung auf der CPU kostet allerdings 511 ms (ein Thread) und würde den Gewinn aufheben. Sinnvoll ist sie nur, wenn der Stretch-Kernel der GPU (Phase 2) direkt Y-, Cb-, Cr-Ebenen (Cb/Cr halbiert) erzeugt. Für Phase 2 heißt das: Ausgabe nicht als RGB8, sondern als YCbCr-4:2:0 planen.
    - Im Raw-Modus erwartet libjpeg 9 Chroma nur dann in halber Auflösung, wenn `do_fancy_downsampling = FALSE` gesetzt ist. Sonst erwartet es volle Auflösung (16×16-DCT). Das gilt nur für diese Bibliotheksversion.
    - Qualität, `JDCT_IFAST` und optimierte Tabellen bringen für die Zeit nichts.
@@ -136,11 +136,35 @@ Ein `CUDA=yes`-Build von `libindigo` braucht `libcudart` beim Start. Das ist bew
 
 3. **Erledigt:** Lesefehler in `indigo_compute_stretch_params` behoben. Die Bayer-Ebenen mit Zeilen- oder Spalten-Offset (`buffer + width…`, `buffer + 1`) wurden mit der vollen Bildgröße abgetastet und lasen bei ungerader Höhe bis zu 301 Werte hinter den Puffer, bei bestimmten Breiten (`(width - 1) % (2 * sample_by) == 0`) ein Element dahinter bzw. in die nächste Zeile. Das Template bekommt jetzt den Offset getrennt und begrenzt Zeilen und Spalten der Ebene. **Verhaltensänderung:** Bei diesen Bildgrößen ändern sich die Stretch-Parameter minimal, weil nicht mehr Speicherinhalt hinter dem Bild in den Median eingeht. Bei allen anderen Größen (z. B. gerade Höhe) bleibt das Ergebnis bitgleich. Der Test extrahiert jede Ebene explizit und vergleicht mit der Originalmathematik; die Puffer enden vor einer Guard-Page. Gegenprobe: Mit dem alten Code stürzt der Test ab.
 
-**Phase 2: Stretch-Pipeline auf der GPU** (`indigo_stretch.cu`)
-- Kernels für Stretch (8/16 Bit, Mono, RGB24/48) und Debayer + Stretch (RGGB/GBRG/GRBG/BGGR). Die Parameterberechnung bleibt vorerst auf der CPU (17 ms).
-- Signaturen aus `indigo_stretch.h` bleiben. Dispatch: GPU, wenn `indigo_cuda_available()` und mindestens `INDIGO_CUDA_MIN_PIXELS` Pixel, sonst CPU.
-- Nutzen hängt vom Ergebnis aus Phase 1.2 ab: Mit CPU-JPEG spart Phase 2 nur den Stretch-Anteil von 459 ms. Mit einem Hardware-Encoder, der GPU-Puffer nimmt, entfällt die ganze CPU-Kette.
-- Byte-Swap und RGB-Swap in `indigo_process_image` in den Kernel ziehen (ein Upload pro Frame).
+**Phase 2: Stretch-Pipeline auf der GPU (umgesetzt, Nano gemessen)**
+
+Umsetzung:
+- `indigo_libs/indigo_stretch_kernels.h` (intern): `debayer()` und `stretch()` für CPU und GPU gemeinsam (`INDIGO_HD` = `__host__ __device__`), dazu `indigo_make_stretch_channel()` mit denselben Ausdrücken wie der CPU-Code. Der CPU-Code nutzt die gemeinsamen Funktionen; `debayer` rechnet mit `float`-Division statt `double`. Das ist exakt gleich (Summen < 2^24, durch 2 und 4 exakt, für /3 erschöpfend geprüft: 0 Abweichungen über alle Summen), die 64 Ausgabe-Hashes aller CPU-Funktionen sind vor und nach dem Umbau identisch.
+- `indigo_libs/indigo_stretch_cuda.cu` (nicht `indigo_stretch.cu`: gleicher Objektname wie `indigo_stretch.cpp`): Kernel für Debayer+Stretch (8/16 Bit, alle vier Bayer-Muster), reines Debayer (8 Bit), Mono-Stretch (8/16 Bit) und interleaved RGB (24/48 Bit). `indigo_stretch.cpp` ruft sie ab `INDIGO_CUDA_MIN_PIXELS` (262143) auf; bei nicht verfügbarer GPU, kleinem Bild oder CUDA-Fehler läuft der unveränderte CPU-Code. Die Stretch-Parameter (Median/MAD, 17 ms) bleiben auf der CPU.
+- YCbCr-Pfad für Farbkameras: Der Kernel erzeugt direkt planares YCbCr 4:2:0 (ein Thread je 2×2-Block, keine Warp-Divergenz) mit libjpegs Festkommakonstanten, Chroma-Mittelung (`h2v2_downsample`, bias 1,2,1,2) und Randauffüllung (Spalten vor der Mittelung, Zeilen als letzte Y- bzw. Chroma-Zeile). `indigo_raw_to_jpeg` schreibt die Ebenen mit `jpeg_write_raw_data`. Ohne GPU oder bei Fehler bleibt der bisherige Pfad. Die Float-DCT wird jetzt wirklich gesetzt (`#ifdef` entfernt).
+- Laufzeitschalter `indigo_cuda_set_enabled()` und `INDIGO_CUDA=0` (Umgebungsvariable).
+
+Tests (alle im CUDA- und im `CUDA=no`-Build gelaufen):
+- `test_cuda_stretch`: 71 Vergleiche GPU gegen CPU, byte-identisch (alle Funktionen und Bayer-Muster, ungerade Größen), prüft über einen Zähler, dass die GPU wirklich benutzt wurde.
+- `test_raw_to_jpeg`: 76 Fälle. `indigo_raw_to_jpeg` mit GPU an und aus liefert **byte-identische JPEG-Dateien** (auch für gerade Höhen mit Rest 6 und 10 Zeilen und für die Größe direkt an der GPU-Schwelle), und beide entsprechen exakt libjpeg mit den Vorschau-Einstellungen.
+- Beim Testen gefundene Fehler (behoben): Namenskollision `indigo_stretch.o`; falsche Chroma-Auffüllung in den letzten Zeilen bei gerader Höhe (libjpeg füllt in der bereits unterabgetasteten Ebene auf); wirkungsloser `#ifdef` für die Float-DCT.
+
+Messungen (Nano, 12 MP, Median):
+
+| Vorschau-Konvertierung `indigo_raw_to_jpeg` | Zeit |
+|---|---|
+| Ausgangszustand (RGGB 16 Bit, CPU, ISLOW, Fancy-Downsampling) | etwa 1900 ms |
+| CPU mit Float-DCT und klassischem Chroma | 1113 ms |
+| **GPU (YCbCr-Pfad)** | **488 ms** |
+| Mono 16 Bit: CPU / GPU | 864 / 718 ms |
+
+Aufteilung der GPU-Konvertierung: Stretch-Parameter 18 ms (CPU), GPU-Schritt 60 ms (Upload 13, Kernel etwa 30, Download etwa 10), libjpeg (DCT + Huffman) rund 400 ms. Der erste GPU-Aufruf kostet zusätzlich etwa 130 ms (Kontext, Puffer). Zum Vergleich der frühere RGB-Kernel: 41 ms allein für den Kernel (Kopieren mit 3-Byte-Schreiben 11 ms, drei IEEE-Divisionen 12 ms, Debayer 17 ms); `__restrict__`, andere Blockformen und Schreiben über Shared Memory brachten nichts, gepinnter Speicher auch nicht (Bandbreite etwa 1,9 GB/s in beide Richtungen).
+
+Was bleibt:
+- Mono-Kameras: Die Zeit steckt in der Huffman-Codierung des verrauschten Bildes (4,3 MB Ausgabe), die GPU spart dort nur den Stretch (864 → 718 ms). Hebel wären ein Hardware-Encoder oder eine geringere Qualität, nicht mehr CUDA.
+- Farbe: Rest sind DCT und Huffman in libjpeg (etwa 400 ms, ein Thread). Mehrfaden-Kompression (2 CPU-Kerne sichtbar) und Hardware-Encoder sind nicht gemessen.
+- Kernel weiter optimieren (Divisionen, Speicherzugriffe) lohnt kaum: Die GPU-Schritte machen nur noch etwa 80 von 488 ms aus.
+- Nicht getestet: Orin, JetPack 7.2, echte Kameraframes.
 
 **Phase 3: Statistik für die Agenten** (nur für große Bilder, mit Schwelle)
 - Reduktionen in `indigo_contrast` / `indigo_stddev_*` (116 ms), `binarize` (54 ms), `equalize_bayer` (48 ms), Saturation-Mask. Absolut kleine Beträge, Nutzen erst nach Phase 1 neu bewerten.

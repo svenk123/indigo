@@ -47,6 +47,8 @@
 #include <indigo/indigo_md5.h>
 #include <indigo/indigo_stretch.h>
 
+#include "indigo_cuda.h"
+
 #define OBJECT_LENGTH 41
 
 struct indigo_jpeg_compress_struct {
@@ -935,11 +937,73 @@ indigo_result indigo_ccd_detach(indigo_device *device) {
 
 #define STRECH_SAMPLE_SIZE	0x1FF
 
+/* offsets as indigo_stretch uses them: 0x00 = RGGB, 0x01 = GBRG, 0x10 = GRBG, 0x11 = BGGR, -1 if there is no (known) Bayer pattern */
+static int bayer_offsets(const char *bayerpat) {
+	if (bayerpat == NULL) {
+		return -1;
+	} else if (!strcmp(bayerpat, "RGGB")) {
+		return 0x00;
+	} else if (!strcmp(bayerpat, "GBRG")) {
+		return 0x01;
+	} else if (!strcmp(bayerpat, "GRBG")) {
+		return 0x10;
+	} else if (!strcmp(bayerpat, "BGGR")) {
+		return 0x11;
+	}
+	return -1;
+}
+
+/* Colour cameras: stretch straight to planar YCbCr 4:2:0 on the GPU, libjpeg then only has to do DCT and Huffman coding (see indigo_cuda.h).
+   The stretch parameters are computed on the CPU with the same functions as in the CPU path.
+   Returns false if the GPU is not used (not available, small frame, error); nothing is allocated then and the CPU path takes over. */
+static bool bayer_to_ycc_on_gpu(int bpp, int offsets, void *data_in, int width, int height, int sample_by, double B, double C, double *shadows, double *midtones, double *highlights, unsigned long **histo, unsigned long *totals, unsigned char **planes) {
+	if ((size_t)width * height < INDIGO_CUDA_MIN_PIXELS || !indigo_cuda_available()) {
+		return false;
+	}
+	if (bpp == 16) {
+		switch (offsets) {
+			case 0x00: indigo_compute_stretch_params_16_rggb((uint16_t *)data_in, width, height, sample_by, shadows, midtones, highlights, histo, totals, B, C); break;
+			case 0x01: indigo_compute_stretch_params_16_gbrg((uint16_t *)data_in, width, height, sample_by, shadows, midtones, highlights, histo, totals, B, C); break;
+			case 0x10: indigo_compute_stretch_params_16_grbg((uint16_t *)data_in, width, height, sample_by, shadows, midtones, highlights, histo, totals, B, C); break;
+			default: indigo_compute_stretch_params_16_bggr((uint16_t *)data_in, width, height, sample_by, shadows, midtones, highlights, histo, totals, B, C); break;
+		}
+	} else {
+		switch (offsets) {
+			case 0x00: indigo_compute_stretch_params_8_rggb((uint8_t *)data_in, width, height, sample_by, shadows, midtones, highlights, histo, totals, B, C); break;
+			case 0x01: indigo_compute_stretch_params_8_gbrg((uint8_t *)data_in, width, height, sample_by, shadows, midtones, highlights, histo, totals, B, C); break;
+			case 0x10: indigo_compute_stretch_params_8_grbg((uint8_t *)data_in, width, height, sample_by, shadows, midtones, highlights, histo, totals, B, C); break;
+			default: indigo_compute_stretch_params_8_bggr((uint8_t *)data_in, width, height, sample_by, shadows, midtones, highlights, histo, totals, B, C); break;
+		}
+	}
+	const indigo_ycc420_layout layout = indigo_ycc420_layout_for(width, height);
+	unsigned char *buffer = malloc(layout.y_size + 2 * layout.c_size);
+	bool done = false;
+	if (buffer) {
+		if (bpp == 16) {
+			done = indigo_cuda_debayer_stretch_ycc_16((uint16_t *)data_in, width, height, offsets, buffer, shadows, midtones, highlights);
+		} else {
+			done = indigo_cuda_debayer_stretch_ycc_8((uint8_t *)data_in, width, height, offsets, buffer, shadows, midtones, highlights);
+		}
+	}
+	if (done) {
+		*planes = buffer;
+		return true;
+	}
+	free(buffer);
+	for (int i = 0; i < 3; i++) {
+		indigo_safe_free(histo[i]);
+		histo[i] = NULL;
+	}
+	return false;
+}
+
 void indigo_raw_to_jpeg(indigo_device *device, void *data_in, int frame_width, int frame_height, int bpp, const char *bayerpat, void **data_out, unsigned long *size_out, void **histogram_data, unsigned long *histogram_size, double B, double C) {
 	INDIGO_DEBUG(clock_t start = clock());
 	size_t size_in = frame_width * frame_height;
 	int sample_by = frame_width < STRECH_SAMPLE_SIZE ? 1 : frame_width / STRECH_SAMPLE_SIZE;
-	void *copy = indigo_safe_malloc(3 * size_in * bpp / 8);
+	void *copy = NULL;
+	unsigned char *ycc_planes = NULL; /* YCbCr 4:2:0 planes made on the GPU (colour cameras), otherwise copy holds the stretched image */
+	bool ycc = false;
 	unsigned char *mem = NULL;
 	unsigned long mem_size = 0;
 	unsigned long *histo[3] = { NULL, NULL, NULL }, totals[3] = { 0, 0, 0 };
@@ -953,6 +1017,7 @@ void indigo_raw_to_jpeg(indigo_device *device, void *data_in, int frame_width, i
 	if (setjmp(cinfo.jpeg_error)) {
 		jpeg_destroy_compress(&cinfo.pub);
 		indigo_safe_free(copy);
+		indigo_safe_free(ycc_planes);
 		indigo_safe_free(histo[0]);
 		indigo_safe_free(histo[1]);
 		indigo_safe_free(histo[2]);
@@ -964,7 +1029,16 @@ void indigo_raw_to_jpeg(indigo_device *device, void *data_in, int frame_width, i
 	cinfo.pub.image_width = frame_width;
 	cinfo.pub.image_height = frame_height;
 	cinfo.pub.input_components = 3;
-	if (bpp == 8) {
+	const int offsets = bayer_offsets(bayerpat);
+	if (offsets >= 0 && (bpp == 16 || (bpp == 8 && B != 0 && C != 0))) {
+		ycc = bayer_to_ycc_on_gpu(bpp, offsets, data_in, frame_width, frame_height, sample_by, B, C, shadows, midtones, highlights, histo, totals, &ycc_planes);
+	}
+	if (!ycc) {
+		copy = indigo_safe_malloc(3 * size_in * bpp / 8);
+	}
+	if (ycc) {
+		/* stretched and converted on the GPU */
+	} else if (bpp == 8) {
 		if (bayerpat) {
 			if (!strcmp(bayerpat, "RGGB")) {
 				if (B != 0 && C != 0) {
@@ -1041,7 +1115,9 @@ void indigo_raw_to_jpeg(indigo_device *device, void *data_in, int frame_width, i
 	} else {
 		assert(false);
 	}
-	if (cinfo.pub.input_components == 1) {
+	if (ycc) {
+		cinfo.pub.in_color_space = JCS_YCbCr;
+	} else if (cinfo.pub.input_components == 1) {
 		cinfo.pub.in_color_space = JCS_GRAYSCALE;
 	} else {
 		cinfo.pub.in_color_space = JCS_RGB;
@@ -1053,20 +1129,39 @@ void indigo_raw_to_jpeg(indigo_device *device, void *data_in, int frame_width, i
 #if JPEG_LIB_VERSION >= 80
 	cinfo.pub.do_fancy_downsampling = FALSE;
 #endif
-#ifdef DCT_FLOAT_SUPPORTED
 	cinfo.pub.dct_method = JDCT_FLOAT;
-#endif
+	if (ycc) {
+		cinfo.pub.raw_data_in = TRUE; /* colour conversion and chroma downsampling are already done (with do_fancy_downsampling = FALSE libjpeg expects Cb, Cr in half resolution) */
+	}
 	JSAMPROW row_pointer[1];
 	jpeg_start_compress(&cinfo.pub, TRUE);
-	while (cinfo.pub.next_scanline < cinfo.pub.image_height) {
-		row_pointer[0] = &((JSAMPROW)copy)[cinfo.pub.next_scanline * cinfo.pub.image_width *  cinfo.pub.input_components];
-		jpeg_write_scanlines(&cinfo.pub, row_pointer, 1);
+	if (ycc) {
+		const indigo_ycc420_layout layout = indigo_ycc420_layout_for(frame_width, frame_height);
+		JSAMPROW y_rows[16], cb_rows[8], cr_rows[8];
+		JSAMPARRAY raw_data[3] = { y_rows, cb_rows, cr_rows };
+		while (cinfo.pub.next_scanline < cinfo.pub.image_height) {
+			const int line = cinfo.pub.next_scanline;
+			for (int i = 0; i < 16; i++) {
+				y_rows[i] = ycc_planes + (size_t)(line + i) * layout.y_stride;
+			}
+			for (int i = 0; i < 8; i++) {
+				cb_rows[i] = ycc_planes + layout.y_size + (size_t)(line / 2 + i) * layout.c_stride;
+				cr_rows[i] = ycc_planes + layout.y_size + layout.c_size + (size_t)(line / 2 + i) * layout.c_stride;
+			}
+			jpeg_write_raw_data(&cinfo.pub, raw_data, 16);
+		}
+	} else {
+		while (cinfo.pub.next_scanline < cinfo.pub.image_height) {
+			row_pointer[0] = &((JSAMPROW)copy)[cinfo.pub.next_scanline * cinfo.pub.image_width *  cinfo.pub.input_components];
+			jpeg_write_scanlines(&cinfo.pub, row_pointer, 1);
+		}
 	}
 	jpeg_finish_compress(&cinfo.pub);
 	jpeg_destroy_compress(&cinfo.pub);
 	*data_out = mem;
 	*size_out = mem_size;
 	indigo_safe_free(copy);
+	indigo_safe_free(ycc_planes);
 	if (histogram_data != NULL) {
 		uint8_t raw[128 * 256 * 3];
 		memset(raw, 0, sizeof(raw));

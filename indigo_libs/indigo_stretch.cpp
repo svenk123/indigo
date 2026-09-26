@@ -35,124 +35,36 @@
 #define MIN_SIZE_TO_PARALLELIZE 0x3FFFF
 //#define HISTOGRAM_AWB
 
-// raw - raw pixels, any unsigned int
-// index - offset of the current pixel in raw
-// row, column - row, column of the current pixel (to skip line + to detect edges of the frame)
-// width, height - width, height of the frame
-// offsets - 0x00 = RGGB, 0x01 = GBRG, 0x10 = GRBG, 0x11 = BGGR
-// red, gree, blue - debayered pixel as an mean value of 1 to 4 pixels
+#include "indigo_stretch_kernels.h"
+#include "indigo_cuda.h"
+
+// GPU dispatch: true if the frame was processed on the GPU (see indigo_stretch_cuda.cu), otherwise the CPU code below runs
+static inline bool gpu_debayer_stretch(const uint8_t *input, int width, int height, int offsets, uint8_t *output, const double *shadows, const double *midtones, const double *highlights) {
+	return indigo_cuda_debayer_stretch_8(input, width, height, offsets, output, shadows, midtones, highlights);
+}
+
+static inline bool gpu_debayer_stretch(const uint16_t *input, int width, int height, int offsets, uint8_t *output, const double *shadows, const double *midtones, const double *highlights) {
+	return indigo_cuda_debayer_stretch_16(input, width, height, offsets, output, shadows, midtones, highlights);
+}
+
+static inline bool gpu_stretch(const uint8_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights) {
+	return indigo_cuda_stretch_8(input, width, height, output, shadows, midtones, highlights);
+}
+
+static inline bool gpu_stretch(const uint16_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights) {
+	return indigo_cuda_stretch_16(input, width, height, output, shadows, midtones, highlights);
+}
+
+static inline bool gpu_stretch_rgb(const uint8_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights, const float *coef) {
+	return indigo_cuda_stretch_rgb_8(input, width, height, output, shadows, midtones, highlights, coef);
+}
+
+static inline bool gpu_stretch_rgb(const uint16_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights, const float *coef) {
+	return indigo_cuda_stretch_rgb_16(input, width, height, output, shadows, midtones, highlights, coef);
+}
 
 template <typename T> static inline void debayer(T *raw, int index, int row, int column, int width, int height, int offsets, float &red, float &green, float &blue) {
-	switch (offsets ^ ((column & 1) << 4 | (row & 1))) {
-		case 0x00:
-			red = raw[index];
-			if (column == 0) {
-				if (row == 0) {
-					green = (raw[index + 1] + raw[index + width]) / 2.0;
-					blue = raw[index + width + 1];
-				} else if (row == height - 1) {
-					green = (raw[index + 1] + raw[index - width]) / 2.0;
-					blue = raw[index - width + 1];
-				} else {
-					green = (raw[index + 1] + raw[index + width] + raw[index - width]) / 3.0;
-					blue = (raw[index - width + 1] + raw[index + width + 1]) / 2.0;
-				}
-			} else if (column == width - 1) {
-				if (row == 0) {
-					green = (raw[index - 1] + raw[index + width]) / 2.0;
-					blue = (raw[index + width - 1] + raw[index + width + 1]) / 2.0;
-				} else if (row == height - 1) {
-					green = (raw[index - 1] + raw[index - width]) / 2.0;
-					blue = (raw[index - width - 1] + raw[index - width + 1]) / 2.0;
-				} else {
-					green = (raw[index - 1] + raw[index + width] + raw[index - width]) / 3.0;
-					blue = (raw[index - width - 1] + raw[index + width - 1]) / 2.0;
-				}
-			} else {
-				if (row == 0) {
-					green = (raw[index + 1] + raw[index - 1] + raw[index + width]) / 3.0;
-					blue = (raw[index + width - 1] + raw[index + width + 1]) / 2.0;
-				} else if (row == height - 1) {
-					green = (raw[index + 1] + raw[index - 1] + raw[index - width]) / 3.0;
-					blue = (raw[index - width - 1] + raw[index - width + 1]) / 2.0;
-				} else {
-					green = (raw[index + 1] + raw[index - 1] + raw[index + width] + raw[index - width]) / 4.0;
-					blue = (raw[index - width - 1] + raw[index - width + 1] + raw[index + width - 1] + raw[index + width + 1]) / 4.0;
-				}
-			}
-			break;
-		case 0x10:
-			if (column == 0) {
-				red = raw[index + 1];
-			} else if (column == width - 1) {
-				red = raw[index - 1];
-			} else {
-				red = (raw[index - 1] + raw[index + 1]) / 2.0;
-			}
-			green = raw[index];
-			if (row == 0) {
-				blue = raw[index + width];
-			} else if (row == height - 1) {
-				blue = raw[index - width];
-			} else {
-				blue = (raw[index - width] + raw[index + width]) / 2.0;
-			}
-			break;
-		case 0x01:
-			if (row == 0) {
-				red = raw[index + width];
-			} else if (row == height - 1) {
-				red = raw[index - width];
-			} else {
-				red = (raw[index - width] + raw[index + width]) / 2.0;
-			}
-			green = raw[index];
-			if (column == 0) {
-				blue = raw[index + 1];
-			} else if (column == width - 1) {
-				blue = raw[index - 1];
-			} else {
-				blue = (raw[index - 1] + raw[index + 1]) / 2.0;
-			}
-			break;
-		case 0x11:
-			if (column == 0) {
-				if (row == 0) {
-					red = raw[index + width + 1];
-					green = (raw[index + 1] + raw[index + width]) / 2.0;
-				} else if (row == height - 1) {
-					red = raw[index - width + 1];
-					green = (raw[index + 1] + raw[index - width]) / 2.0;
-				} else {
-					red = raw[index - width + 1];
-					green = (raw[index + 1] + raw[index + width] + raw[index - width]) / 3.0;
-				}
-			} else if (column == width - 1) {
-				if (row == 0) {
-					red = raw[index + width - 1];
-					green = (raw[index - 1] + raw[index + width]) / 2.0;
-				} else if (row == height - 1) {
-					red = raw[index - width - 1];
-					green = (raw[index - 1] + raw[index - width]) / 2.0;
-				} else {
-					red = (raw[index - width - 1] + raw[index + width - 1]) / 2.0;
-					green = (raw[index - 1] + raw[index + width] + raw[index - width]) / 3.0;
-				}
-			} else {
-				if (row == 0) {
-					red = (raw[index + width - 1] + raw[index + width + 1]) / 2.0;
-					green = (raw[index + 1] + raw[index - 1] + raw[index + width]) / 3.0;
-				} else if (row == height - 1) {
-					red = (raw[index - width - 1] + raw[index - width + 1]) / 2.0;
-					green = (raw[index + 1] + raw[index - 1] + raw[index - width]) / 3.0;
-				} else {
-					red = (raw[index - width - 1] + raw[index - width + 1] + raw[index + width - 1] + raw[index + width + 1]) / 4.0;
-					green = (raw[index + 1] + raw[index - 1] + raw[index + width] + raw[index - width]) / 4.0;
-				}
-			}
-			blue = raw[index];
-			break;
-	}
+	indigo_debayer_pixel(raw, index, row, column, width, height, offsets, red, green, blue);
 }
 
 // buffer - pixels, 8 or 16 bit unsigned int
@@ -269,14 +181,7 @@ template <typename T> void indigo_compute_stretch_params(const T *buffer, int wi
 // midtones_k2 = midtones / k2
 
 inline static uint8_t stretch(float value, int native_shadows, int native_highlights, float k1_k2, float midtones_k2) {
-	if (value < native_shadows) {
-		return 0;
-	} else if (value > native_highlights) {
-		return 0xFF;
-	} else {
-		const float input_floored = (value - native_shadows);
-		return k1_k2 * input_floored / (input_floored - midtones_k2);
-	}
+	return indigo_stretch_value(value, native_shadows, native_highlights, k1_k2, midtones_k2);
 }
 
 // input_buffer - source data as 8 or 16 bit integer
@@ -288,6 +193,9 @@ inline static uint8_t stretch(float value, int native_shadows, int native_highli
 
 template <typename T> void indigo_stretch(T *input_buffer, int step, int width, int height, uint8_t *output_buffer, double shadows, double midtones, double highlights, float coef) {
 	const int size = width * height;
+	if (step == 1 && coef == 1 && gpu_stretch(input_buffer, width, height, output_buffer, shadows, midtones, highlights)) {
+		return;
+	}
 	const double max_input = (sizeof(T) == 1) ? 0xFF : 0xFFFF; // TBD for 32 bits
 	const float hs_range_factor = highlights == shadows ? 1.0f : 1.0f / (highlights - shadows);
 	const int native_shadows = shadows * max_input;
@@ -410,6 +318,9 @@ template <typename T> void indigo_debayer_stretch(T *input_buffer, int width, in
 // totals - unused
 
 template <typename T> void indigo_debayer_stretch(T *input_buffer, int width, int height, int offsets, uint8_t *output_buffer, double *shadows, double *midtones, double *highlights, unsigned long *totals) {
+	if (gpu_debayer_stretch(input_buffer, width, height, offsets, output_buffer, shadows, midtones, highlights)) {
+		return;
+	}
 	const int size = width * height;
 	const double max_input = (sizeof(T) == 1) ? 0xFF : 0xFFFF;
 	const float red_hs_range_factor = highlights[0] == shadows[0] ? 1.0f : 1.0f / (highlights[0] - shadows[0]);
@@ -480,6 +391,9 @@ template <typename T> void indigo_debayer_stretch(T *input_buffer, int width, in
 
 template <typename T> void indigo_debayer(T *input_buffer, int width, int height, int offsets, uint8_t *output_buffer) {
 	const int size = width * height;
+	if (indigo_cuda_debayer_8(input_buffer, width, height, offsets, output_buffer)) {
+		return;
+	}
 	if (size < MIN_SIZE_TO_PARALLELIZE) {
 		int input_index = 0;
 		for (int row_index = 0; row_index < height; row_index++) {
@@ -615,6 +529,9 @@ extern "C" void indigo_stretch_24(const uint8_t *input_buffer, int width, int he
 		coef[0] = (float)totals[0] / totals[2];
 		coef[1] = (float)totals[1] / totals[2];
 	}
+	if (gpu_stretch_rgb(input_buffer, width, height, output_buffer, shadows[reference], midtones[reference], highlights[reference], coef)) {
+		return;
+	}
 	for (int i = 0; i < 3; i++) {
 		indigo_stretch(input_buffer + i, 3, width, height, output_buffer + i, shadows[reference], midtones[reference], highlights[reference], coef[i]);
 	}
@@ -635,6 +552,9 @@ extern "C" void indigo_stretch_48(const uint16_t *input_buffer, int width, int h
 		reference = 2;
 		coef[0] = (float)totals[0] / totals[2];
 		coef[1] = (float)totals[1] / totals[2];
+	}
+	if (gpu_stretch_rgb(input_buffer, width, height, output_buffer, shadows[reference], midtones[reference], highlights[reference], coef)) {
+		return;
 	}
 	for (int i = 0; i < 3; i++) {
 		indigo_stretch(input_buffer + i, 3, width, height, output_buffer + i, shadows[reference], midtones[reference], highlights[reference], coef[i]);

@@ -27,6 +27,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,6 +38,25 @@ extern "C" {
 
 /** Per caller context: a CUDA stream plus a few reusable device buffers. Opaque. */
 typedef struct indigo_cuda_context indigo_cuda_context;
+
+/** Layout of a planar YCbCr 4:2:0 image as libjpeg wants it for jpeg_write_raw_data(): the planes are padded to a multiple of
+    16 pixels by replicating the last column / row, Cb and Cr have half the width and height of Y.
+    The three planes are stored in one buffer: Y (y_size bytes), Cb (c_size), Cr (c_size). */
+typedef struct {
+	int y_stride, y_rows, c_stride, c_rows;
+	size_t y_size, c_size;
+} indigo_ycc420_layout;
+
+static inline indigo_ycc420_layout indigo_ycc420_layout_for(int width, int height) {
+	indigo_ycc420_layout layout;
+	layout.y_stride = (width + 15) & ~15;
+	layout.y_rows = (height + 15) & ~15;
+	layout.c_stride = layout.y_stride / 2;
+	layout.c_rows = layout.y_rows / 2;
+	layout.y_size = (size_t)layout.y_stride * layout.y_rows;
+	layout.c_size = (size_t)layout.c_stride * layout.c_rows;
+	return layout;
+}
 
 #ifdef INDIGO_CUDA
 
@@ -54,6 +74,27 @@ extern void indigo_cuda_release(indigo_cuda_context *context);
 extern void *indigo_cuda_buffer(indigo_cuda_context *context, int slot, size_t size);
 /** Runs a tiny kernel and verifies its result, true if the GPU works. */
 extern bool indigo_cuda_selftest(void);
+/** The CUDA stream (cudaStream_t) of the context. */
+extern void *indigo_cuda_stream(indigo_cuda_context *context);
+/** Switches the GPU on or off at run time (default on), e.g. to compare CPU and GPU results in tests. */
+extern void indigo_cuda_set_enabled(bool enabled);
+
+/* Stretch of the preview image (indigo_stretch_cuda.cu). They return false without touching the output if the GPU
+   is not used (not available, frame smaller than INDIGO_CUDA_MIN_PIXELS, CUDA error), the caller then runs the CPU code.
+   The results are identical to the CPU code. */
+/** Number of stretch calls completed on the GPU so far (for tests). */
+extern unsigned long indigo_cuda_stretch_calls(void);
+extern bool indigo_cuda_debayer_stretch_8(const uint8_t *input, int width, int height, int offsets, uint8_t *output, const double *shadows, const double *midtones, const double *highlights);
+extern bool indigo_cuda_debayer_stretch_16(const uint16_t *input, int width, int height, int offsets, uint8_t *output, const double *shadows, const double *midtones, const double *highlights);
+/* Debayer + stretch straight to planar YCbCr 4:2:0 (indigo_ycc420_layout_for(), colour conversion and chroma averaging exactly like libjpeg
+   does it without fancy downsampling), for jpeg_write_raw_data(). planes must have y_size + 2 * c_size bytes. */
+extern bool indigo_cuda_debayer_stretch_ycc_8(const uint8_t *input, int width, int height, int offsets, uint8_t *planes, const double *shadows, const double *midtones, const double *highlights);
+extern bool indigo_cuda_debayer_stretch_ycc_16(const uint16_t *input, int width, int height, int offsets, uint8_t *planes, const double *shadows, const double *midtones, const double *highlights);
+extern bool indigo_cuda_debayer_8(const uint8_t *input, int width, int height, int offsets, uint8_t *output);
+extern bool indigo_cuda_stretch_8(const uint8_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights);
+extern bool indigo_cuda_stretch_16(const uint16_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights);
+extern bool indigo_cuda_stretch_rgb_8(const uint8_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights, const float *coef);
+extern bool indigo_cuda_stretch_rgb_16(const uint16_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights, const float *coef);
 
 #else
 
@@ -64,6 +105,18 @@ static inline indigo_cuda_context *indigo_cuda_acquire(void) { return NULL; }
 static inline void indigo_cuda_release(indigo_cuda_context *context) { (void)context; }
 static inline void *indigo_cuda_buffer(indigo_cuda_context *context, int slot, size_t size) { (void)context; (void)slot; (void)size; return NULL; }
 static inline bool indigo_cuda_selftest(void) { return false; }
+static inline void *indigo_cuda_stream(indigo_cuda_context *context) { (void)context; return NULL; }
+static inline void indigo_cuda_set_enabled(bool enabled) { (void)enabled; }
+static inline unsigned long indigo_cuda_stretch_calls(void) { return 0; }
+static inline bool indigo_cuda_debayer_stretch_8(const uint8_t *input, int width, int height, int offsets, uint8_t *output, const double *shadows, const double *midtones, const double *highlights) { return false; }
+static inline bool indigo_cuda_debayer_stretch_16(const uint16_t *input, int width, int height, int offsets, uint8_t *output, const double *shadows, const double *midtones, const double *highlights) { return false; }
+static inline bool indigo_cuda_debayer_stretch_ycc_8(const uint8_t *input, int width, int height, int offsets, uint8_t *planes, const double *shadows, const double *midtones, const double *highlights) { return false; }
+static inline bool indigo_cuda_debayer_stretch_ycc_16(const uint16_t *input, int width, int height, int offsets, uint8_t *planes, const double *shadows, const double *midtones, const double *highlights) { return false; }
+static inline bool indigo_cuda_debayer_8(const uint8_t *input, int width, int height, int offsets, uint8_t *output) { return false; }
+static inline bool indigo_cuda_stretch_8(const uint8_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights) { return false; }
+static inline bool indigo_cuda_stretch_16(const uint16_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights) { return false; }
+static inline bool indigo_cuda_stretch_rgb_8(const uint8_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights, const float *coef) { return false; }
+static inline bool indigo_cuda_stretch_rgb_16(const uint16_t *input, int width, int height, uint8_t *output, double shadows, double midtones, double highlights, const float *coef) { return false; }
 
 #endif
 

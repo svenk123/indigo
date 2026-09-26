@@ -39,6 +39,7 @@ struct indigo_cuda_context {
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static int state = 0; // 0 - not checked yet, 1 - available, -1 - not available
+static volatile bool enabled = true;
 static char device_name[256] = "";
 static int compute_capability = 0;
 static indigo_cuda_context *contexts[INDIGO_CUDA_MAX_CONTEXTS];
@@ -90,7 +91,14 @@ static void detect(void) {
 	indigo_log("CUDA: %s, compute capability %d.%d, %d MB", device_name, properties.major, properties.minor, (int)(properties.totalGlobalMem >> 20));
 }
 
+extern "C" void indigo_cuda_set_enabled(bool value) {
+	enabled = value;
+}
+
 extern "C" bool indigo_cuda_available(void) {
+	if (!enabled) {
+		return false;
+	}
 	pthread_mutex_lock(&mutex);
 	if (state == 0) {
 		detect();
@@ -142,6 +150,10 @@ extern "C" void indigo_cuda_release(indigo_cuda_context *context) {
 	pthread_mutex_lock(&mutex);
 	context->in_use = false;
 	pthread_mutex_unlock(&mutex);
+}
+
+extern "C" void *indigo_cuda_stream(indigo_cuda_context *context) {
+	return context ? (void *)context->stream : NULL;
 }
 
 extern "C" void *indigo_cuda_buffer(indigo_cuda_context *context, int slot, size_t size) {
