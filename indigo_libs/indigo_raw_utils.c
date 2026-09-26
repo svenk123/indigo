@@ -2297,6 +2297,73 @@ static int luminance_comparator(const void *item_1, const void *item_2) {
 	return 0;
 }
 
+/* Star peak: brighter than the threshold and not a hot pixel or a line (checked by the median of the neighbours) */
+static inline bool is_star_peak(const uint16_t *buf, const int off, const int width, const uint32_t threshold) {
+	return buf[off] > threshold &&
+		median3(buf[off - 1], buf[off], buf[off + 1]) > threshold &&
+		median3(buf[off - width], buf[off], buf[off + width]) > threshold &&
+		median3(buf[off - width - 1], buf[off], buf[off + width + 1]) > threshold &&
+		median3(buf[off - width + 1], buf[off], buf[off + width - 1]) > threshold;
+}
+
+/* Offsets of all star peaks of the image, brightest first, pixels of the same brightness in scan order.
+   Every star found is cleared from the image, which can only lower pixel values - a pixel that is not a star
+   peak now never becomes one again. So the list has to be walked only once, re-checking each entry against
+   the current (partially cleared) image, instead of scanning the whole frame for every star.
+   Returns NULL if there is not enough memory (the caller falls back to scanning the frame). */
+static int *find_star_peaks(const uint16_t *buf, const int width, const int clip_edge, const int clip_width, const int clip_height, const uint32_t threshold, int *count) {
+	int capacity = 1024;
+	int n = 0;
+	int *list = malloc(capacity * sizeof(int));
+	unsigned int *bins = calloc(65536, sizeof(unsigned int));
+	int *sorted = NULL;
+	if (list == NULL || bins == NULL) {
+		goto fail;
+	}
+	if (threshold < 65535) {
+		for (int j = clip_edge; j < clip_height; j++) {
+			for (int i = clip_edge; i < clip_width; i++) {
+				int off = j * width + i;
+				if (is_star_peak(buf, off, width, threshold)) {
+					if (n == capacity) {
+						int *grown = realloc(list, 2 * capacity * sizeof(int));
+						if (grown == NULL) {
+							goto fail;
+						}
+						list = grown;
+						capacity *= 2;
+					}
+					list[n++] = off;
+					bins[buf[off]]++;
+				}
+			}
+		}
+	}
+	sorted = malloc((n > 0 ? n : 1) * sizeof(int));
+	if (sorted == NULL) {
+		goto fail;
+	}
+	/* stable counting sort by brightness, descending */
+	unsigned int position = 0;
+	for (int value = 65535; value >= 0; value--) {
+		unsigned int bin_size = bins[value];
+		bins[value] = position;
+		position += bin_size;
+	}
+	for (int k = 0; k < n; k++) {
+		sorted[bins[buf[list[k]]]++] = list[k];
+	}
+	free(list);
+	free(bins);
+	*count = n;
+	return sorted;
+fail:
+	free(list);
+	free(bins);
+	free(sorted);
+	return NULL;
+}
+
 /* With radius < 3, no precise star positins will be determined */
 indigo_result indigo_find_stars_precise(indigo_raw_type raw_type, const void *data, const uint16_t radius, const int width, const int height, const int stars_max, indigo_star_detection star_list[], int *stars_found) {
 	if (data == NULL || star_list == NULL || stars_found == NULL) return INDIGO_FAILED;
@@ -2398,6 +2465,9 @@ indigo_result indigo_find_stars_precise(indigo_raw_type raw_type, const void *da
 	
 	indigo_star_detection star = { 0 };
 	int divider = (width > height) ? height2 : width2;
+	int peak_count = 0;
+	int next_peak = 0;
+	int *peaks = find_star_peaks(buf, width, clip_edge, clip_width, clip_height, threshold, &peak_count);
 	while (lmax > threshold) {
 		lmax = threshold;
 		star.x = 0;
@@ -2406,21 +2476,34 @@ indigo_result indigo_find_stars_precise(indigo_raw_type raw_type, const void *da
 		star.luminance = 0;
 		star.oversaturated = 0;
 		
-		for (int j = clip_edge; j < clip_height; j++) {
-			for (int i = clip_edge; i < clip_width; i++) {
-				int off = j * width + i;
-				if (
-						buf[off] > lmax &&
-						/* also check median of the neighbouring pixels to avoid hot pixels and lines */
-						median3(buf[off - 1], buf[off], buf[off + 1]) > threshold &&
-						median3(buf[off - width], buf[off], buf[off + width]) > threshold &&
-						median3(buf[off - width - 1], buf[off], buf[off + width + 1]) > threshold &&
-						median3(buf[off - width + 1], buf[off], buf[off + width - 1]) > threshold
-						) {
-							lmax = buf[off];
-							star.x = i;
-							star.y = j;
-						}
+		if (peaks) {
+			/* brightest remaining star peak, entries destroyed by clearing the previous stars are skipped for good */
+			while (next_peak < peak_count) {
+				int off = peaks[next_peak++];
+				if (is_star_peak(buf, off, width, threshold)) {
+					lmax = buf[off];
+					star.x = off % width;
+					star.y = off / width;
+					break;
+				}
+			}
+		} else {
+			for (int j = clip_edge; j < clip_height; j++) {
+				for (int i = clip_edge; i < clip_width; i++) {
+					int off = j * width + i;
+					if (
+							buf[off] > lmax &&
+							/* also check median of the neighbouring pixels to avoid hot pixels and lines */
+							median3(buf[off - 1], buf[off], buf[off + 1]) > threshold &&
+							median3(buf[off - width], buf[off], buf[off + width]) > threshold &&
+							median3(buf[off - width - 1], buf[off], buf[off + width + 1]) > threshold &&
+							median3(buf[off - width + 1], buf[off], buf[off + width - 1]) > threshold
+							) {
+								lmax = buf[off];
+								star.x = i;
+								star.y = j;
+							}
+				}
 			}
 		}
 		if (lmax > threshold) {
@@ -2542,6 +2625,7 @@ indigo_result indigo_find_stars_precise(indigo_raw_type raw_type, const void *da
 			break;
 		}
 	}
+	free(peaks);
 	free(buf);
 	
 	qsort(star_list, found, sizeof(indigo_star_detection), luminance_comparator);

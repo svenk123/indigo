@@ -15,7 +15,7 @@ Baseline auf dem Entwicklungsgerät (Jetson Nano, 2 CPU-Kerne sichtbar, CUDA 10.
 | `indigo_stretch_16` (Mono) | 173 ms | `indigo_raw_to_jpeg` |
 | **libjpeg-Kompression RGB8, Qualität 90** | **1180 ms** | `indigo_raw_to_jpeg` |
 | `indigo_contrast` / `indigo_stddev_*` | 116 ms | Autofokus (Imager-Agent) |
-| **`indigo_find_stars_precise`** (100 Sterne) | **3341 ms** | Guider- und Imager-Agent |
+| **`indigo_find_stars_precise`** (100 Sterne) | **3341 ms** (nach Phase 1.1: 114 ms) | Guider- und Imager-Agent |
 | `indigo_binarize` | 54 ms | Bahtinov |
 | `indigo_equalize_bayer_channels` | 48 ms | Guider- und Imager-Agent |
 | `indigo_donuts_frame_digest`, Region 256×256 / Vollbild | 20 ms / 3282 ms | Guider-Agent |
@@ -107,7 +107,7 @@ Ein `CUDA=yes`-Build von `libindigo` braucht `libcudart` beim Start. Das ist bew
 - Noch nicht gemacht: Messung mit echten Kameraframes, `nvprof`/`tegrastats`, Messung auf einem Orin.
 
 **Phase 1: CPU-Engpässe (ohne CUDA, größter Hebel)**
-1. `indigo_find_stars_precise` / `indigo_find_stars_precise_clipped`: einmaliger Durchlauf mit Kandidatenliste statt Vollbild-Scan pro Stern. Das Ergebnis bleibt identisch, weil zwischen den Durchläufen nur Pixel auf 0 gesetzt werden und die Bedingungen dadurch nie wieder wahr werden. Test gegen die Originalfunktion wie bei den Stretch-Parametern.
+1. **Erledigt:** `indigo_find_stars_precise` (und damit `_clipped`, `_filtered`, `indigo_find_stars`): einmaliger Durchlauf mit nach Helligkeit sortierter Kandidatenliste statt Vollbild-Scan pro Stern (`find_star_peaks()` in `indigo_raw_utils.c`). Bei zu wenig Speicher fällt die Funktion auf den alten Scan zurück. Test `indigo_test/cuda/test_find_stars.c` gegen eine Kopie der Originalfunktion: 1219 Vergleiche ohne Abweichung (8/16 Bit, Radius 0–8, verschiedene `stars_max`, leere, konstante, gesättigte, dichte und Hot-Line-Bilder). Zeit auf dem 12-MP-Bild mit 100 Sternen und Radius 4: 3843 ms → 114 ms. Zusätzlicher Speicher: 8 Byte je Kandidat (in üblichen Bildern einige tausend).
 2. JPEG-Kompression messen und verbessern: (a) libjpeg-turbo mit NEON. Im System liegt die Laufzeit 1.5.2 ohne Entwicklungs-Header, das gebündelte libjpeg 9.2 ist ohne SIMD; (b) Hardware-JPEG-Encoder der Jetson-Plattform. Ob und wie der unter JetPack 7.2 für Nano-, Orin- und Thor-Klassen nutzbar ist, ist nicht geprüft. Entscheidend, weil er Puffer im GPU-Speicher übernehmen kann und damit zu Phase 2 passt.
 3. Bestehenden Lesefehler in `indigo_compute_stretch_params` beheben: Bei ungerader Bildhöhe lesen die Bayer-Ebenen mit Zeilen-Offset (`buffer + width…`) bis zu 301 Werte hinter den Puffer.
 

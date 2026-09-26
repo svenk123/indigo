@@ -1,4 +1,4 @@
-# Tests and benchmarks for the (optional) CUDA acceleration.
+# Tests and benchmarks for the (optional) CUDA acceleration and for the CPU optimisations that precede it.
 #
 #	make test               run the tests against build/lib/libindigo.a
 #	make bench              CPU baseline / GPU comparison on realistic synthetic frames
@@ -14,7 +14,7 @@ OPT = -O2 -g -pthread
 LIBS = $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libjpeg.a $(BUILD_LIB)/libtiff.a $(BUILD_LIB)/libtiffxx.a $(BUILD_LIB)/libraw.a $(BUILD_LIB)/libhidapi-libusb.a \
 	$(filter -L% -lcudart,$(LDFLAGS)) -lstdc++ -lm -lrt -lusb-1.0 -lz -ldl
 
-TESTS = test_stretch_params test_cuda_api
+TESTS = test_stretch_params test_find_stars test_cuda_api
 BENCHES = bench_cpu
 
 .PHONY: all test bench clean
@@ -29,6 +29,9 @@ bench: $(BENCHES)
 
 test_stretch_params: test_stretch_params.cpp test_image.h $(BUILD_LIB)/libindigo.a
 	$(CXX) $(OPT) $(DEFINES) $(INCLUDES) -std=gnu++11 -o $@ $< $(LIBS)
+
+test_find_stars: test_find_stars.c test_image.h $(BUILD_LIB)/libindigo.a
+	$(CC) $(OPT) $(DEFINES) $(INCLUDES) -std=gnu11 -o $@ $< $(LIBS)
 
 test_cuda_api: test_cuda_api.c $(BUILD_LIB)/libindigo.a
 	$(CC) $(OPT) $(DEFINES) $(INCLUDES) -std=gnu11 -o $@ $< $(LIBS)
