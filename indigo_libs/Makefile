@@ -45,7 +45,10 @@ else
 endif
 
 %.o: %.cu
-	nvcc $(NVCCFLAGS) -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
+
+# rebuild all objects if CUDA is switched on or off (see the top level Makefile)
+$(LIBINDIGO_FILES): $(wildcard $(INDIGO_ROOT)/.cuda_config)
 
 .PHONY: all clean
 
@@ -54,7 +57,12 @@ all:	status libindigo
 status:
 	@printf "\nindigo_libs -------------------------\n\n"
 	@printf "libusb-1.0: $(LIBUSB)\n"
-	@printf "libhidapi: $(LIBHIDAPI)\n\n"
+	@printf "libhidapi: $(LIBHIDAPI)\n"
+ifeq ($(INDIGO_CUDA),)
+	@printf "CUDA: disabled (enable with make CUDA=yes)\n\n"
+else
+	@printf "CUDA: $(INDIGO_CUDA) ($(shell $(NVCC) --version | sed -n 's/.*release \([0-9.]*\).*/nvcc \1/p'))\n\n"
+endif
 
 install: status libindigo
 	cp $(BUILD_LIB)/libindigo.$(SOEXT) $(INSTALL_LIB)

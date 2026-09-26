@@ -56,6 +56,55 @@ EXCLUDED_DRIVERS =
 
 #---------------------------------------------------------------------
 #
+#	Optional CUDA support (Linux only, NVIDIA Jetson / Orin)
+#
+#	make CUDA=yes              build with CUDA (environment is checked first)
+#	make CUDA=no               build without CUDA (default)
+#	make cuda-check            print a full report of the CUDA environment
+#
+#	CUDA_HOME=<dir>            CUDA toolkit location (default /usr/local/cuda)
+#	CUDA_ARCH="<sm> ..."       override SM architecture detection, e.g. CUDA_ARCH=87
+#	CUDA_STD=<c++NN>           C++ standard for nvcc (default c++11)
+#	CUDA_SKIP_PKG_CHECK=1      skip the dpkg package checks (non-dpkg CUDA installation)
+#
+#	Switching CUDA on or off rebuilds the objects of indigo_libs automatically.
+#
+#---------------------------------------------------------------------
+
+CUDA ?= no
+CUDA_HOME ?= /usr/local/cuda
+CUDA_ARCH ?=
+CUDA_STD ?= c++11
+CUDA_SKIP_PKG_CHECK ?=
+
+CUDA_ENV_CHECK = $(INDIGO_ROOT)/tools/check_cuda_env.sh
+CUDA_ARGS = --cuda-home "$(CUDA_HOME)" --arch "$(CUDA_ARCH)" --std $(CUDA_STD) $(if $(CUDA_SKIP_PKG_CHECK),--skip-packages)
+CUDA_STAMP = $(INDIGO_ROOT)/.cuda_config
+comma := ,
+
+CUDA_ENABLED =
+ifneq ($(filter yes YES Yes y Y 1 on ON true TRUE,$(strip $(CUDA))),)
+ifeq ($(OS),Windows_NT)
+$(error CUDA=yes is supported on Linux only)
+endif
+ifeq ($(filter cuda-check,$(MAKECMDGOALS)),)
+# the check prints its findings on stderr and CUDA_OK=1 on stdout if everything is fine
+CUDA_ENV := $(shell $(CUDA_ENV_CHECK) $(CUDA_ARGS) env)
+ifeq ($(filter CUDA_OK=1,$(CUDA_ENV)),)
+$(error CUDA=yes requested but the CUDA environment check failed (see messages above). Run 'make cuda-check' for a full report or build without CUDA: 'make CUDA=no')
+endif
+CUDA_ENABLED = yes
+CUDA_HOME_DETECTED = $(patsubst CUDA_HOME=%,%,$(filter CUDA_HOME=%,$(CUDA_ENV)))
+CUDA_INCDIR = $(patsubst CUDA_INCDIR=%,%,$(filter CUDA_INCDIR=%,$(CUDA_ENV)))
+CUDA_LIBDIR = $(patsubst CUDA_LIBDIR=%,%,$(filter CUDA_LIBDIR=%,$(CUDA_ENV)))
+CUDA_ARCH_LIST = $(subst $(comma), ,$(patsubst CUDA_ARCHS=%,%,$(filter CUDA_ARCHS=%,$(CUDA_ENV))))
+# machine code for every architecture plus PTX of the last one for forward compatibility
+CUDA_GENCODE = $(foreach a,$(CUDA_ARCH_LIST),-gencode arch=compute_$(a)$(comma)code=sm_$(a)) -gencode arch=compute_$(lastword $(CUDA_ARCH_LIST))$(comma)code=compute_$(lastword $(CUDA_ARCH_LIST))
+endif
+endif
+
+#---------------------------------------------------------------------
+#
 #	Platform detection
 #
 #---------------------------------------------------------------------
@@ -120,15 +169,16 @@ else
 		endif
 		CC = gcc
 		AR = ar
-		INDIGO_CUDA = $(wildcard /usr/local/cuda)
-		ifeq ($(INDIGO_CUDA),)
-			CUDA_BUILD = ""
+		INDIGO_CUDA =
+		CUDA_BUILD =
+		ifeq ($(CUDA_ENABLED),)
 			LDFLAGS = -lm -lrt -lusb-1.0 -pthread -L$(BUILD_LIB) -Wl,-rpath=\\\$$\$$ORIGIN/../lib,-rpath=\\\$$\$$ORIGIN/../drivers,-rpath=.
 		else
+			INDIGO_CUDA = $(CUDA_HOME_DETECTED)
 			NVCC = $(INDIGO_CUDA)/bin/nvcc
-			CUDA_LIBS = $(addprefix -L,$(wildcard $(INDIGO_CUDA)/lib*))
-			CUDA_BUILD = "-DINDIGO_CUDA"
-			NVCCFLAGS = $(DEBUG_BUILD) -Xcompiler -fPIC -O3 -isystem $(INDIGO_CUDA)/include -isystem $(INDIGO_ROOT)/indigo_libs -I $(INDIGO_ROOT)/indigo_drivers -I $(INDIGO_ROOT)/indigo_linux_drivers -I $(BUILD_INCLUDE) -std=c++11 -DINDIGO_LINUX
+			CUDA_LIBS = -L$(CUDA_LIBDIR)
+			CUDA_BUILD = -DINDIGO_CUDA
+			NVCCFLAGS = $(DEBUG_BUILD) -Xcompiler -fPIC -O3 $(CUDA_GENCODE) -isystem $(CUDA_INCDIR) -isystem $(INDIGO_ROOT)/indigo_libs -I $(INDIGO_ROOT)/indigo_drivers -I $(INDIGO_ROOT)/indigo_linux_drivers -I $(BUILD_INCLUDE) -std=$(CUDA_STD) -DINDIGO_LINUX $(CUDA_BUILD)
 			LDFLAGS = -lm -lrt -lusb-1.0 -pthread -lcudart $(CUDA_LIBS) -L$(BUILD_LIB) -Wl,-rpath=\\\$$\$$ORIGIN/../lib,-rpath=\\\$$\$$ORIGIN/../drivers,-rpath=.
 		endif
 		ifeq ($(ARCH_DETECTED),arm)
@@ -143,7 +193,7 @@ else
 	endif
 endif
 
-.PHONY: init all clean clean-all
+.PHONY: init all clean clean-all cuda-check FORCE
 
 all:	init $(BUILD_LIB)/libindigo.$(SOEXT)
 	@$(MAKE)	-C indigo_libs all
@@ -341,7 +391,20 @@ init: Makefile.inc
 	install -d -m 0755 $(BUILD_INCLUDE)
 	install -d -m 0755 $(BUILD_SHARE)/indigo
 
-Makefile.inc: Makefile
+# The stamp is rewritten only if the CUDA configuration changes. Makefile.inc and the objects
+# of indigo_libs depend on it, so they are regenerated / rebuilt exactly when CUDA is switched.
+FORCE:
+
+$(CUDA_STAMP): FORCE
+	@echo 'CUDA=$(if $(CUDA_ENABLED),yes,no) HOME=$(INDIGO_CUDA) ARCHS=$(CUDA_ARCH_LIST) STD=$(CUDA_STD)' | cmp -s - $@ || echo 'CUDA=$(if $(CUDA_ENABLED),yes,no) HOME=$(INDIGO_CUDA) ARCHS=$(CUDA_ARCH_LIST) STD=$(CUDA_STD)' > $@
+
+cuda-check:
+	@$(CUDA_ENV_CHECK) $(CUDA_ARGS) check
+
+Makefile.inc: Makefile $(CUDA_STAMP)
+ifneq ($(CUDA_ENABLED),)
+	@$(CUDA_ENV_CHECK) $(CUDA_ARGS) check
+endif
 	rm -f Makefile.inc
 	@printf "# File is created automatically by top level Makefile, don't edit\n\n" > Makefile.inc
 	@printf "INDIGO_VERSION = $(INDIGO_VERSION)\n" >> Makefile.inc

@@ -36,3 +36,7 @@ indigo.xcodeproj/xcshareddata/
 indigo_libs/indigo_build.c
 **/.AppleDouble
 indigo_libs/externals/libtiff/tools/tiffgt
+/.cuda_config
+/indigo_test/cuda/test_stretch_params
+/indigo_test/cuda/test_cuda_api
+/indigo_test/cuda/bench_cpu
