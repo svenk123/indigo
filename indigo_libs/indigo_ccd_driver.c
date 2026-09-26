@@ -1048,6 +1048,14 @@ void indigo_raw_to_jpeg(indigo_device *device, void *data_in, int frame_width, i
 	}
 	jpeg_set_defaults(&cinfo.pub);
 	jpeg_set_quality(&cinfo.pub, CCD_JPEG_SETTINGS_QUALITY_ITEM->number.target, true);
+	/* preview speed: classic 2x2 chroma average + 8x8 DCT instead of the 16x16 DCT of libjpeg 9 (1.13x) and the
+	   floating point DCT (1.24x), together 1.63x for the same PSNR, see CUDA_PLAN.md */
+#if JPEG_LIB_VERSION >= 80
+	cinfo.pub.do_fancy_downsampling = FALSE;
+#endif
+#ifdef DCT_FLOAT_SUPPORTED
+	cinfo.pub.dct_method = JDCT_FLOAT;
+#endif
 	JSAMPROW row_pointer[1];
 	jpeg_start_compress(&cinfo.pub, TRUE);
 	while (cinfo.pub.next_scanline < cinfo.pub.image_height) {
