@@ -13,7 +13,7 @@ Baseline auf dem Entwicklungsgerät (Jetson Nano, 2 CPU-Kerne sichtbar, CUDA 10.
 | Stretch-Parameter 16 Bit RGGB | 17 ms (vorher 78 ms, siehe 3) | `indigo_raw_to_jpeg` |
 | `indigo_stretch_16_rggb` (Debayer + Stretch) | 459 ms | `indigo_raw_to_jpeg` (jedes Preview-Bild) |
 | `indigo_stretch_16` (Mono) | 173 ms | `indigo_raw_to_jpeg` |
-| **libjpeg-Kompression RGB8, Qualität 90** | **1180 ms** | `indigo_raw_to_jpeg` |
+| **libjpeg-Kompression RGB8, Qualität 90** | **1190–1430 ms** (schwankt) | `indigo_raw_to_jpeg` |
 | `indigo_contrast` / `indigo_stddev_*` | 116 ms | Autofokus (Imager-Agent) |
 | **`indigo_find_stars_precise`** (100 Sterne) | **3341 ms** (nach Phase 1.1: 114 ms) | Guider- und Imager-Agent |
 | `indigo_binarize` | 54 ms | Bahtinov |
@@ -108,7 +108,32 @@ Ein `CUDA=yes`-Build von `libindigo` braucht `libcudart` beim Start. Das ist bew
 
 **Phase 1: CPU-Engpässe (ohne CUDA, größter Hebel)**
 1. **Erledigt:** `indigo_find_stars_precise` (und damit `_clipped`, `_filtered`, `indigo_find_stars`): einmaliger Durchlauf mit nach Helligkeit sortierter Kandidatenliste statt Vollbild-Scan pro Stern (`find_star_peaks()` in `indigo_raw_utils.c`). Bei zu wenig Speicher fällt die Funktion auf den alten Scan zurück. Test `indigo_test/cuda/test_find_stars.c` gegen eine Kopie der Originalfunktion: 1219 Vergleiche ohne Abweichung (8/16 Bit, Radius 0–8, verschiedene `stars_max`, leere, konstante, gesättigte, dichte und Hot-Line-Bilder). Zeit auf dem 12-MP-Bild mit 100 Sternen und Radius 4: 3843 ms → 114 ms. Zusätzlicher Speicher: 8 Byte je Kandidat (in üblichen Bildern einige tausend).
-2. JPEG-Kompression messen und verbessern: (a) libjpeg-turbo mit NEON. Im System liegt die Laufzeit 1.5.2 ohne Entwicklungs-Header, das gebündelte libjpeg 9.2 ist ohne SIMD; (b) Hardware-JPEG-Encoder der Jetson-Plattform. Ob und wie der unter JetPack 7.2 für Nano-, Orin- und Thor-Klassen nutzbar ist, ist nicht geprüft. Entscheidend, weil er Puffer im GPU-Speicher übernehmen kann und damit zu Phase 2 passt.
+2. **JPEG-Kompression: mit dem gebündelten libjpeg 9.2 gemessen** (`make -C indigo_test/cuda bench`, Programm `bench_jpeg`; libjpeg-turbo und Hardware-Encoder sind bewusst nicht gemessen). Der Encoder wird heute nur mit `jpeg_set_defaults` und der Qualität konfiguriert. Die Basiszeit schwankt zwischen Läufen (1190–1430 ms für RGB, wohl Takt/Temperatur), Unterschiede unter etwa 10 % sind Rauschen.
+
+   Profil (`gprof`, RGB): DCT-Arbeit 67 % (`forward_DCT`, `jpeg_fdct_16x16`, `jpeg_fdct_islow`), Farbumrechnung `rgb_ycc_convert` 17 %, Huffman `encode_mcu_huff` 15 %. Grund für `jpeg_fdct_16x16`: libjpeg 9 verlegt die Chroma-Unterabtastung standardmäßig in die DCT (`do_fancy_downsampling = TRUE`). Bei Graustufen dominiert dagegen Huffman mit 50 %, weil das nach dem Stretch verrauschte Bild 4,3 MB Ausgabe erzeugt.
+
+   | RGB 12 MP, Qualität 90 | Zeit | Größe | PSNR | Faktor |
+   |---|---|---|---|---|
+   | heute (Standard) | 1424 ms | 800 KB | 43,25 dB | 1,00 |
+   | Qualität 75 / 95 | 1328 / 1541 ms | 279 / 1502 KB | 42,58 / 43,73 dB | 1,07 / 0,92 |
+   | `JDCT_IFAST` | 1343 ms | 804 KB | 43,20 dB | 1,06 |
+   | `JDCT_FLOAT` | 1152 ms | 775 KB | 43,27 dB | **1,24** |
+   | optimierte Huffman-Tabellen | 1333 ms | 668 KB | 43,25 dB | 1,07 |
+   | Chroma 4:4:4 | 2225 ms | 1261 KB | 44,68 dB | 0,64 |
+   | `do_fancy_downsampling = FALSE` | 1263 ms | 801 KB | 43,18 dB | 1,13 |
+   | `do_fancy_downsampling = FALSE` + `JDCT_FLOAT` | 873 ms | 774 KB | 43,20 dB | **1,63** |
+   | fertige YCbCr-4:2:0-Ebenen (`jpeg_write_raw_data`), ISLOW | 823 ms | 801 KB | 43,19 dB | **1,73** |
+   | fertige YCbCr-4:2:0-Ebenen, `JDCT_FLOAT` | 430 ms | 774 KB | 43,21 dB | **3,31** |
+
+   Graustufen (Mono-Kameras): 1039 ms, 4322 KB. `JDCT_IFAST` bringt nur 7 %, die Zeit hängt an der Huffman-Codierung des verrauschten Bildes.
+
+   Schlussfolgerungen:
+   - Kostenlose Einzeiler in `indigo_raw_to_jpeg`: `do_fancy_downsampling = FALSE` und `dct_method = JDCT_FLOAT` bringen zusammen 1,63× bei gleichem PSNR. Sie sind noch **nicht umgesetzt**, weil sie die JPEG-Bytes ändern (Chroma-Filter, Gleitkomma-DCT ist plattformabhängig).
+   - Der größte Hebel ist, Farbumrechnung und Unterabtastung aus libjpeg zu entfernen: 3,3× für den libjpeg-Teil. Die Umrechnung auf der CPU kostet allerdings 511 ms (ein Thread) und würde den Gewinn aufheben. Sinnvoll ist sie nur, wenn der Stretch-Kernel der GPU (Phase 2) direkt Y-, Cb-, Cr-Ebenen (Cb/Cr halbiert) erzeugt. Für Phase 2 heißt das: Ausgabe nicht als RGB8, sondern als YCbCr-4:2:0 planen.
+   - Im Raw-Modus erwartet libjpeg 9 Chroma nur dann in halber Auflösung, wenn `do_fancy_downsampling = FALSE` gesetzt ist. Sonst erwartet es volle Auflösung (16×16-DCT). Das gilt nur für diese Bibliotheksversion.
+   - Qualität, `JDCT_IFAST` und optimierte Tabellen bringen für die Zeit nichts.
+   - Nicht gemessen: Mehrfaden-Kompression (2 CPU-Kerne sichtbar), libjpeg-turbo, Hardware-Encoder.
+
 3. **Erledigt:** Lesefehler in `indigo_compute_stretch_params` behoben. Die Bayer-Ebenen mit Zeilen- oder Spalten-Offset (`buffer + width…`, `buffer + 1`) wurden mit der vollen Bildgröße abgetastet und lasen bei ungerader Höhe bis zu 301 Werte hinter den Puffer, bei bestimmten Breiten (`(width - 1) % (2 * sample_by) == 0`) ein Element dahinter bzw. in die nächste Zeile. Das Template bekommt jetzt den Offset getrennt und begrenzt Zeilen und Spalten der Ebene. **Verhaltensänderung:** Bei diesen Bildgrößen ändern sich die Stretch-Parameter minimal, weil nicht mehr Speicherinhalt hinter dem Bild in den Median eingeht. Bei allen anderen Größen (z. B. gerade Höhe) bleibt das Ergebnis bitgleich. Der Test extrahiert jede Ebene explizit und vergleicht mit der Originalmathematik; die Puffer enden vor einer Guard-Page. Gegenprobe: Mit dem alten Code stürzt der Test ab.
 
 **Phase 2: Stretch-Pipeline auf der GPU** (`indigo_stretch.cu`)

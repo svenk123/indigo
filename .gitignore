@@ -41,3 +41,4 @@ indigo_libs/externals/libtiff/tools/tiffgt
 /indigo_test/cuda/test_cuda_api
 /indigo_test/cuda/bench_cpu
 /indigo_test/cuda/test_find_stars
+/indigo_test/cuda/bench_jpeg
