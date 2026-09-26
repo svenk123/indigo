@@ -1,0 +1,43 @@
+indigo_server web resources: Imager CCD controls, second Imager Agent instance,
+mount star chart colors, exposure presets, crosshair overlay, and a stale-build fix
+
+- imager.html, imager2.html: add CCD_GAIN ("Gain") and CCD_OFFSET ("Offset")
+  input fields to the camera controls, next to CCD_FRAME_TYPE/CCD_MODE.
+
+- imager2.html: add a second Imager page bound to the "Imager Agent #2"
+  device (created via ADDITIONAL_INSTANCES on the Imager Agent), mirroring
+  imager.html. Register it as a new server resource ("/imager2.html") in
+  indigo_server.c and as a build dependency in the Makefile.
+
+- ctrl.html, imager.html, imager2.html, mng.html, script.html, guider.html,
+  mount.html: add a second "Imager #2" icon to the navbar, shown only when
+  devices['Imager Agent #2'] is defined (i.e. the additional instance is
+  active).
+
+- mount.html: recolor the Celestial.js star chart - dark blue background
+  (#001a33) instead of white, white stars instead of black, and a gray
+  (#808080) mount target crosshair instead of blue.
+
+- imager.html, imager2.html: extend the exposure time dropdown presets from
+  [0.001, 0.01, 0.1, 1, 10, 100] to
+  [0.001, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 120, 180,
+  300, 600].
+
+- imager.html, imager2.html: add a crosshair toggle button (top-right of the
+  image container) that overlays a red, 2px crosshair on the preview image;
+  off by default.
+
+- imager.html, imager2.html: move the histogram preview out of the image
+  overlay into its own card in the left column, between the CCD card and
+  the Filter Wheel card, instead of floating on top of the preview image.
+
+- indigo.js: fix a crash in changeProperty() ("Cannot read properties of
+  undefined (reading 'hints')") when the target property is not yet cached
+  client-side, e.g. when the Imager Agent auto-enables CCD_PREVIEW right
+  after AGENT_IMAGER_BATCH is defined.
+
+- Makefile: fix indigo_server.o not being recompiled when only resource
+  files changed. indigo_server.c #includes the generated resource/*.data
+  files, but the object file only depended on indigo_server.c, so editing
+  HTML/JS resources without touching indigo_server.c silently linked a
+  stale binary. indigo_server.o now depends on the ctrlpanel target.

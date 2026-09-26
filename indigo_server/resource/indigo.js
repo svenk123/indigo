@@ -120,7 +120,9 @@ function enumerateProperties() {
 }
 
 function changeProperty(deviceName, propertyName, values) {
-	var hints = INDIGO.devices[deviceName][propertyName].hints;
+	var device = INDIGO.devices[deviceName];
+	var cachedProperty = device != null ? device[propertyName] : null;
+	var hints = cachedProperty != null ? cachedProperty.hints : null;
 	if (hints != null) {
 		hints = hints.split(";")
 		for (var i in hints) {

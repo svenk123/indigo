@@ -1,1 +1,0 @@
-../ccd_qhy/indigo_ccd_qhy_main.c

@@ -1,2 +1,0 @@
-FIRMWARE_TARGET = $(INSTALL_FIRMWARE)/qhy
-LDFLAGS += -lstdc++

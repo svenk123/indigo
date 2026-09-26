@@ -30,6 +30,9 @@
 							<a class="nav-link pr-0" href="imager.html" data-toggle="tooltip" title="Imager">
 								<img src="imager.png" width="40" height="40" class="d-inline-block align-middle mr-0" alt=""/>
 							</a>
+							<a v-if="devices['Imager Agent #2'] != null" class="nav-link pr-0" href="imager2.html" data-toggle="tooltip" title="Imager #2">
+								<img src="imager.png" width="40" height="40" class="d-inline-block align-middle mr-0" alt=""/>
+							</a>
 							<a class="nav-link pr-0" href="mount.html" data-toggle="tooltip" title="Mount">
 								<img src="mount.png" width="40" height="40" class="d-inline-block align-middle mr-0" alt=""/>
 							</a>
@@ -57,8 +60,10 @@
 										<template v-if="findProperty('Imager Agent', 'AGENT_START_PROCESS') != null">
 											<indigo-select-item :property="findProperty('Imager Agent', 'CCD_FRAME_TYPE')"></indigo-select-item>
 											<indigo-select-item :property="findProperty('Imager Agent', 'CCD_MODE')"></indigo-select-item>
+											<indigo-edit-number :property="findProperty('Imager Agent', 'CCD_GAIN')" :name="'GAIN'" :icon="'glyphicons-equalizer'" :tooltip="'Gain'"></indigo-edit-number>
+											<indigo-edit-number :property="findProperty('Imager Agent', 'CCD_OFFSET')" :name="'OFFSET'" :icon="'glyphicons-adjust'" :tooltip="'Offset'"></indigo-edit-number>
 											<indigo-edit-number :property="findProperty('Imager Agent', 'CCD_TEMPERATURE')" :name="'TEMPERATURE'" :icon="'glyphicons-temperature-low'" :values="['Off', 0, -10, -15, -20, -30]" :enabler="findProperty('Imager Agent', 'CCD_COOLER')" :tooltip="'Cooling state'"></indigo-edit-number>
-											<indigo-edit-number :property="findProperty('Imager Agent', 'AGENT_IMAGER_BATCH')" :name="'EXPOSURE'" :icon="'glyphicons-stopwatch'" :values="[0.001, 0.01, 0.1, 1, 10, 100]" :tooltip="'Exposure time'"></indigo-edit-number>
+											<indigo-edit-number :property="findProperty('Imager Agent', 'AGENT_IMAGER_BATCH')" :name="'EXPOSURE'" :icon="'glyphicons-stopwatch'" :values="[0.001, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 120, 180, 300, 600]" :tooltip="'Exposure time'"></indigo-edit-number>
 											<indigo-edit-number :property="findProperty('Imager Agent', 'AGENT_IMAGER_BATCH')" :name="'DELAY'" :icon="'glyphicons-hourglass'" :values="[0, 5, 10, 15, 20, 30]" :tooltip="'Delay between exposures'"></indigo-edit-number>
 											<indigo-edit-number :property="findProperty('Imager Agent', 'AGENT_IMAGER_BATCH')" :name="'COUNT'" :icon="'glyphicons-repeat'" :values="[1, 5, 10, 15, 20, 30]" :tooltip="'Image count'"></indigo-edit-number>
 											<indigo-edit-text :property="findProperty('Imager Agent', 'CCD_LOCAL_MODE')" :name="'DIR'" :icon="'glyphicons-folder-open'" :tooltip="'Folder for saved images'"></indigo-edit-text>
@@ -99,6 +104,11 @@
 									</div>
 								</div>
 							</template>
+							<div class="card p-1 m-1 mt-2 bg-light">
+								<div class="card-block">
+									<img id="histogram" width="128" height="64" style="display:none"/>
+								</div>
+							</div>
 							<template v-if="findProperty('Imager Agent', 'FILTER_WHEEL_LIST') != null">
 								<div class="card p-1 m-1 mt-2 bg-light">
 									<div class="card-block d-flex flex-wrap">
@@ -169,10 +179,27 @@
 						</div>
 						<div class="col-md-8">
 							<div id="image_container" class="card p-1 m-1 bg-light" style="min-height: 10rem">
+								<div class="position-absolute d-flex" style="top: 8px; right: 8px; z-index: 10;">
+									<button id="zoom_in_button" class="btn btn-svg idle-state mr-1" onclick="zoomImageIn()" data-toggle="tooltip" title="Zoom In">
+										<span class="glyphicons glyphicons-zoom-in"></span>
+									</button>
+									<button id="zoom_out_button" class="btn btn-svg idle-state mr-1" onclick="zoomImageOut()" data-toggle="tooltip" title="Zoom Out">
+										<span class="glyphicons glyphicons-zoom-out"></span>
+									</button>
+									<button id="zoom_fit_button" class="btn btn-svg idle-state mr-1" onclick="zoomImageFit()" data-toggle="tooltip" title="Zoom to Fit">
+										<span class="glyphicons glyphicons-fit-frame-to-image"></span>
+									</button>
+									<button id="crosshair_button" class="btn btn-svg idle-state" onclick="toggleCrosshair()" data-toggle="tooltip" title="Toggle crosshair">
+										<span class="glyphicons glyphicons-target"></span>
+									</button>
+								</div>
 								<div class="card-block">
-									<div class="card p-0 border-0" style="display: none">
+									<div id="image_wrapper" class="card p-0 border-0" style="display: none">
 										<img id="image" class="img-fluid rounded"/>
-										<img id="histogram" width="128" height="64" style="position: absolute; top:10px;left:10px;display:none"/>
+										<svg id="crosshair_overlay" style="position: absolute; top:0; left:0; width:100%; height:100%; display:none; pointer-events:none;">
+											<line x1="50%" y1="0" x2="50%" y2="100%" stroke="#f00" stroke-width="2"/>
+											<line x1="0" y1="50%" x2="100%" y2="50%" stroke="#f00" stroke-width="2"/>
+										</svg>
 									</div>
 								</div>
 							</div>
@@ -436,6 +463,54 @@
 		repeatExposure = false;
 		changeProperty("Imager Agent", "AGENT_ABORT_PROCESS", { "ABORT": true });
 		changeProperty("Imager Agent", "CCD_ABORT_EXPOSURE", { "ABORT_EXPOSURE": true });
+	}
+
+	var crosshairEnabled = false;
+
+	function toggleCrosshair() {
+		crosshairEnabled = !crosshairEnabled;
+		if (crosshairEnabled) {
+			$("#crosshair_overlay").show();
+			$("#crosshair_button").removeClass("idle-state");
+			$("#crosshair_button").addClass("ok-state");
+		} else {
+			$("#crosshair_overlay").hide();
+			$("#crosshair_button").removeClass("ok-state");
+			$("#crosshair_button").addClass("idle-state");
+		}
+	}
+
+	var imageZoomLevels = [100, 125, 150, 200, 250, 300, 400];
+	var imageZoomIndex = 0;
+
+	function applyImageZoom() {
+		var percent = imageZoomLevels[imageZoomIndex];
+		if (percent <= 100) {
+			$("#image").css({ "width": "", "max-width": "" });
+			$("#image_wrapper").css({ "overflow": "", "max-height": "" });
+		} else {
+			$("#image").css({ "width": percent + "%", "max-width": "none" });
+			$("#image_wrapper").css({ "overflow": "auto", "max-height": "70vh" });
+		}
+	}
+
+	function zoomImageIn() {
+		if (imageZoomIndex < imageZoomLevels.length - 1) {
+			imageZoomIndex++;
+			applyImageZoom();
+		}
+	}
+
+	function zoomImageOut() {
+		if (imageZoomIndex > 0) {
+			imageZoomIndex--;
+			applyImageZoom();
+		}
+	}
+
+	function zoomImageFit() {
+		imageZoomIndex = 0;
+		applyImageZoom();
 	}
 
 	function focuser_position() {

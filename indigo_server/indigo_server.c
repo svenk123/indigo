@@ -1683,6 +1683,10 @@ static void server_main() {
 			#include "resource/imager.png.data"
 		};
 		indigo_server_add_resource("/imager.png", imager_png, sizeof(imager_png), "image/png");
+		static unsigned char imager2_html[] = {
+			#include "resource/imager2.html.data"
+		};
+		indigo_server_add_resource("/imager2.html", imager2_html, sizeof(imager2_html), "text/html");
 		// INDIGO Mount
 		static unsigned char mount_html[] = {
 			#include "resource/mount.html.data"
@@ -1691,6 +1695,7 @@ static void server_main() {
 			#include "resource/mount.png.data"
 		};
 		indigo_server_add_resource("/mount.png", mount_png, sizeof(mount_png), "image/png");
+		indigo_server_add_file_resource("/allsky.jpg", ".indigo/allsky.jpg", "image/jpeg");
 		static unsigned char celestial_js[] = {
 			#include "resource/celestial.min.js.data"
 		};

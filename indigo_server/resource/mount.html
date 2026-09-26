@@ -30,6 +30,9 @@
 							<a class="nav-link pr-0" href="imager.html" data-toggle="tooltip" title="Imager">
 								<img src="imager.png" width="40" height="40" class="d-inline-block align-middle mr-0" alt=""/>
 							</a>
+							<a v-if="devices['Imager Agent #2'] != null" class="nav-link pr-0" href="imager2.html" data-toggle="tooltip" title="Imager #2">
+								<img src="imager.png" width="40" height="40" class="d-inline-block align-middle mr-0" alt=""/>
+							</a>
 							<a class="nav-link pr-0" href="mount.html" data-toggle="tooltip" title="Mount">
 								<img src="mount.png" width="40" height="40" class="d-inline-block align-middle mr-0" alt=""/>
 							</a>
@@ -218,7 +221,8 @@
 							</template>
 						</div>
 						<div class="col-sm-8">
-							<div class="card p-1 m-1 bg-light" style="min-height: 10rem">
+							<div class="card p-1 m-1 bg-light" style="min-height: 10rem; overflow: hidden;">
+								<img id="allsky_image" src="/allsky.jpg" style="display:none; position:absolute; top:0; left:0; pointer-events:none;"/>
 								<div id="map" class="position-relative" style="overflow: scroll;"></div>
 								<div v-if="$('#map').children().length > 0" class="position-absolute d-flex">
 									<button class="btn btn-svg idle-state m-1" onclick="zoomIn()" data-toggle="tooltip" title="Zoom In">
@@ -236,6 +240,31 @@
 											<path d="M16,4a8.9999,8.9999,0,0,0-9,9c0,6,6.7583,13.07764,8.16156,14.63135a1.13778,1.13778,0,0,0,1.67688,0C18.2417,26.07764,25,19,25,13A8.9999,8.9999,0,0,0,16,4Zm0,14a5,5,0,1,1,5-5A5.00013,5.00013,0,0,1,16,18Z"/>
 										</svg>
 									</button>
+									<button id="allsky_button" class="btn btn-svg idle-state m-1" onclick="toggleAllsky()" data-toggle="tooltip" title="Allsky overlay">
+										<span class="glyphicons glyphicons-picture"></span>
+									</button>
+								</div>
+								<div id="allsky_controls" class="position-absolute bg-light p-2 m-1 rounded" style="display:none; top:52px; left:8px; z-index:20; font-size:0.8rem;">
+									<div class="form-inline mb-1">
+										<label class="mr-1" style="width:70px;">Drehung</label>
+										<input id="allsky_rotation" type="range" min="-180" max="180" step="1" value="0" style="width:120px;" oninput="updateAllsky()"/>
+										<span id="allsky_rotation_value" class="ml-1">0°</span>
+									</div>
+									<div class="form-inline mb-1">
+										<label class="mr-1" style="width:70px;">Skalierung</label>
+										<input id="allsky_scale" type="range" min="50" max="300" step="1" value="100" style="width:120px;" oninput="updateAllsky()"/>
+										<span id="allsky_scale_value" class="ml-1">100%</span>
+									</div>
+									<div class="form-inline mb-1">
+										<label class="mr-1" style="width:70px;">X</label>
+										<input id="allsky_offset_x" type="range" min="-50" max="50" step="1" value="0" style="width:120px;" oninput="updateAllsky()"/>
+										<span id="allsky_offset_x_value" class="ml-1">0%</span>
+									</div>
+									<div class="form-inline">
+										<label class="mr-1" style="width:70px;">Y</label>
+										<input id="allsky_offset_y" type="range" min="-50" max="50" step="1" value="0" style="width:120px;" oninput="updateAllsky()"/>
+										<span id="allsky_offset_y_value" class="ml-1">0%</span>
+									</div>
 								</div>
 							</div>
 						</div>
@@ -292,7 +321,7 @@
 			interactive: false,
 			controls: false,
 			follow: "zenith",
-			background: { fill: "#fff", stroke: "#fff", opacity: 1, width: 1 },
+			background: { fill: "#001a33", stroke: "#001a33", opacity: 1, width: 1 },
 			container: "map",
 			datapath: "/data/",
 			stars: {
@@ -300,7 +329,7 @@
 				proper: true,
 				propernamelimit: 2,
 				propernamestyle: { fill: "#999", font: "13px -apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif", align: "right", baseline: "bottom" },
-				style: { fill: "#000", opacity: 1 },
+				style: { fill: "#fff", opacity: 1 },
 				size: 5,
 				data: 'stars.json'
 			},
@@ -330,6 +359,85 @@
 				style: { fill:"#996", opacity: 0.1 }
 			}
 		};
+
+		var MAP_BACKGROUND_FILL = "#001a33";
+		var ALLSKY_STORAGE_KEY = "indigo.mount.allsky";
+
+		function loadAllskySettings() {
+			var settings = { enabled: false, rotation: 0, scale: 100, offsetX: 0, offsetY: 0 };
+			try {
+				var stored = localStorage.getItem(ALLSKY_STORAGE_KEY);
+				if (stored != null) {
+					var parsed = JSON.parse(stored);
+					for (var key in settings) {
+						if (parsed[key] != null) settings[key] = parsed[key];
+					}
+				}
+			} catch (e) { }
+			return settings;
+		}
+
+		function saveAllskySettings() {
+			try {
+				localStorage.setItem(ALLSKY_STORAGE_KEY, JSON.stringify(allskySettings));
+			} catch (e) { }
+		}
+
+		var allskySettings = loadAllskySettings();
+
+		function applyAllsky() {
+			$("#allsky_rotation").val(allskySettings.rotation);
+			$("#allsky_scale").val(allskySettings.scale);
+			$("#allsky_offset_x").val(allskySettings.offsetX);
+			$("#allsky_offset_y").val(allskySettings.offsetY);
+			$("#allsky_rotation_value").text(allskySettings.rotation + "°");
+			$("#allsky_scale_value").text(allskySettings.scale + "%");
+			$("#allsky_offset_x_value").text(allskySettings.offsetX + "%");
+			$("#allsky_offset_y_value").text(allskySettings.offsetY + "%");
+			var transform = "translate(" + allskySettings.offsetX + "%, " + allskySettings.offsetY + "%) rotate(" + allskySettings.rotation + "deg) scale(" + (allskySettings.scale / 100) + ")";
+			$("#allsky_image").css("transform", transform);
+			if (allskySettings.enabled) {
+				$("#allsky_image").show();
+				$("#allsky_controls").show();
+				$("#allsky_button").removeClass("idle-state").addClass("ok-state");
+				config.background.fill = "transparent";
+			} else {
+				$("#allsky_image").hide();
+				$("#allsky_controls").hide();
+				$("#allsky_button").removeClass("ok-state").addClass("idle-state");
+				config.background.fill = MAP_BACKGROUND_FILL;
+			}
+			if (celestialVisible) {
+				Celestial.display(config);
+			}
+			syncAllskyPosition();
+		}
+
+		function syncAllskyPosition() {
+			var map = $("#map");
+			if (map.length == 0) return;
+			$("#allsky_image").css({
+				width: config.width + "px",
+				height: config.width + "px",
+				left: -map.scrollLeft() + "px",
+				top: -map.scrollTop() + "px"
+			});
+		}
+
+		function toggleAllsky() {
+			allskySettings.enabled = !allskySettings.enabled;
+			saveAllskySettings();
+			applyAllsky();
+		}
+
+		function updateAllsky() {
+			allskySettings.rotation = parseInt($("#allsky_rotation").val());
+			allskySettings.scale = parseInt($("#allsky_scale").val());
+			allskySettings.offsetX = parseInt($("#allsky_offset_x").val());
+			allskySettings.offsetY = parseInt($("#allsky_offset_y").val());
+			saveAllskySettings();
+			applyAllsky();
+		}
 
 		guiSetup();
 		window.addEventListener("load", init, false);
@@ -402,6 +510,7 @@
 						break;
 				}
 				Celestial.display(config);
+				syncAllskyPosition();
 			}
 		}
 
@@ -437,6 +546,7 @@
 						break;
 				}
 				Celestial.display(config);
+				syncAllskyPosition();
 			}
 		}
 
@@ -455,6 +565,7 @@
 					follow = 0;
 				}
 				updateMap();
+				syncAllskyPosition();
 			}
 		}
 
@@ -500,16 +611,20 @@
 							var current = Celestial.mapProjection(currentCoordinates);
 							map.scrollLeft(current[0] - map.width() / 2);
 							map.scrollTop(current[1] - map.width() / 2);
+							syncAllskyPosition();
 						}
 					} else {
 						window.onresize();
+						applyAllsky();
 						celestialVisible = true;
 						Celestial.display(config);
 						map.scrollLeft((zooms[zoom] - map.width()) / 2);
 						map.scrollTop((zooms[zoom] - map.width()) / 2);
+						syncAllskyPosition();
 						INDIGO.db = Celestial.container[0];
 						var canvas =  $(map).children("canvas")[0];
 						canvas.addEventListener("mousedown", canvasClick, false);
+						map.on("scroll", syncAllskyPosition);
 					}
 				}
 			}
@@ -550,7 +665,7 @@
 				if (targetCoordinates != null) {
 					pt = Celestial.mapProjection(targetCoordinates);
 					Celestial.context.beginPath();
-					Celestial.setStyle({ stroke: "#0000ff", width: 1});
+					Celestial.setStyle({ stroke: "#808080", width: 1});
 					Celestial.context.moveTo(pt[0] - 15, pt[1]);
 					Celestial.context.lineTo(pt[0] - 5, pt[1]);
 					Celestial.context.moveTo(pt[0] + 5, pt[1]);

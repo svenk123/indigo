@@ -42,14 +42,14 @@ input {
 
 .ok-state {
 	color: white!important;
-	background-color: #5cb85c!important;
-	border-color: #5cb85c!important;
+	background-color: #4B0082!important;
+	border-color: #4B0082!important;
 }
 
 .ok-state:hover {
 	color: white!important;
-	background-color: #3c982c!important;
-	border-color: #3c982c!important;
+	background-color: #35005e!important;
+	border-color: #35005e!important;
 }
 
 .busy-state {

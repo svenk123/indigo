@@ -30,6 +30,9 @@
 							<a class="nav-link pr-0" href="imager.html" data-toggle="tooltip" title="Imager">
 								<img src="imager.png" width="40" height="40" class="d-inline-block align-middle mr-0" alt=""/>
 							</a>
+							<a v-if="devices['Imager Agent #2'] != null" class="nav-link pr-0" href="imager2.html" data-toggle="tooltip" title="Imager #2">
+								<img src="imager.png" width="40" height="40" class="d-inline-block align-middle mr-0" alt=""/>
+							</a>
 							<a class="nav-link pr-0" href="mount.html" data-toggle="tooltip" title="Mount">
 								<img src="mount.png" width="40" height="40" class="d-inline-block align-middle mr-0" alt=""/>
 							</a>
@@ -118,6 +121,12 @@
 							<div class="card p-1 m-1 mt-2 bg-light">
 								<div class="card-blockd-flex">
 									<canvas id="graph_corr" class="card p-0 m-0 bg-light" data-toggle="tooltip" title="Corrections"></canvas>
+								</div>
+							</div>
+							<div class="card p-1 m-1 mt-2 bg-light">
+								<div class="card-block d-flex flex-wrap">
+									<span class="p-1"><span style="display:inline-block; width:12px; height:12px; background:#00F;"></span> RA</span>
+									<span class="p-1"><span style="display:inline-block; width:12px; height:12px; background:#F00;"></span> Dec</span>
 								</div>
 							</div>
 						</div>

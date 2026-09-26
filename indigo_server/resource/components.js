@@ -646,7 +646,7 @@ Vue.component('indigo-select-multi-item', {
 		}
 	},
 	template: `
-		<div class="input-group p-1" data-toggle="tooltip" :title="tooltip">
+		<div v-if="property != null" class="input-group p-1" data-toggle="tooltip" :title="tooltip">
 			<div class="input-group-prepend">
 				<span class="input-group-text" id="inputGroup-sizing-default" style="width: 10em;" :class="state()">{{label}}</span>
 			</div>
