@@ -163,8 +163,12 @@ template <typename T> static inline void debayer(T *raw, int index, int row, int
 // totals - sum of all pixels in subsample
 // B, C - background, contrast params
 
-template <typename T> void indigo_compute_stretch_params(const T *buffer, int width, int height, int sample_columns_by, int sample_rows_by, double *shadows, double *midtones, double *highlights, unsigned long *histogram, unsigned long *totals, float B = 0.25, float C = -2.8) {
-	const int sample_size = ceil((float)width / sample_columns_by) * ceil((float)height / sample_rows_by);
+template <typename T> void indigo_compute_stretch_params(const T *buffer, int width, int height, int sample_columns_by, int sample_rows_by, int column_offset, int row_offset, double *shadows, double *midtones, double *highlights, unsigned long *histogram, unsigned long *totals, float B = 0.25, float C = -2.8) {
+	// column_offset, row_offset - position of the first sample of a Bayer plane (0 or 1), only used if sample_rows_by > 1;
+	// the plane has width - column_offset columns and height - row_offset rows, nothing outside of the frame is read
+	const int columns = width - column_offset;
+	const int rows = height - row_offset;
+	const int sample_size = ceil((float)columns / sample_columns_by) * ceil((float)rows / sample_rows_by);
 	const int sample_size_2 = sample_size / 2;
 	const int histo_divider = (sizeof(T) == 1) ? 1 : 256; // TBD for 32 bits
 	const int value_range = 1 << (8 * sizeof(T));
@@ -181,9 +185,9 @@ template <typename T> void indigo_compute_stretch_params(const T *buffer, int wi
 			sample_count++;
 		}
 	} else {
-		const T *line = buffer;
-		for (int line_index = 0; line_index < height; line_index += sample_rows_by) {
-			for (int column_index = 0; column_index < width; column_index += sample_columns_by) {
+		const T *line = buffer + row_offset * width + column_offset;
+		for (int line_index = 0; line_index < rows; line_index += sample_rows_by) {
+			for (int column_index = 0; column_index < columns; column_index += sample_columns_by) {
 				T value = line[column_index];
 				value_histogram[value]++;
 				total += value;
@@ -520,71 +524,71 @@ template <typename T> void indigo_debayer(T *input_buffer, int width, int height
 }
 
 extern "C" void indigo_compute_stretch_params_8(const uint8_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, float B, float C) {
-	indigo_compute_stretch_params(buffer + 0, width, height, sample_by, 1, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), NULL, B, C);
+	indigo_compute_stretch_params(buffer + 0, width, height, sample_by, 1, 0, 0, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), NULL, B, C);
 }
 
 extern "C" void indigo_compute_stretch_params_16(const uint16_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, float B, float C) {
-	indigo_compute_stretch_params(buffer + 0, width, height,  sample_by, 1, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), NULL, B, C);
+	indigo_compute_stretch_params(buffer + 0, width, height,  sample_by, 1, 0, 0, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), NULL, B, C);
 }
 
 extern "C" void indigo_compute_stretch_params_24(const uint8_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, unsigned long *totals, float B, float C) {
 	for (int i = 0; i < 3; i++) {
-		indigo_compute_stretch_params(buffer + i, 3 * width, height, sample_by * 3, 1, &shadows[i], &midtones[i], &highlights[i], histogram[i] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[i], B, C);
+		indigo_compute_stretch_params(buffer + i, 3 * width, height, sample_by * 3, 1, 0, 0, &shadows[i], &midtones[i], &highlights[i], histogram[i] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[i], B, C);
 	}
 }
 
 extern "C" void indigo_compute_stretch_params_48(const uint16_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, unsigned long *totals, float B, float C) {
 	for (int i = 0; i < 3; i++) {
-		indigo_compute_stretch_params(buffer + i, 3 * width, height, sample_by * 3, 1, &shadows[i], &midtones[i], &highlights[i], histogram[i] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[i], B, C);
+		indigo_compute_stretch_params(buffer + i, 3 * width, height, sample_by * 3, 1, 0, 0, &shadows[i], &midtones[i], &highlights[i], histogram[i] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[i], B, C);
 	}
 }
 
 extern "C" void indigo_compute_stretch_params_8_rggb(const uint8_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, unsigned long *totals, float B, float C) {
-	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
-	indigo_compute_stretch_params(buffer + 1, width, height, sample_by * 2, 2, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
-	indigo_compute_stretch_params(buffer + width + 1, width, height, sample_by * 2, 2, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 0, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 0, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 1, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
 }
 
 extern "C" void indigo_compute_stretch_params_8_gbrg(const uint8_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, unsigned long *totals, float B, float C) {
-	indigo_compute_stretch_params(buffer + width, width, height, sample_by * 2, 2, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
-	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
-	indigo_compute_stretch_params(buffer + 1, width, height, sample_by * 2, 2, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 1, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 0, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 0, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
 }
 
 extern "C" void indigo_compute_stretch_params_8_grbg(const uint8_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, unsigned long *totals, float B, float C) {
-	indigo_compute_stretch_params(buffer + 1, width, height, sample_by * 2, 2, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
-	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
-	indigo_compute_stretch_params(buffer + width, width, height, sample_by * 2, 2, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 0, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 0, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 1, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
 }
 
 extern "C" void indigo_compute_stretch_params_8_bggr(const uint8_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, unsigned long *totals, float B, float C) {
-	indigo_compute_stretch_params(buffer + width + 1, width, height, sample_by * 2, 2, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
-	indigo_compute_stretch_params(buffer + 1, width, height, sample_by * 2, 2, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
-	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 1, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 0, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 0, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
 }
 
 extern "C" void indigo_compute_stretch_params_16_rggb(const uint16_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, unsigned long *totals, float B, float C) {
-	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
-	indigo_compute_stretch_params(buffer + 1, width, height, sample_by * 2, 2, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
-	indigo_compute_stretch_params(buffer + width + 1, width, height, sample_by * 2, 2, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 0, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 0, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 1, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
 }
 
 extern "C" void indigo_compute_stretch_params_16_gbrg(const uint16_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, unsigned long *totals, float B, float C) {
-	indigo_compute_stretch_params(buffer + width, width, height, sample_by * 2, 2, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
-	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
-	indigo_compute_stretch_params(buffer + 1, width, height, sample_by * 2, 2, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 1, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 0, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 0, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
 }
 
 extern "C" void indigo_compute_stretch_params_16_grbg(const uint16_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, unsigned long *totals, float B, float C) {
-	indigo_compute_stretch_params(buffer + 1, width, height, sample_by * 2, 2, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
-	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
-	indigo_compute_stretch_params(buffer + width, width, height, sample_by * 2, 2, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 0, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 0, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 1, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
 }
 
 extern "C" void indigo_compute_stretch_params_16_bggr(const uint16_t *buffer, int width, int height, int sample_by, double *shadows, double *midtones, double *highlights, unsigned long **histogram, unsigned long *totals, float B, float C) {
-	indigo_compute_stretch_params(buffer + width + 1, width, height, sample_by * 2, 2, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
-	indigo_compute_stretch_params(buffer + 1, width, height, sample_by * 2, 2, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
-	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 1, &shadows[0], &midtones[0], &highlights[0], histogram[0] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[0], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 1, 0, &shadows[1], &midtones[1], &highlights[1], histogram[1] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[1], B, C);
+	indigo_compute_stretch_params(buffer, width, height, sample_by * 2, 2, 0, 0, &shadows[2], &midtones[2], &highlights[2], histogram[2] = (unsigned long *)indigo_safe_malloc(sizeof(unsigned long) * 256), &totals[2], B, C);
 }
 
 extern "C" void indigo_stretch_8(const uint8_t *input_buffer, int width, int height, uint8_t *output_buffer, double *shadows, double *midtones, double *highlights) {
