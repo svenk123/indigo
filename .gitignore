@@ -34,3 +34,5 @@ indigo.xcodeproj/xcshareddata/
 /indigo_drivers/gps_gpsd/externals/libgps/libgps.a
 /tools/fxload/fxload
 indigo_libs/indigo_build.c
+**/.AppleDouble
+indigo_libs/externals/libtiff/tools/tiffgt
