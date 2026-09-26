@@ -167,42 +167,73 @@ template <typename T> void indigo_compute_stretch_params(const T *buffer, int wi
 	const int sample_size = ceil((float)width / sample_columns_by) * ceil((float)height / sample_rows_by);
 	const int sample_size_2 = sample_size / 2;
 	const int histo_divider = (sizeof(T) == 1) ? 1 : 256; // TBD for 32 bits
+	const int value_range = 1 << (8 * sizeof(T));
 	unsigned long total = 0;
-	std::vector<T> samples(sample_size);
+	// exact histogram of the samples, median and MAD are read from it (no sorting needed)
+	std::vector<unsigned int> value_histogram(value_range, 0);
+	int sample_count = 0;
 	if (sample_rows_by == 1) {
-		int i = 0;
 		int size = width * height;
 		for (int index = 0; index < size; index += sample_columns_by) {
 			T value = buffer[index];
-			histogram[(samples[i++] = value) / histo_divider]++;
+			value_histogram[value]++;
 			total += value;
+			sample_count++;
 		}
 	} else {
-		int i = 0;
 		const T *line = buffer;
 		for (int line_index = 0; line_index < height; line_index += sample_rows_by) {
 			for (int column_index = 0; column_index < width; column_index += sample_columns_by) {
 				T value = line[column_index];
-				histogram[(samples[i++] = value) / histo_divider]++;
+				value_histogram[value]++;
 				total += value;
+				sample_count++;
 			}
 			line += width * sample_rows_by;
 		}
 	}
+	for (int value = 0; value < value_range; value++) {
+		histogram[value / histo_divider] += value_histogram[value];
+	}
 	if (totals) {
 		*totals = total;
 	}
-	std::nth_element(samples.begin(), samples.begin() + sample_size_2, samples.end());
-	const float median_sample = samples[sample_size_2];
-	// Find the Median deviation: 1.4826 * median of abs(sample[i] - median).
-	std::vector<T> deviations(sample_size);
-	for (int i = 0; i < sample_size; i++) {
-		deviations[i] = abs(median_sample - samples[i]);
+	// samples not visited by the loops above count as zeros (sample_size is a rounded up estimate)
+	if (sample_size > sample_count) {
+		value_histogram[0] += sample_size - sample_count;
 	}
-	std::nth_element(deviations.begin(), deviations.begin() + sample_size / 2, deviations.end());
+	// value at position sample_size / 2 of the sorted samples
+	int median_value = 0;
+	{
+		long cumulative = 0;
+		for (int value = 0; value < value_range; value++) {
+			cumulative += value_histogram[value];
+			if (cumulative > sample_size_2) {
+				median_value = value;
+				break;
+			}
+		}
+	}
+	const float median_sample = median_value;
+	// Find the Median deviation: 1.4826 * median of abs(sample[i] - median).
+	std::vector<unsigned int> deviation_histogram(value_range, 0);
+	for (int value = 0; value < value_range; value++) {
+		deviation_histogram[abs(median_value - value)] += value_histogram[value];
+	}
+	int median_deviation_value = 0;
+	{
+		long cumulative = 0;
+		for (int value = 0; value < value_range; value++) {
+			cumulative += deviation_histogram[value];
+			if (cumulative > sample_size_2) {
+				median_deviation_value = value;
+				break;
+			}
+		}
+	}
 	// scale to 0 -> 1.0.
 	const float input_range = (sizeof(T) == 1) ? 0xFFL : 0XFFFFL; // TBD for 32 bits
-	const float median_deviation = deviations[sample_size_2];
+	const float median_deviation = median_deviation_value;
 	const float normalized_median = median_sample / input_range;
 	const float MADN = 1.4826 * median_deviation / input_range;
 	const bool upperHalf = normalized_median > 0.5;
