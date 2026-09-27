@@ -203,5 +203,8 @@ Empfehlung: Vor einer GPU-Portierung von `indigo_contrast`/`stddev` zuerst entsc
 ## 5. Offene Entscheidungen
 
 1. Standard bleibt `CUDA=no`. Falls Auto-Erkennung gewünscht ist, kann `CUDA=auto` ergänzt werden.
-2. Die Kombination „Jetson und Orin mit JetPack 7.2“ lässt sich für ein Nano nicht herstellen (JetPack 4.x ist dort das Ende). Klären, welche Geräte tatsächlich mit welcher JetPack-Version getestet werden.
-3. Freigabe für Phase 1 (`find_stars`-Umbau, JPEG-Messung). Phase 1 ändert bestehende Funktionen der Bibliothek, auch wenn es die Ergebnisse nicht ändern soll.
+2. Die Kombination „Jetson und Orin mit JetPack 7.2“ lässt sich für ein Nano nicht herstellen (JetPack 4.x ist dort das Ende). Klären, welche Geräte tatsächlich mit welcher JetPack-Version getestet werden. Insbesondere `make cuda-check` und `make -C indigo_test/cuda test` (inklusive `CUDA_LAUNCH_BLOCKING=1`, siehe Phase 3) einmal auf einem Orin mit JetPack 7.2 laufen lassen.
+3. **`indigo_contrast` / `indigo_stddev_*` auf die GPU bringen?** Braucht vorher die Umformulierung der Varianzberechnung auf `Σx²/N − mean²` (siehe Phase 3), die das Verhalten aller 8 betroffenen CPU-Funktionen numerisch geringfügig ändert (letzte Bits, keine praktische Auswirkung erwartet, aber eine Verhaltensänderung wie schon bei der Stretch-Parameter-Korrektur in Phase 0).
+4. **`indigo_stddev_rgb48` (unmaskiert) reparieren?** Der in Phase 3 gefundene Indexierungsfehler (siehe dort) ist unabhängig von CUDA und verfälscht `indigo_contrast` für unmaskierte RGB48-Bilder schon heute, auf der CPU. Bisher nicht behoben, da außerhalb des Auftrags.
+5. **`indigo_update_saturation_mask` auf die GPU bringen?** Bit-exakt möglich, aber mit ungünstigem Kostenmodell (Fläche × Erkennungen) und eng an den maskierten `contrast`-Pfad gekoppelt (siehe Punkt 3). Nutzen vor Umsetzung neu bewerten.
+6. Freigabe für Phase 4 (Bahtinov: Sinus-Tabelle auf der CPU, danach Hough/`skeletonize` auf der GPU).
