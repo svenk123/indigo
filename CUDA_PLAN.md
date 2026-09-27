@@ -242,7 +242,7 @@ Verifikation: Da `hough_transform`-artige Abhängigkeiten hier nicht bestehen, a
 
 **GPU-Teil nicht umgesetzt:** Der erste Durchlauf (Summe, Maximum) summiert ganzzahlige Werte in `double` – exakt unabhängig von der Additionsreihenfolge (siehe Phase 3), damit für die GPU geeignet. Der zweite Durchlauf (`col_x`/`col_y`-Projektion) akkumuliert dagegen `Wert − Schwellwert` mit `Schwellwert` als echt gebrochener `double` – genau dasselbe Problem wie bei `indigo_contrast`/`indigo_stddev_*` in Phase 3 (Summenreihenfolge nicht mehr exakt reihenfolgenunabhängig). Aus Konsistenzgründen mit der dortigen Entscheidung nicht umgesetzt; eine GPU-Portierung nur des ersten Durchlaufs wurde erwogen, aber angesichts des bereits erzielten 1,9×-Gewinns und des Aufwands für nur einen Teilschritt zurückgestellt.
 
-- `indigo_make_psf_map`: noch nicht gemessen.
+- **`indigo_make_psf_map`: gemessen, keine weitere Optimierung vorgeschlagen.** Hat **keinen einzigen Aufrufer** in diesem Repository (weder Treiber noch Agenten noch Tools) – nur deklariert (`indigo_raw_utils.h`) und implementiert, vermutlich für eine externe GUI-Anwendung (z. B. `indigo_imager`) gedacht, die hier nicht vorliegt. Messung mit plausiblen, aber erfundenen Parametern (12 MP, 256×174-Karte, max. 100 Sterne): 233 ms – der Löwenanteil dürfte der interne Aufruf von `indigo_find_stars_precise` sein, das in Phase 1 bereits von 3,3 s auf 114 ms beschleunigt wurde. Ohne einen echten Aufrufer im Baum fehlt die Grundlage für realistische Größen und Aufrufhäufigkeit; eine GPU-Portierung ins Blaue hinein wäre spekulativ. Empfehlung: nicht weiter optimieren, außer ein konkreter Anwendungsfall verlangt es.
 
 ## 5. Offene Entscheidungen
 
