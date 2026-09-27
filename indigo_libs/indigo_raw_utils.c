@@ -1223,11 +1223,21 @@ indigo_result indigo_donuts_frame_digest_clipped(indigo_raw_type raw_type, const
 	const int ce = include_left + include_width, le = include_top + include_height;
 	const int cs = include_left, ls = include_top;
 	double value;
+	/* clear_hot_pixel_8/16() is deterministic in (x, y) and was computed a second time, identically, for the
+	   same pixel in the projection pass below. Cached here and reused there instead - same values, about half
+	   the work of the (5 element partial sort) hot pixel filter for MONO8/MONO16, which dominates this
+	   function's cost on a full frame (this is called on every guide frame when Donuts guiding is used without
+	   an include region, i.e. by default - not a rare case). RGB* do not use clear_hot_pixel, no cache needed. */
+	uint16_t *cleared = NULL;
+	if (raw_type == INDIGO_RAW_MONO8 || raw_type == INDIGO_RAW_MONO16) {
+		cleared = indigo_safe_malloc((size_t)include_width * include_height * sizeof(uint16_t));
+	}
 	switch (raw_type) {
 		case INDIGO_RAW_MONO8: {
 			for (int j = ls; j < le; j++) {
+				uint16_t *row = cleared + (size_t)(j - ls) * include_width;
 				for (int i = cs; i < ce; i++) {
-					value = clear_hot_pixel_8(data8, i, j, width, height);
+					value = row[i - cs] = clear_hot_pixel_8(data8, i, j, width, height);
 					sum += value;
 					if (value > max) max = value;
 				}
@@ -1236,8 +1246,9 @@ indigo_result indigo_donuts_frame_digest_clipped(indigo_raw_type raw_type, const
 		}
 		case INDIGO_RAW_MONO16: {
 			for (int j = ls; j < le; j++) {
+				uint16_t *row = cleared + (size_t)(j - ls) * include_width;
 				for (int i = cs; i < ce; i++) {
-					value = clear_hot_pixel_16(data16, i, j, width, height);
+					value = row[i - cs] = clear_hot_pixel_16(data16, i, j, width, height);
 					sum += value;
 					if (value > max) max = value;
 				}
@@ -1300,7 +1311,10 @@ indigo_result indigo_donuts_frame_digest_clipped(indigo_raw_type raw_type, const
 	INDIGO_DEBUG(indigo_debug("Donuts: threshold = %.3f, max = %.3f", threshold, max));
 
 	/* If max is below the thresold no guiding is possible */
-	if (max <= threshold) return INDIGO_GUIDE_ERROR;
+	if (max <= threshold) {
+		indigo_safe_free(cleared);
+		return INDIGO_GUIDE_ERROR;
+	}
 
 	digest->width = next_power_2(include_width);
 	digest->height = next_power_2(include_height);
@@ -1312,25 +1326,13 @@ indigo_result indigo_donuts_frame_digest_clipped(indigo_raw_type raw_type, const
 	digest->fft_y = indigo_safe_malloc(2 * digest->height * sizeof(double));
 
 	switch (raw_type) {
-		case INDIGO_RAW_MONO8: {
-			for (int j = ls; j < le; j++) {
-				int y = j - ls;
-				for (int i = cs; i < ce; i++) {
-					value = clear_hot_pixel_8(data8, i, j, width, height) - threshold;
-					/* Set all values below the threshold to 0 */
-					if (value < 0) value = 0;
-
-					col_x[i - include_left][RE] += value;
-					col_y[y][RE] += value;
-				}
-			}
-			break;
-		}
+		case INDIGO_RAW_MONO8:
 		case INDIGO_RAW_MONO16: {
 			for (int j = ls; j < le; j++) {
 				int y = j - ls;
+				uint16_t *row = cleared + (size_t)y * include_width;
 				for (int i = cs; i < ce; i++) {
-					value = clear_hot_pixel_16(data16, i, j, width, height) - threshold;
+					value = row[i - cs] - threshold;
 					/* Set all values below the threshold to 0 */
 					if (value < 0) value = 0;
 
@@ -1443,6 +1445,7 @@ indigo_result indigo_donuts_frame_digest_clipped(indigo_raw_type raw_type, const
 	free(col_y);
 	free(fcol_x);
 	free(fcol_y);
+	indigo_safe_free(cleared);
 	return INDIGO_OK;
 }
 

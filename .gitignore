@@ -46,3 +46,4 @@ indigo_libs/externals/libtiff/tools/tiffgt
 /indigo_test/cuda/test_cuda_stretch
 /indigo_test/cuda/test_cuda_raw_utils
 /indigo_test/cuda/test_bahtinov_hough
+/indigo_test/cuda/test_donuts

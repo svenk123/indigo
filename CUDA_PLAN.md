@@ -228,9 +228,21 @@ Test `indigo_test/cuda/test_bahtinov_hough.c`: 92 Vergleiche gegen eine Kopie de
 
 `indigo_skeletonize` (4 ms bei 500×500) wurde nicht angefasst – zu klein, um den Aufwand zu rechtfertigen.
 
-**Phase 5: Optional**
-- Donuts: `clear_hot_pixel_*` auf der CPU optimieren. Vollbild dauert 3,3 s, mit Region 20 ms, also nur relevant, wenn Aufrufer große Regionen nutzen (nicht geprüft).
-- `indigo_make_psf_map` nach einer Messung.
+**Phase 5: Donuts (CPU-Teil umgesetzt, Nano gemessen)**
+
+**Wichtiger Befund, korrigiert gegenüber Phase 0:** Der Guider-Agent (`indigo_agent_guider.c`) ruft `indigo_donuts_frame_digest` (Vollbild, kein Crop) im Donuts-Modus **standardmäßig auf jedem Guide-Frame** auf – nur wenn `AGENT_GUIDER_USE_INCLUDE_FOR_DONUTS_ITEM` explizit gesetzt ist, kommt stattdessen die geclippte Variante auf einer kleinen Region zum Einsatz. Die Einschätzung aus Phase 0 („nur relevant, wenn Aufrufer große Regionen nutzen, nicht geprüft“) war damit zu vorsichtig: Der Vollbild-Pfad ist der Normalfall bei Donuts-Guiding, nicht der Ausnahmefall. Bei 3,3 s pro Frame (Phase-0-Messung) wäre Donuts-Guiding auf einem Nano praktisch unbrauchbar, da Guide-Korrekturen typischerweise alle 1–5 s erfolgen müssen.
+
+Ursache: `indigo_donuts_frame_digest_clipped` durchläuft die Region zweimal (erst Summe/Maximum für den Schwellwert, dann die Spalten-/Zeilenprojektion). Bei MONO8/MONO16 ruft **jeder Durchlauf** `clear_hot_pixel_8/16` auf – eine reine, deterministische Funktion (5er-Fenster, Teilsortierung, keine Seiteneffekte) – für **denselben Pixel identisch zweimal**.
+
+Umgesetzt: Das Ergebnis von `clear_hot_pixel_8/16` wird im ersten Durchlauf in einen Zwischenpuffer geschrieben und im zweiten Durchlauf daraus gelesen, statt neu berechnet. RGB-Pfade (nutzen `clear_hot_pixel` nicht) sind unverändert.
+
+Messung (Nano, 12 MP MONO16, Vollbild): **3282 → 1732 ms** (1,9×).
+
+Verifikation: Da `hough_transform`-artige Abhängigkeiten hier nicht bestehen, aber die Funktion viele weitere `static` Helfer (FFT, `calibrate_re`, `calculate_donuts_snr`) nutzt, wäre ein weißbox-Vergleichstest mit Verdopplung all dieser Helfer unverhältnismäßig aufwendig gewesen für eine Änderung, die nachweislich nur eine reine Funktion einmal statt zweimal aufruft. Stattdessen einmalig, aber rigoros: Bibliothek vor und nach der Änderung je einmal gebaut (`git stash`), dieselben Testbilder (12 MP MONO16/MONO8, 500×500, 300×300) durch beide geschickt und `digest->fft_x`, `digest->fft_y` (Prüfsumme) sowie `snr`, `width`, `height` verglichen – **bit-identisch** in allen vier Fällen. Diese bestätigten Werte sind jetzt als feste Vergleichswerte in `indigo_test/cuda/test_donuts.c` hinterlegt (dauerhafter Regressionstest), dazu Plausibilitätsprüfungen für alle RGB-Typen und der Fehlerfall (flaches Bild ohne Signal → `INDIGO_GUIDE_ERROR`). Lief unter `CUDA=no` und `CUDA=yes` fehlerfrei (die Funktion nutzt kein CUDA, das Ergebnis ist von der Baukonfiguration unabhängig).
+
+**GPU-Teil nicht umgesetzt:** Der erste Durchlauf (Summe, Maximum) summiert ganzzahlige Werte in `double` – exakt unabhängig von der Additionsreihenfolge (siehe Phase 3), damit für die GPU geeignet. Der zweite Durchlauf (`col_x`/`col_y`-Projektion) akkumuliert dagegen `Wert − Schwellwert` mit `Schwellwert` als echt gebrochener `double` – genau dasselbe Problem wie bei `indigo_contrast`/`indigo_stddev_*` in Phase 3 (Summenreihenfolge nicht mehr exakt reihenfolgenunabhängig). Aus Konsistenzgründen mit der dortigen Entscheidung nicht umgesetzt; eine GPU-Portierung nur des ersten Durchlaufs wurde erwogen, aber angesichts des bereits erzielten 1,9×-Gewinns und des Aufwands für nur einen Teilschritt zurückgestellt.
+
+- `indigo_make_psf_map`: noch nicht gemessen.
 
 ## 5. Offene Entscheidungen
 
