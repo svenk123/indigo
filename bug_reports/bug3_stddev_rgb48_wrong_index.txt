@@ -1,0 +1,59 @@
+Title: indigo_stddev_rgb48() (unmasked) reads the wrong buffer offset in its first pass, corrupting indigo_contrast() for RGB48 images
+
+Body:
+
+**File:** `indigo_libs/indigo_raw_utils.c`
+**Function:** `indigo_stddev_rgb48()` (static, reached via `indigo_contrast(INDIGO_RAW_RGB48, ..., saturation_mask = NULL, ...)`)
+
+**Summary**
+
+`indigo_stddev_rgb48()` computes the mean of an interleaved RGB48 buffer (3 x `uint16_t` per pixel) in two passes. The **second** pass correctly multiplies the pixel index by 3 to get the buffer offset:
+
+```c
+for (int y = 1; y < end_y; y++) {
+	for (int x = 1; x < end_x; x++) {
+		i = (y * width + x) * 3;
+		...
+```
+
+but the **first** pass (which computes the mean used to derive the saturation threshold) does not:
+
+```c
+for (int y = 1; y < end_y; y++) {
+	for (int x = 1; x < end_x; x++) {
+		i = y * width + x;
+		sum += set[i];
+		sum += set[i + 1];
+		sum += set[i + 2];
+		real_count++;
+	}
+}
+m = sum / (real_count * 3);
+```
+
+Without the `* 3`, `i` is a *pixel* index being used directly as an *element* index into a buffer that has 3 elements per pixel, so the first pass reads from the wrong location for every pixel (it stays within the buffer - it's just reading the wrong triplet, roughly the first third of the buffer over and over from shifted starting points - not an out-of-bounds access). The masked variant, `indigo_stddev_masked_rgb48()`, and the otherwise-identical `indigo_stddev_rgb24()` both get this right (`i = (y * width + x) * 3`) - only the unmasked RGB48 first pass has the bug.
+
+**Impact**
+
+- `indigo_contrast(INDIGO_RAW_RGB48, data, NULL /* no saturation mask */, width, height, &saturated)` returns a wrong RMS contrast value for RGB48 (48-bit colour) frames, because the mean it's based on comes from the wrong pixels.
+- The masked path (`saturation_mask != NULL`) is not affected.
+
+**Suggested fix**
+
+Add the missing `* 3` in the first pass, matching the second pass and `indigo_stddev_rgb24()`:
+
+```c
+for (int y = 1; y < end_y; y++) {
+	for (int x = 1; x < end_x; x++) {
+		i = (y * width + x) * 3;
+		sum += set[i];
+		sum += set[i + 1];
+		sum += set[i + 2];
+		real_count++;
+	}
+}
+```
+
+**How to reproduce**
+
+Call `indigo_contrast(INDIGO_RAW_RGB48, data, NULL, width, height, &saturated)` on any RGB48 test image with a known contrast (e.g. compare against `indigo_contrast(INDIGO_RAW_RGB24, ...)` on the same image scaled to 8 bit, or a reference implementation) - the RGB48 result does not match.
