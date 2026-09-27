@@ -18,6 +18,8 @@
 #include <indigo/indigo_bus.h>
 #include <indigo/indigo_raw_utils.h>
 
+#include "indigo_cuda.h"
+
 // Above this value the pixel is considered saturated
 // Derived from different camera
 #define SATURATION_8 247
@@ -147,6 +149,9 @@ indigo_result indigo_equalize_bayer_channels(indigo_raw_type raw_type, void *dat
 	double ch3_scale_factor = overall_average / ch3_avg;
 	double ch4_scale_factor = overall_average / ch4_avg;
 
+	if (indigo_cuda_equalize_bayer_scale(raw_type, data, width, height, ch1_scale_factor, ch2_scale_factor, ch3_scale_factor, ch4_scale_factor)) {
+		return INDIGO_OK;
+	}
 	if (raw_type == INDIGO_RAW_MONO16) {
 		uint16_t* data16 = (uint16_t*)data;
 		for (int y = 0; y < height - 1; y += 2) {
@@ -2849,6 +2854,11 @@ indigo_result indigo_make_psf_map(indigo_raw_type image_raw_type, const void *im
 
 uint8_t* indigo_binarize(indigo_raw_type raw_type, const void *data, const int width, const int height, double sigma) {
 	int size = width * height;
+	uint8_t *gpu_result = indigo_safe_malloc(size);
+	if (indigo_cuda_binarize(raw_type, data, width, height, sigma, gpu_result)) {
+		return gpu_result;
+	}
+	indigo_safe_free(gpu_result);
 	long sum = 0;
 	long sum_sq = 0;
 	switch (raw_type) {
@@ -2857,7 +2867,7 @@ uint8_t* indigo_binarize(indigo_raw_type raw_type, const void *data, const int w
 			for (int i = 0; i < size; i++) {
 				int value = source_pixels[i];
 				sum += value;
-				sum_sq += value * value;
+				sum_sq += (long)value * value; /* value can be up to 65535 (16 bit), value*value as 32 bit int overflows */
 			}
 			break;
 		}
@@ -2866,7 +2876,7 @@ uint8_t* indigo_binarize(indigo_raw_type raw_type, const void *data, const int w
 			for (int i = 0; i < size; i++) {
 				int value = source_pixels[i];
 				sum += value;
-				sum_sq += value * value;
+				sum_sq += (long)value * value; /* value can be up to 65535 (16 bit), value*value as 32 bit int overflows */
 			}
 			break;
 		}
@@ -2876,7 +2886,7 @@ uint8_t* indigo_binarize(indigo_raw_type raw_type, const void *data, const int w
 				int i3 = 3 * i;
 				int value = (source_pixels[i3] + source_pixels[i3 + 1] + source_pixels[i3 + 2]) / 3;
 				sum += value;
-				sum_sq += value * value;
+				sum_sq += (long)value * value; /* value can be up to 65535 (16 bit), value*value as 32 bit int overflows */
 			}
 			break;
 		}
@@ -2886,7 +2896,7 @@ uint8_t* indigo_binarize(indigo_raw_type raw_type, const void *data, const int w
 				int i4 = 4 * i;
 				int value = (source_pixels[i4] + source_pixels[i4 + 1] + source_pixels[i4 + 2]) / 3;
 				sum += value;
-				sum_sq += value * value;
+				sum_sq += (long)value * value; /* value can be up to 65535 (16 bit), value*value as 32 bit int overflows */
 			}
 			break;
 		}
@@ -2896,7 +2906,7 @@ uint8_t* indigo_binarize(indigo_raw_type raw_type, const void *data, const int w
 				int i4 = 4 * i;
 				int value = (source_pixels[i4 + 1] + source_pixels[i4 + 2] + source_pixels[i4 + 3]) / 3;
 				sum += value;
-				sum_sq += value * value;
+				sum_sq += (long)value * value; /* value can be up to 65535 (16 bit), value*value as 32 bit int overflows */
 			}
 			break;
 		}
@@ -2906,7 +2916,7 @@ uint8_t* indigo_binarize(indigo_raw_type raw_type, const void *data, const int w
 				int i3 = 3 * i;
 				int value = (source_pixels[i3] + source_pixels[i3 + 1] + source_pixels[i3 + 2]) / 3;
 				sum += value;
-				sum_sq += value * value;
+				sum_sq += (long)value * value; /* value can be up to 65535 (16 bit), value*value as 32 bit int overflows */
 			}
 			break;
 		}

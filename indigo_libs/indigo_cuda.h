@@ -28,6 +28,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <indigo/indigo_bus.h>
+#include <indigo/indigo_raw_utils.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -88,6 +90,15 @@ extern bool indigo_cuda_debayer_stretch_8(const uint8_t *input, int width, int h
 extern bool indigo_cuda_debayer_stretch_16(const uint16_t *input, int width, int height, int offsets, uint8_t *output, const double *shadows, const double *midtones, const double *highlights);
 /* Debayer + stretch straight to planar YCbCr 4:2:0 (indigo_ycc420_layout_for(), colour conversion and chroma averaging exactly like libjpeg
    does it without fancy downsampling), for jpeg_write_raw_data(). planes must have y_size + 2 * c_size bytes. */
+/* Full-image equalisation scale pass of indigo_equalize_bayer_channels() (MONO8/MONO16 only): applies the four
+   already-computed per-channel scale factors in place (channel order matches the CPU code: ch1 = (x,y), ch2 = (x,y+1),
+   ch3 = (x+1,y), ch4 = (x+1,y+1)). Sampling and the scale factors themselves stay on the CPU (cheap, sparse access). */
+extern bool indigo_cuda_equalize_bayer_scale(indigo_raw_type raw_type, void *data, int width, int height, double ch1_scale, double ch2_scale, double ch3_scale, double ch4_scale);
+
+/* Full indigo_binarize(): sum/sum_sq reduction (exact integers, order independent) followed by the per-pixel
+   threshold. output must have width * height bytes. Result is identical to the CPU code. */
+extern bool indigo_cuda_binarize(indigo_raw_type raw_type, const void *data, int width, int height, double sigma, uint8_t *output);
+
 extern bool indigo_cuda_debayer_stretch_ycc_8(const uint8_t *input, int width, int height, int offsets, uint8_t *planes, const double *shadows, const double *midtones, const double *highlights);
 extern bool indigo_cuda_debayer_stretch_ycc_16(const uint16_t *input, int width, int height, int offsets, uint8_t *planes, const double *shadows, const double *midtones, const double *highlights);
 extern bool indigo_cuda_debayer_8(const uint8_t *input, int width, int height, int offsets, uint8_t *output);
@@ -110,6 +121,8 @@ static inline void indigo_cuda_set_enabled(bool enabled) { (void)enabled; }
 static inline unsigned long indigo_cuda_stretch_calls(void) { return 0; }
 static inline bool indigo_cuda_debayer_stretch_8(const uint8_t *input, int width, int height, int offsets, uint8_t *output, const double *shadows, const double *midtones, const double *highlights) { return false; }
 static inline bool indigo_cuda_debayer_stretch_16(const uint16_t *input, int width, int height, int offsets, uint8_t *output, const double *shadows, const double *midtones, const double *highlights) { return false; }
+static inline bool indigo_cuda_equalize_bayer_scale(indigo_raw_type raw_type, void *data, int width, int height, double ch1_scale, double ch2_scale, double ch3_scale, double ch4_scale) { return false; }
+static inline bool indigo_cuda_binarize(indigo_raw_type raw_type, const void *data, int width, int height, double sigma, uint8_t *output) { return false; }
 static inline bool indigo_cuda_debayer_stretch_ycc_8(const uint8_t *input, int width, int height, int offsets, uint8_t *planes, const double *shadows, const double *midtones, const double *highlights) { return false; }
 static inline bool indigo_cuda_debayer_stretch_ycc_16(const uint16_t *input, int width, int height, int offsets, uint8_t *planes, const double *shadows, const double *midtones, const double *highlights) { return false; }
 static inline bool indigo_cuda_debayer_8(const uint8_t *input, int width, int height, int offsets, uint8_t *output) { return false; }

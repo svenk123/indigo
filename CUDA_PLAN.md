@@ -166,8 +166,32 @@ Was bleibt:
 - Kernel weiter optimieren (Divisionen, Speicherzugriffe) lohnt kaum: Die GPU-Schritte machen nur noch etwa 80 von 488 ms aus.
 - Nicht getestet: Orin, JetPack 7.2, echte Kameraframes.
 
-**Phase 3: Statistik für die Agenten** (nur für große Bilder, mit Schwelle)
-- Reduktionen in `indigo_contrast` / `indigo_stddev_*` (116 ms), `binarize` (54 ms), `equalize_bayer` (48 ms), Saturation-Mask. Absolut kleine Beträge, Nutzen erst nach Phase 1 neu bewerten.
+**Phase 3: Statistik für die Agenten (teilweise umgesetzt, Nano gemessen)**
+
+Umgesetzt: `indigo_binarize` (alle 6 `indigo_raw_type`-Varianten) und die Skalierungs-Schleife von `indigo_equalize_bayer_channels` (MONO8/16). Beide reduzieren auf exakte Ganzzahlsummen (Reihenfolge der Addition ändert das Ergebnis nicht), daher bit-genau gleich der CPU:
+- `indigo_libs/indigo_raw_utils_cuda.cu` (neu): `binarize_reduce_kernel` (Summe/Quadratsumme über alle Pixel, Blockreduktion + `atomicAdd`), `binarize_threshold_kernel` (Schwellwert anwenden, zählt zusätzlich helle Pixel für die 10-%-Prüfung), `scale_bayer_kernel` (wendet die vier vorher auf der CPU berechneten Skalierungsfaktoren an, ein Thread je 2×2-Block wie die CPU-Schleife).
+- Beide Funktionen versuchen zuerst die GPU (ab `INDIGO_CUDA_MIN_PIXELS`), sonst unverändert CPU. Die Stichprobennahme und Berechnung der Skalierungsfaktoren von `equalize_bayer_channels` bleiben auf der CPU (günstig, verstreuter Zugriff).
+
+Test `indigo_test/cuda/test_cuda_raw_utils.c`: 132 Vergleiche (6 `raw_type`, 3 Sigma-Werte, mehrere Größen inklusive Grenzfall an `INDIGO_CUDA_MIN_PIXELS`, konstante Bilder), bit-genau, lief mit `CUDA_LAUNCH_BLOCKING=1` fehlerfrei durch (siehe unten, wichtig nach den gefundenen Fehlern). Alle Tests liefen zusätzlich im `CUDA=no`-Build durch.
+
+**Beim Portieren gefundene Fehler (alle behoben):**
+1. **Speicherfehler in `scale_bayer_kernel`:** Der Kernel-Aufruf übergab versehentlich den Host-Zeiger `data` statt des hochgeladenen Device-Zeigers `device_data`. Das ist auf Jetson besonders tückisch: Wegen des gemeinsamen physischen Speichers von CPU und GPU lief das für `MONO8` bei mehreren Bildgrößen unbemerkt durch, brach aber bei `MONO16` mit `unspecified launch failure` ab und beschädigte danach den CUDA-Kontext für den Rest des Prozesses (alle folgenden Aufrufe fielen still auf die CPU zurück, was Testergebnisse verfälschte). Gefunden erst mit `CUDA_LAUNCH_BLOCKING=1`, das jeden Kernel-Start synchron macht und den Fehler an der richtigen Stelle meldet. **Lehre für die weiteren Phasen: jeder neue GPU-Test läuft ab jetzt einmal mit `CUDA_LAUNCH_BLOCKING=1`, ein bestandener Test ohne dieses Flag reicht nicht.**
+2. **Vorhandener Fehler in `indigo_binarize` (MONO16, RGB48):** `sum_sq += value * value;` rechnet `value * value` in 32 Bit; bei 16-Bit-Werten über 46340 läuft das über (`65535² ≈ 4,3 × 10⁹ > INT32_MAX`) und ergibt durch den Zahlenüberlauf ein falsches, plattformabhängiges Ergebnis. Das ist unabhängig von CUDA und betrifft jedes reale 16-Bit-Bild mit hellen Pixeln. Behoben durch Aufweitung auf `long` vor der Multiplikation (`(long)value * value`), für alle sechs `raw_type`-Zweige einheitlich angewendet.
+3. **Rundungsunterschied bei RGB-Schwellwerten:** Für RGB24/RGBA32/ABGR32/RGB48 vergleicht die CPU absichtlich die *Summe* der drei Kanäle mit `Schwelle × 3` (nicht den gerundeten Mittelwert mit der Schwelle), um die Rundung der Ganzzahldivision durch 3 zu vermeiden. Der erste GPU-Kernel nutzte den gerundeten Mittelwert und wich dadurch an Werten nahe der Schwelle ab. Behoben durch eine zweite, dem CPU-Code entsprechende Vergleichsfunktion in der Schwellwert-Kernel.
+
+Messung (Nano, 12 MP):
+
+| Funktion | CPU | GPU |
+|---|---|---|
+| `indigo_binarize` | 70 ms | 26–35 ms |
+| `indigo_equalize_bayer_channels` | 45–49 ms | 30–45 ms |
+
+Nicht umgesetzt (zurückgestellt, mit Begründung):
+- **`indigo_contrast` / `indigo_stddev_*`** (8 Varianten: MONO8/16, RGB24/48, je maskiert/unmaskiert): Die zweite Passe summiert `(x - mean)²` als `double` in fester CPU-Reihenfolge. Diese Summe ist *nicht* automatisch exakt wie bei den Ganzzahlsummen oben – eine GPU-Reduktion in anderer Reihenfolge liefert im Allgemeinen ein anderes Ergebnis in den letzten Bits. Eine bit-genaue Portierung bräuchte eine Umformulierung auf `Σx²/N − mean²` (mathematisch gleich, ganzzahlig exakt berechenbar, aber eine numerisch andere Rechenreihenfolge als heute) – das ändert das Verhalten aller 8 CPU-Funktionen und braucht eine eigene Freigabe, ähnlich der Korrektur der Stretch-Parameter in Phase 0.
+- **Dabei gefunden, nicht behoben:** `indigo_stddev_rgb48` (unmaskiert) hat in der ersten Passe (Mittelwertberechnung) einen Indexierungsfehler – `i = y * width + x` statt `i = (y * width + x) * 3` wie in Passe 2 und wie bei `indigo_stddev_rgb24`. Das liest an einer falschen Stelle im Puffer und verfälscht `indigo_contrast` für unmaskierte RGB48-Bilder (nur der maskierte Pfad ist betroffen-frei). Unabhängig von CUDA, nicht behoben, da außerhalb des Auftrags „GPU-Beschleunigung“.
+- **`indigo_update_saturation_mask`:** Die Erkennung ist bit-exakt möglich (gleiche Bausteine wie `stddev`), aber das Löschen der Maskenbox pro erkanntem gesättigtem Pixel ist auf der CPU bereits O(Erkennungen × Boxfläche) und damit schwer sauber zu parallelisieren; eng gekoppelt an `indigo_contrast` (maskierter Pfad). Zurückgestellt.
+
+Empfehlung: Vor einer GPU-Portierung von `indigo_contrast`/`stddev` zuerst entscheiden, ob (a) die Σx²-Umformulierung mit dokumentierter Verhaltensänderung gewünscht ist und (b) der RGB48-Indexierungsfehler separat behoben werden soll.
 
 **Phase 4: Bahtinov**
 - Zuerst die Sinus-Tabelle auf der CPU, danach Hough mit Atomics und `skeletonize` auf der GPU, falls noch nötig.
