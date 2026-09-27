@@ -193,6 +193,25 @@ Nicht umgesetzt (zurückgestellt, mit Begründung):
 
 Empfehlung: Vor einer GPU-Portierung von `indigo_contrast`/`stddev` zuerst entscheiden, ob (a) die Σx²-Umformulierung mit dokumentierter Verhaltensänderung gewünscht ist und (b) der RGB48-Indexierungsfehler separat behoben werden soll.
 
+**Zwischenmessung: Pinned/Zero-Copy/Managed Memory (kein Handlungsbedarf auf dem Nano)**
+
+Frage: Bringt Pinned Host-Memory (oder Zero-Copy / Unified Memory) beim Preview-Kernel etwas, weil Jetson CPU und GPU physisch denselben Speicher teilen? Gemessen mit vier Varianten des Debayer+Stretch-Kernels (12-MP-Frame, `indigo_libs/indigo_stretch_kernels.h` wiederverwendet), jeweils mit realem Ablauf: Kopie aus einem gewöhnlichen Quellpuffer hinein (steht für den Kameratreiber, der kein CUDA kennt), Kernel, Kopie in einen gewöhnlichen Zielpuffer hinaus (steht für libjpeg). Nur im Scratchpad gebaut, nicht ins Repo übernommen.
+
+| Variante | Zeit/Frame | vs. heute |
+|---|---|---|
+| **A) heute:** `malloc` + `cudaMemcpyAsync` | ~101 ms | 1,00× |
+| B) `cudaHostAlloc` (Pinned) + `cudaMemcpyAsync` | ~112 ms | 0,90× |
+| C) Zero-Copy (`cudaHostAllocMapped`, Kernel liest/schreibt Host-Speicher direkt) | ~358 ms | 0,28× |
+| D) `cudaMallocManaged` | ~108 ms | 0,94× |
+
+Ergebnis: **Keine der drei Alternativen bringt auf dem Nano einen Vorteil**, zwei sind schlechter.
+- Eine erste Messung ohne die Kopien in einen gewöhnlichen Quell-/Zielpuffer zeigte für Pinned Memory noch einen scheinbaren Gewinn (77 → 48 ms) – das isolierte nur die GPU-Transferzeit und blendete aus, dass Treiber und JPEG-Verbraucher kein CUDA kennen und mit normalem Speicher arbeiten.
+- Ursache: `memcpy` in normalen Speicher schafft auf dem Nano 3,0 GB/s, in Pinned- oder Managed-Memory nur 2,1–2,2 GB/s (separat gemessen, reiner CPU-`memcpy`, kein CUDA-Aufruf beteiligt). Der schnellere GPU-Transfer wird durch den langsameren CPU-Schreibzugriff auf diesen Speicher wieder aufgehoben.
+- Zero-Copy ist eindeutig schlecht, weil der Debayer-Kernel pro Ausgabepixel mehrere nicht benachbart liegende Eingabewerte liest; über den Mapped-Memory-Pfad ist das auf Maxwell viel teurer als ein Bulk-DMA-Transfer.
+- Ein echter Gewinn wäre nur durch Wegfall der zusätzlichen Kopie möglich, z. B. `copy`/`ycc_planes` in `indigo_raw_to_jpeg` von Anfang an als `cudaMallocManaged` anlegen (nur Ausgabeseite, in unserer Hand). Die Eingabeseite (rohe Kameradaten) ist ohne Änderungen an jedem einzelnen Kameratreiber nicht zu bekommen.
+
+**Vorbehalt:** Maxwell/LPDDR4-spezifisch. Auf Orin (Ampere, LPDDR5) und Thor kann sich das wegen höherer Speicherbandbreite und anderer CPU-Kerne anders darstellen – vor einer Entscheidung dort nachmessen, nicht von diesem Ergebnis ableiten.
+
 **Phase 4: Bahtinov**
 - Zuerst die Sinus-Tabelle auf der CPU, danach Hough mit Atomics und `skeletonize` auf der GPU, falls noch nötig.
 
@@ -203,7 +222,7 @@ Empfehlung: Vor einer GPU-Portierung von `indigo_contrast`/`stddev` zuerst entsc
 ## 5. Offene Entscheidungen
 
 1. Standard bleibt `CUDA=no`. Falls Auto-Erkennung gewünscht ist, kann `CUDA=auto` ergänzt werden.
-2. Die Kombination „Jetson und Orin mit JetPack 7.2“ lässt sich für ein Nano nicht herstellen (JetPack 4.x ist dort das Ende). Klären, welche Geräte tatsächlich mit welcher JetPack-Version getestet werden. Insbesondere `make cuda-check` und `make -C indigo_test/cuda test` (inklusive `CUDA_LAUNCH_BLOCKING=1`, siehe Phase 3) einmal auf einem Orin mit JetPack 7.2 laufen lassen.
+2. Die Kombination „Jetson und Orin mit JetPack 7.2“ lässt sich für ein Nano nicht herstellen (JetPack 4.x ist dort das Ende). Klären, welche Geräte tatsächlich mit welcher JetPack-Version getestet werden. Insbesondere `make cuda-check` und `make -C indigo_test/cuda test` (inklusive `CUDA_LAUNCH_BLOCKING=1`, siehe Phase 3) sowie die Pinned/Managed-Memory-Messung (siehe oben) einmal auf einem Orin mit JetPack 7.2 laufen lassen – die Empfehlung „normaler Speicher reicht“ gilt nur für den Nano.
 3. **`indigo_contrast` / `indigo_stddev_*` auf die GPU bringen?** Braucht vorher die Umformulierung der Varianzberechnung auf `Σx²/N − mean²` (siehe Phase 3), die das Verhalten aller 8 betroffenen CPU-Funktionen numerisch geringfügig ändert (letzte Bits, keine praktische Auswirkung erwartet, aber eine Verhaltensänderung wie schon bei der Stretch-Parameter-Korrektur in Phase 0).
 4. **`indigo_stddev_rgb48` (unmaskiert) reparieren?** Der in Phase 3 gefundene Indexierungsfehler (siehe dort) ist unabhängig von CUDA und verfälscht `indigo_contrast` für unmaskierte RGB48-Bilder schon heute, auf der CPU. Bisher nicht behoben, da außerhalb des Auftrags.
 5. **`indigo_update_saturation_mask` auf die GPU bringen?** Bit-exakt möglich, aber mit ungünstigem Kostenmodell (Fläche × Erkennungen) und eng an den maskierten `contrast`-Pfad gekoppelt (siehe Punkt 3). Nutzen vor Umsetzung neu bewerten.
