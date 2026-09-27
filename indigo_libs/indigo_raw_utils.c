@@ -3022,17 +3022,28 @@ void indigo_skeletonize(uint8_t* data, int width, int height) {
 #define THETA_RES 	3000
 #define MAX_LINES 	15
 
-static void hough_transform(uint8_t* data, int width, int height, int *hough) {
+// cos(theta)/sin(theta) do not depend on the pixel, only on theta_index - computed THETA_RES times here
+// instead of (once per white pixel) x THETA_RES times inside hough_transform (a few hundred ms for a typical
+// Bahtinov mask, since libm sin/cos on ARM without hardware trig cost a few hundred ns each)
+/* not static: linked directly by indigo_test/cuda/test_bahtinov_hough.c for white-box testing, no public header entry */
+void indigo_make_trig_table_for_test(double *cos_table, double *sin_table) {
+	const double theta_step = M_PI / THETA_RES;
+	for (int theta_index = 0; theta_index < THETA_RES; theta_index++) {
+		double theta = theta_index * theta_step;
+		cos_table[theta_index] = cos(theta);
+		sin_table[theta_index] = sin(theta);
+	}
+}
+
+void indigo_hough_transform_for_test(uint8_t* data, int width, int height, int *hough, const double *cos_table, const double *sin_table) {
 	uint8_t (*pixels)[width] = (uint8_t (*)[width]) data;
 	int (*acc)[THETA_RES] = (int (*)[THETA_RES]) hough;
-	double theta_step = M_PI / THETA_RES;
 	double rho_step = 2 * sqrt(width * width + height * height) / RHO_RES;
 	for (int y = 0; y < height; y++) {
 		for (int x = 0; x < width; x++) {
 			if (pixels[y][x] > 0) {
 				for (int theta_index = 0; theta_index < THETA_RES; theta_index++) {
-					double theta = theta_index * theta_step;
-					double rho = x * cos(theta) + y * sin(theta);
+					double rho = x * cos_table[theta_index] + y * sin_table[theta_index];
 					int rho_index = (int)(rho / rho_step) + RHO_RES / 2;
 					acc[rho_index][theta_index]++;
 				}
@@ -3041,17 +3052,24 @@ static void hough_transform(uint8_t* data, int width, int height, int *hough) {
 	}
 }
 
-static int find_hough_max(int *hough, int width, int height, double *rho, double *theta) {
+int indigo_find_hough_max_for_test(int *hough, int width, int height, double *rho, double *theta) {
 	int (*acc)[THETA_RES] = (int (*)[THETA_RES]) hough;
 	int max = 0;
 	int max_rho_index = 0;
 	int max_theta_index = 0;
 	double theta_step = M_PI / THETA_RES;
 	double rho_step = 2 * sqrt(width * width + height * height) / RHO_RES;
-	for (int theta_index = 0; theta_index < THETA_RES; theta_index++) {
-		for (int rho_index = 0; rho_index < RHO_RES; rho_index++) {
-			int count = acc[rho_index][theta_index];
-			if (count > max) {
+	/* acc is [RHO_RES][THETA_RES] (row-major): looping theta_index outermost, like the original code did,
+	   walks memory with a stride of THETA_RES ints (12000 bytes) on every access - effectively random access
+	   as far as the cache is concerned. Looping rho_index outermost instead reads each row sequentially, which
+	   is an order of magnitude faster for arrays this size (36 MB, far bigger than any cache).
+	   On a tie (equal count), the ORIGINAL theta-outer/rho-inner order is preserved explicitly (lower theta_index
+	   wins, then lower rho_index), so the result does not depend on which loop order is used to search. */
+	for (int rho_index = 0; rho_index < RHO_RES; rho_index++) {
+		const int *row = acc[rho_index];
+		for (int theta_index = 0; theta_index < THETA_RES; theta_index++) {
+			int count = row[theta_index];
+			if (count > max || (count == max && count > 0 && (theta_index < max_theta_index || (theta_index == max_theta_index && rho_index < max_rho_index)))) {
 				max = count;
 				max_rho_index = rho_index;
 				max_theta_index = theta_index;
@@ -3112,11 +3130,16 @@ double indigo_bahtinov_error(indigo_raw_type raw_type, const void *data, const i
 	}
 	indigo_skeletonize(mono, width, height);
 	int *hough = indigo_safe_malloc(RHO_RES * THETA_RES * sizeof(int));
-	hough_transform(mono, width, height, hough);
+	double *cos_table = indigo_safe_malloc(THETA_RES * sizeof(double));
+	double *sin_table = indigo_safe_malloc(THETA_RES * sizeof(double));
+	indigo_make_trig_table_for_test(cos_table, sin_table);
+	indigo_hough_transform_for_test(mono, width, height, hough, cos_table, sin_table);
+	indigo_safe_free(cos_table);
+	indigo_safe_free(sin_table);
 	double rhos[MAX_LINES] = { 0.0 };
 	double thetas[MAX_LINES] = { 0.0 };
 	for (int line = 0; line < MAX_LINES; line++) {
-		int max = find_hough_max(hough, width, height, rhos + line, thetas + line);
+		int max = indigo_find_hough_max_for_test(hough, width, height, rhos + line, thetas + line);
 		indigo_debug("%s: %3d. %9.3f %9.3f -> %4d", __FUNCTION__, line, rhos[line], thetas[line] / M_PI * 180, max);
 	}
 	int line1 = -1, line2 = -1, line3 = -1;
