@@ -1,6 +1,9 @@
+/* -*- Mode: C; indent-tabs-mode:t ; c-basic-offset:4 -*- */
 /*
  * libusb stress test program to perform simple stress tests
  * Copyright © 2012 Toby Gray <toby.gray@realvnc.com>
+ *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -32,7 +35,7 @@ static libusb_testlib_result test_init_and_exit(void)
 		libusb_context *ctx = NULL;
 		int r;
 
-		r = libusb_init(&ctx);
+		r = libusb_init_context(&ctx, /*options=*/NULL, /*num_options=*/0);
 		if (r != LIBUSB_SUCCESS) {
 			libusb_testlib_logf(
 				"Failed to init libusb on iteration %d: %d",
@@ -51,7 +54,7 @@ static libusb_testlib_result test_get_device_list(void)
 	libusb_context *ctx;
 	int r;
 
-	r = libusb_init(&ctx);
+	r = libusb_init_context(&ctx, /*options=*/NULL, /*num_options=*/0);
 	if (r != LIBUSB_SUCCESS) {
 		libusb_testlib_logf("Failed to init libusb: %d", r);
 		return TEST_STATUS_FAILURE;
@@ -63,7 +66,7 @@ static libusb_testlib_result test_get_device_list(void)
 		if (list_size < 0 || !device_list) {
 			libusb_testlib_logf(
 				"Failed to get device list on iteration %d: %ld (%p)",
-				i, (long)-list_size, device_list);
+				i, (long) -list_size, (void *) device_list);
 			libusb_exit(ctx);
 			return TEST_STATUS_FAILURE;
 		}
@@ -83,7 +86,7 @@ static libusb_testlib_result test_many_device_lists(void)
 	libusb_device **device_lists[LIST_COUNT];
 	int r;
 
-	r = libusb_init(&ctx);
+	r = libusb_init_context(&ctx, /*options=*/NULL, /*num_options=*/0);
 	if (r != LIBUSB_SUCCESS) {
 		libusb_testlib_logf("Failed to init libusb: %d", r);
 		return TEST_STATUS_FAILURE;
@@ -97,7 +100,7 @@ static libusb_testlib_result test_many_device_lists(void)
 		if (list_size < 0 || !device_lists[i]) {
 			libusb_testlib_logf(
 				"Failed to get device list on iteration %d: %ld (%p)",
-				i, (long)-list_size, device_lists[i]);
+				i, (long) -list_size, (void *) device_lists[i]);
 			result = TEST_STATUS_FAILURE;
 			break;
 		}
@@ -123,22 +126,25 @@ static libusb_testlib_result test_default_context_change(void)
 		libusb_context *ctx = NULL;
 		int r;
 
+
+		/* Enable debug output on new context, to be sure to use the context */
+		struct libusb_init_option options[] = {
+		  {
+		    .option = LIBUSB_OPTION_LOG_LEVEL,
+		    .value = {.ival = LIBUSB_LOG_LEVEL_DEBUG},
+		  },
+		};
+		int num_options = 1;
+
 		/* First create a new context */
-		r = libusb_init(&ctx);
+		r = libusb_init_context(&ctx, options, num_options);
 		if (r != LIBUSB_SUCCESS) {
 			libusb_testlib_logf("Failed to init libusb: %d", r);
 			return TEST_STATUS_FAILURE;
 		}
 
-		/* Enable debug output on new context, to be sure to use the context */
-		libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG);
-
-		/* Enable debug output on the default context. This should work even before
-		 * the context has been created. */
-		libusb_set_option(NULL, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG);
-
 		/* Now create a reference to the default context */
-		r = libusb_init(NULL);
+		r = libusb_init_context(/*ctx=*/NULL, options, num_options);
 		if (r != LIBUSB_SUCCESS) {
 			libusb_testlib_logf("Failed to init libusb: %d", r);
 			libusb_exit(ctx);
@@ -163,7 +169,7 @@ static const libusb_testlib_test tests[] = {
 	LIBUSB_NULL_TEST
 };
 
-int main(int argc, char *argv[])
+int main(int argc, const char *argv[])
 {
 	return libusb_testlib_run_tests(argc, argv, tests);
 }

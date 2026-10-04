@@ -5,6 +5,8 @@
  * Copyright © 2019 Nathan Hjelm <hjelmn@cs.unm.edu>
  * Copyright © 2019 Google LLC. All rights reserved.
  *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
@@ -22,6 +24,7 @@
 
 #include "libusbi.h"
 
+#include <assert.h>
 #include <string.h>
 
 /**
@@ -34,16 +37,21 @@
 
 static void LIBUSB_CALL sync_transfer_cb(struct libusb_transfer *transfer)
 {
-	int *completed = transfer->user_data;
+	usbi_dbg(usbi_transfer_ctx(transfer), "actual_length=%d", transfer->actual_length);
+
+	int *completed = (int *)transfer->user_data;
 	*completed = 1;
-	usbi_dbg(TRANSFER_CTX(transfer), "actual_length=%d", transfer->actual_length);
-	/* caller interprets result and frees transfer */
+	/*
+	 * Right after setting 'completed', another thread might free the transfer, so don't
+	 * access it beyond this point. The instantiating thread (not necessarily the
+	 * current one) interprets the result and frees the transfer.
+	 */
 }
 
 static void sync_transfer_wait_for_completion(struct libusb_transfer *transfer)
 {
-	int r, *completed = transfer->user_data;
-	struct libusb_context *ctx = HANDLE_CTX(transfer->dev_handle);
+	int r, *completed = (int *)transfer->user_data;
+	struct libusb_context *ctx = usbi_handle_ctx(transfer->dev_handle);
 
 	while (!*completed) {
 		r = libusb_handle_events_completed(ctx, completed);
@@ -85,12 +93,12 @@ static void sync_transfer_wait_for_completion(struct libusb_transfer *transfer)
  * before giving up due to no response being received. For an unlimited
  * timeout, use value 0.
  * \returns on success, the number of bytes actually transferred
- * \returns LIBUSB_ERROR_TIMEOUT if the transfer timed out
- * \returns LIBUSB_ERROR_PIPE if the control request was not supported by the
+ * \returns \ref LIBUSB_ERROR_TIMEOUT if the transfer timed out
+ * \returns \ref LIBUSB_ERROR_PIPE if the control request was not supported by the
  * device
- * \returns LIBUSB_ERROR_NO_DEVICE if the device has been disconnected
- * \returns LIBUSB_ERROR_BUSY if called from event handling context
- * \returns LIBUSB_ERROR_INVALID_PARAM if the transfer size is larger than
+ * \returns \ref LIBUSB_ERROR_NO_DEVICE if the device has been disconnected
+ * \returns \ref LIBUSB_ERROR_BUSY if called from event handling context
+ * \returns \ref LIBUSB_ERROR_INVALID_PARAM if the transfer size is larger than
  * the operating system and/or hardware can support (see \ref asynclimits)
  * \returns another LIBUSB_ERROR code on other failures
  */
@@ -103,14 +111,16 @@ int API_EXPORTED libusb_control_transfer(libusb_device_handle *dev_handle,
 	int completed = 0;
 	int r;
 
-	if (usbi_handling_events(HANDLE_CTX(dev_handle)))
+	assert(dev_handle);
+
+	if (usbi_handling_events(usbi_handle_ctx(dev_handle)))
 		return LIBUSB_ERROR_BUSY;
 
 	transfer = libusb_alloc_transfer(0);
 	if (!transfer)
 		return LIBUSB_ERROR_NO_MEM;
 
-	buffer = malloc(LIBUSB_CONTROL_SETUP_SIZE + wLength);
+	buffer = (unsigned char *)malloc(LIBUSB_CONTROL_SETUP_SIZE + wLength);
 	if (!buffer) {
 		libusb_free_transfer(transfer);
 		return LIBUSB_ERROR_NO_MEM;
@@ -134,7 +144,7 @@ int API_EXPORTED libusb_control_transfer(libusb_device_handle *dev_handle,
 
 	if ((bmRequestType & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
 		memcpy(data, libusb_control_transfer_get_data(transfer),
-			transfer->actual_length);
+			(size_t)transfer->actual_length);
 
 	switch (transfer->status) {
 	case LIBUSB_TRANSFER_COMPLETED:
@@ -157,7 +167,7 @@ int API_EXPORTED libusb_control_transfer(libusb_device_handle *dev_handle,
 		r = LIBUSB_ERROR_IO;
 		break;
 	default:
-		usbi_warn(HANDLE_CTX(dev_handle),
+		usbi_warn(usbi_handle_ctx(dev_handle),
 			"unrecognised status code %d", transfer->status);
 		r = LIBUSB_ERROR_OTHER;
 	}
@@ -174,7 +184,9 @@ static int do_sync_bulk_transfer(struct libusb_device_handle *dev_handle,
 	int completed = 0;
 	int r;
 
-	if (usbi_handling_events(HANDLE_CTX(dev_handle)))
+	assert(dev_handle);
+
+	if (usbi_handling_events(usbi_handle_ctx(dev_handle)))
 		return LIBUSB_ERROR_BUSY;
 
 	transfer = libusb_alloc_transfer(0);
@@ -193,8 +205,10 @@ static int do_sync_bulk_transfer(struct libusb_device_handle *dev_handle,
 
 	sync_transfer_wait_for_completion(transfer);
 
-	if (transferred)
+	if (transferred) {
+		assert(transfer->actual_length >= 0);
 		*transferred = transfer->actual_length;
+	}
 
 	switch (transfer->status) {
 	case LIBUSB_TRANSFER_COMPLETED:
@@ -217,7 +231,7 @@ static int do_sync_bulk_transfer(struct libusb_device_handle *dev_handle,
 		r = LIBUSB_ERROR_IO;
 		break;
 	default:
-		usbi_warn(HANDLE_CTX(dev_handle),
+		usbi_warn(usbi_handle_ctx(dev_handle),
 			"unrecognised status code %d", transfer->status);
 		r = LIBUSB_ERROR_OTHER;
 	}
@@ -260,14 +274,14 @@ static int do_sync_bulk_transfer(struct libusb_device_handle *dev_handle,
  * timeout, use value 0.
  *
  * \returns 0 on success (and populates <tt>transferred</tt>)
- * \returns LIBUSB_ERROR_TIMEOUT if the transfer timed out (and populates
+ * \returns \ref LIBUSB_ERROR_TIMEOUT if the transfer timed out (and populates
  * <tt>transferred</tt>)
- * \returns LIBUSB_ERROR_PIPE if the endpoint halted
- * \returns LIBUSB_ERROR_OVERFLOW if the device offered more data, see
+ * \returns \ref LIBUSB_ERROR_PIPE if the endpoint halted
+ * \returns \ref LIBUSB_ERROR_OVERFLOW if the device offered more data, see
  * \ref libusb_packetoverflow
- * \returns LIBUSB_ERROR_NO_DEVICE if the device has been disconnected
- * \returns LIBUSB_ERROR_BUSY if called from event handling context
- * \returns LIBUSB_ERROR_INVALID_PARAM if the transfer size is larger than
+ * \returns \ref LIBUSB_ERROR_NO_DEVICE if the device has been disconnected
+ * \returns \ref LIBUSB_ERROR_BUSY if called from event handling context
+ * \returns \ref LIBUSB_ERROR_INVALID_PARAM if the transfer size is larger than
  * the operating system and/or hardware can support (see \ref asynclimits)
  * \returns another LIBUSB_ERROR code on other failures
  */
@@ -307,21 +321,21 @@ int API_EXPORTED libusb_bulk_transfer(libusb_device_handle *dev_handle,
  * \param length for bulk writes, the number of bytes from data to be sent. for
  * bulk reads, the maximum number of bytes to receive into the data buffer.
  * \param transferred output location for the number of bytes actually
- * transferred. Since version 1.0.21 (\ref LIBUSB_API_VERSION >= 0x01000105),
- * it is legal to pass a NULL pointer if you do not wish to receive this
- * information.
+ * transferred. Will never be negative. Since version 1.0.21
+ * (\ref LIBUSB_API_VERSION >= 0x01000105), it is legal to pass a NULL
+ * pointer if you do not wish to receive this information.
  * \param timeout timeout (in milliseconds) that this function should wait
  * before giving up due to no response being received. For an unlimited
  * timeout, use value 0.
  *
  * \returns 0 on success (and populates <tt>transferred</tt>)
- * \returns LIBUSB_ERROR_TIMEOUT if the transfer timed out
- * \returns LIBUSB_ERROR_PIPE if the endpoint halted
- * \returns LIBUSB_ERROR_OVERFLOW if the device offered more data, see
+ * \returns \ref LIBUSB_ERROR_TIMEOUT if the transfer timed out
+ * \returns \ref LIBUSB_ERROR_PIPE if the endpoint halted
+ * \returns \ref LIBUSB_ERROR_OVERFLOW if the device offered more data, see
  * \ref libusb_packetoverflow
- * \returns LIBUSB_ERROR_NO_DEVICE if the device has been disconnected
- * \returns LIBUSB_ERROR_BUSY if called from event handling context
- * \returns LIBUSB_ERROR_INVALID_PARAM if the transfer size is larger than
+ * \returns \ref LIBUSB_ERROR_NO_DEVICE if the device has been disconnected
+ * \returns \ref LIBUSB_ERROR_BUSY if called from event handling context
+ * \returns \ref LIBUSB_ERROR_INVALID_PARAM if the transfer size is larger than
  * the operating system and/or hardware can support (see \ref asynclimits)
  * \returns another LIBUSB_ERROR code on other error
  */
@@ -329,6 +343,7 @@ int API_EXPORTED libusb_interrupt_transfer(libusb_device_handle *dev_handle,
 	unsigned char endpoint, unsigned char *data, int length,
 	int *transferred, unsigned int timeout)
 {
+	assert(dev_handle);
 	return do_sync_bulk_transfer(dev_handle, endpoint, data, length,
 		transferred, timeout, LIBUSB_TRANSFER_TYPE_INTERRUPT);
 }

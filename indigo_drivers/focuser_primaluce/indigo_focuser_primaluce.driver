@@ -1,0 +1,2061 @@
+// Copyright (c) 2023-2026 CloudMakers, s. r. o.
+// All rights reserved.
+//
+// You can use this software under the terms of 'INDIGO Astronomy
+// open-source license' (see LICENSE.md).
+//
+// THIS SOFTWARE IS PROVIDED BY THE AUTHORS 'AS IS' AND ANY EXPRESS
+// OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+// WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+// GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+// WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+// NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// PrimaluceLab Focuser/Rotator driver definition
+
+driver primaluce {
+	label = "PrimaluceLab Focuser/Rotator";
+	author = "refactoring by Peter Polakovic <peter.polakovic@cloudmakers.eu>";
+	copyright = "Copyright (c) 2023-2026 CloudMakers, s. r. o.";
+	version = 19;
+	serial {
+		pattern {
+			product = "CP2102N";
+		}
+	}
+	include {
+		#define JSMN_STRICT
+		#define JSMN_PARENT_LINKS
+		#include "jsmn.h"
+		#include <ctype.h>
+	}
+	define {
+		#define MAX_RESPONSE_SIZE	8192
+		#define MAX_TOKEN_COUT		1024
+		// The controller stores named focuser positions as PRESET_1 to PRESET_9 (M1POS).
+		#define PRESET_COUNT		9
+	}
+	data {
+		char response[MAX_RESPONSE_SIZE];
+		jsmntok_t tokens[MAX_TOKEN_COUT];
+		jsmn_parser parser;
+		bool has_abs_pos;
+		bool rotator_has_abs_pos;
+		bool rotator_has_position_deg;
+		int preset_positions[PRESET_COUNT];
+		char preset_names[PRESET_COUNT][INDIGO_VALUE_SIZE];
+		int rotator_calibration_polls;
+		bool is_sestosenso_3;
+		bool is_http;
+		char http_host[INDIGO_NAME_SIZE];
+		int http_port;
+	}
+	code {
+		static void focuser_position_handler(indigo_device *device);
+		static void focuser_steps_handler(indigo_device *device);
+		static void rotator_position_handler(indigo_device *device);
+
+		static char *GET_MODNAME[] = { "res", "get", "MODNAME", NULL };
+		static char *GET_ERROR[] = { "res", "get", "ERROR", NULL };
+		static char *SET_ERROR[] = { "res", "set", "ERROR", NULL };
+		static char *CMD_ERROR[] = { "res", "cmd", "ERROR", NULL };
+		static char *GET_SN[] = { "res", "get", "SN", NULL };
+		static char *GET_SWAPP[] = { "res", "get", "SWVERS", "SWAPP", NULL };
+		static char *GET_SWWEB[] = { "res", "get", "SWVERS", "SWWEB", NULL };
+		static char *GET_CALRESTART_MOT1[] = { "res", "get", "CALRESTART", "MOT1", NULL };
+		static char *GET_CALRESTART_MOT2[] = { "res", "get", "CALRESTART", "MOT2", NULL };
+		static char *GET_MOT1_ABS_POS_STEP[] = { "res", "get", "MOT1", "ABS_POS_STEP", NULL };
+		static char *GET_MOT1_ABS_POS[] = { "res", "get", "MOT1", "ABS_POS", NULL };
+		static char *GET_MOT2_ABS_POS_DEG[] = { "res", "get", "MOT2", "ABS_POS_DEG", NULL };
+		static char *GET_MOT2_ABS_POS[] = { "res", "get", "MOT2", "ABS_POS", NULL };
+		static char *GET_MOT2_POSITION_DEG[] = { "res", "get", "MOT2", "POSITION_DEG", NULL };
+		static char *GET_MOT2_CAL_STATUS[] = { "res", "get", "MOT2", "CAL_STATUS", NULL };
+		static char *SET_MOT2_CAL_STATUS[] = { "res", "set", "MOT2", "CAL_STATUS", NULL };
+		static char *GET_MOT1_BKLASH[] = { "res", "get", "MOT1", "BKLASH", NULL };
+		static char *SET_MOT1_BKLASH[] = { "res", "set", "MOT1", "BKLASH", NULL };
+		static char *GET_MOT1_SPEED[] = { "res", "get", "MOT1", "SPEED", NULL };
+		static char *SET_MOT1_SPEED[] = { "res", "set", "MOT1", "SPEED", NULL };
+		static char *GET_MOT1_MST[] = { "res", "get", "MOT1", "STATUS", "MST", NULL };
+		static char *GET_MOT2_MST[] = { "res", "get", "MOT2", "STATUS", "MST", NULL };
+		static char *CMD_MOT1_STEP[] = { "res", "cmd", "MOT1", "STEP", NULL };
+		static char *CMD_MOT1_GOTO[] = { "res", "cmd", "MOT1", "GOTO", NULL };
+		//static char *CMD_MOT1_MOVE_REL[] = { "res", "cmd", "MOT1", "MOVE_REL", NULL };
+		static char *CMD_MOT1_MOT_STOP[] = { "res", "cmd", "MOT1", "MOT_STOP", NULL };
+		static char *CMD_MOT1_MOT_ABORT[] = { "res", "cmd", "MOT1", "MOT_ABORT", NULL };
+		static char *GET_PRESET_1[] = { "res", "get", "PRESET_1", NULL };
+		static char *CMD_MOT2_STEP[] = { "res", "cmd", "MOT2", "STEP", NULL };
+		static char *CMD_MOT2_MOT_STOP[] = { "res", "cmd", "MOT2", "MOT_STOP", NULL };
+		static char *CMD_MOT2_SYNC_POS[] = { "res", "cmd", "MOT2", "SYNC_POS", NULL };
+		static char *GET_MOT1_CAL_MINPOS[] = { "res", "get", "MOT1", "CAL_MINPOS", NULL };
+		static char *GET_MOT1_CAL_MAXPOS[] = { "res", "get", "MOT1", "CAL_MAXPOS", NULL };
+		static char *GET_EXT_T[] = { "res", "get", "EXT_T", NULL };
+		static char *GET_DIMLEDS[] = { "res", "get", "DIMLEDS", NULL };
+		static char *GET_VIN_12V[] = { "res", "get", "VIN_12V", NULL };
+		static char *GET_VIN_USB[] = { "res", "get", "VIN_USB", NULL };
+		static char *GET_MOT1_NTC_T[] = { "res", "get", "MOT1", "NTC_T", NULL };
+		static char *GET_MOT1_ERROR[] = { "res", "get", "MOT1", "ERROR", NULL };
+		static char *GET_MOT2_ERROR[] = { "res", "get", "MOT2", "ERROR", NULL };
+		static char *GET_WIFIAP_STATUS[] = { "res", "get", "WIFIAP", "STATUS", NULL };
+		static char *GET_LANCFG[] = { "res", "get", "LANCFG", NULL };
+		static char *GET_WIFIAP_SSID[] = { "res", "get", "WIFIAP", "SSID", NULL };
+		static char *GET_WIFIAP_PWD[] = { "res", "get", "WIFIAP", "PWD", NULL };
+		static char *GET_WIFISTA_SSID[] = { "res", "get", "WIFISTA", "SSID", NULL };
+		static char *GET_WIFISTA_PWD[] = { "res", "get", "WIFISTA", "PWD", NULL };
+		static char *GET_MOT1_FnRUN_ACC[] = { "res", "get", "MOT1", "FnRUN_ACC", NULL };
+		static char *GET_MOT1_FnRUN_SPD[] = { "res", "get", "MOT1", "FnRUN_SPD", NULL };
+		static char *GET_MOT1_FnRUN_DEC[] = { "res", "get", "MOT1", "FnRUN_DEC", NULL };
+		static char *GET_MOT1_FnRUN_CURR_ACC[] = { "res", "get", "MOT1", "FnRUN_CURR_ACC", NULL };
+		static char *GET_MOT1_FnRUN_CURR_SPD[] = { "res", "get", "MOT1", "FnRUN_CURR_SPD", NULL };
+		static char *GET_MOT1_FnRUN_CURR_DEC[] = { "res", "get", "MOT1", "FnRUN_CURR_DEC", NULL };
+		static char *GET_MOT1_FnRUN_CURR_HOLD[] = { "res", "get", "MOT1", "FnRUN_CURR_HOLD", NULL };
+		static char *GET_MOT1_HOLDCURR_STATUS[] = { "res", "get", "MOT1", "HOLDCURR_STATUS", NULL };
+		static char *SET_MOT1_HOLDCURR_STATUS[] = { "res", "set", "MOT1", "HOLDCURR_STATUS", NULL };
+		static char *GET_RUNPRESET_L_M1ACC[] = { "res", "get", "RUNPRESET_L", "M1ACC", NULL };
+		static char *GET_RUNPRESET_L_M1SPD[] = { "res", "get", "RUNPRESET_L", "M1SPD", NULL };
+		static char *GET_RUNPRESET_L_M1DEC[] = { "res", "get", "RUNPRESET_L", "M1DEC", NULL };
+		static char *GET_RUNPRESET_L_M1CACC[] = { "res", "get", "RUNPRESET_L", "M1CACC", NULL };
+		static char *GET_RUNPRESET_L_M1CSPD[] = { "res", "get", "RUNPRESET_L", "M1CSPD", NULL };
+		static char *GET_RUNPRESET_L_M1CDEC[] = { "res", "get", "RUNPRESET_L", "M1CDEC", NULL };
+		static char *GET_RUNPRESET_L_M1HOLD[] = { "res", "get", "RUNPRESET_L", "M1HOLD", NULL };
+		static char *GET_RUNPRESET_M_M1ACC[] = { "res", "get", "RUNPRESET_M", "M1ACC", NULL };
+		static char *GET_RUNPRESET_M_M1SPD[] = { "res", "get", "RUNPRESET_M", "M1SPD", NULL };
+		static char *GET_RUNPRESET_M_M1DEC[] = { "res", "get", "RUNPRESET_M", "M1DEC", NULL };
+		static char *GET_RUNPRESET_M_M1CACC[] = { "res", "get", "RUNPRESET_M", "M1CACC", NULL };
+		static char *GET_RUNPRESET_M_M1CSPD[] = { "res", "get", "RUNPRESET_M", "M1CSPD", NULL };
+		static char *GET_RUNPRESET_M_M1CDEC[] = { "res", "get", "RUNPRESET_M", "M1CDEC", NULL };
+		static char *GET_RUNPRESET_M_M1HOLD[] = { "res", "get", "RUNPRESET_M", "M1HOLD", NULL };
+		static char *GET_RUNPRESET_S_M1ACC[] = { "res", "get", "RUNPRESET_S", "M1ACC", NULL };
+		static char *GET_RUNPRESET_S_M1SPD[] = { "res", "get", "RUNPRESET_S", "M1SPD", NULL };
+		static char *GET_RUNPRESET_S_M1DEC[] = { "res", "get", "RUNPRESET_S", "M1DEC", NULL };
+		static char *GET_RUNPRESET_S_M1CACC[] = { "res", "get", "RUNPRESET_S", "M1CACC", NULL };
+		static char *GET_RUNPRESET_S_M1CSPD[] = { "res", "get", "RUNPRESET_S", "M1CSPD", NULL };
+		static char *GET_RUNPRESET_S_M1CDEC[] = { "res", "get", "RUNPRESET_S", "M1CDEC", NULL };
+		static char *GET_RUNPRESET_S_M1HOLD[] = { "res", "get", "RUNPRESET_S", "M1HOLD", NULL };
+		static char *GET_RUNPRESET_1_M1ACC[] = { "res", "get", "RUNPRESET_1", "M1ACC", NULL };
+		static char *GET_RUNPRESET_1_M1SPD[] = { "res", "get", "RUNPRESET_1", "M1SPD", NULL };
+		static char *GET_RUNPRESET_1_M1DEC[] = { "res", "get", "RUNPRESET_1", "M1DEC", NULL };
+		static char *GET_RUNPRESET_1_M1CACC[] = { "res", "get", "RUNPRESET_1", "M1CACC", NULL };
+		static char *GET_RUNPRESET_1_M1CSPD[] = { "res", "get", "RUNPRESET_1", "M1CSPD", NULL };
+		static char *GET_RUNPRESET_1_M1CDEC[] = { "res", "get", "RUNPRESET_1", "M1CDEC", NULL };
+		static char *GET_RUNPRESET_1_M1HOLD[] = { "res", "get", "RUNPRESET_1", "M1HOLD", NULL };
+		static char *GET_RUNPRESET_2_M1ACC[] = { "res", "get", "RUNPRESET_2", "M1ACC", NULL };
+		static char *GET_RUNPRESET_2_M1SPD[] = { "res", "get", "RUNPRESET_2", "M1SPD", NULL };
+		static char *GET_RUNPRESET_2_M1DEC[] = { "res", "get", "RUNPRESET_2", "M1DEC", NULL };
+		static char *GET_RUNPRESET_2_M1CACC[] = { "res", "get", "RUNPRESET_2", "M1CACC", NULL };
+		static char *GET_RUNPRESET_2_M1CSPD[] = { "res", "get", "RUNPRESET_2", "M1CSPD", NULL };
+		static char *GET_RUNPRESET_2_M1CDEC[] = { "res", "get", "RUNPRESET_2", "M1CDEC", NULL };
+		static char *GET_RUNPRESET_2_M1HOLD[] = { "res", "get", "RUNPRESET_2", "M1HOLD", NULL };
+		static char *GET_RUNPRESET_3_M1ACC[] = { "res", "get", "RUNPRESET_3", "M1ACC", NULL };
+		static char *GET_RUNPRESET_3_M1SPD[] = { "res", "get", "RUNPRESET_3", "M1SPD", NULL };
+		static char *GET_RUNPRESET_3_M1DEC[] = { "res", "get", "RUNPRESET_3", "M1DEC", NULL };
+		static char *GET_RUNPRESET_3_M1CACC[] = { "res", "get", "RUNPRESET_3", "M1CACC", NULL };
+		static char *GET_RUNPRESET_3_M1CSPD[] = { "res", "get", "RUNPRESET_3", "M1CSPD", NULL };
+		static char *GET_RUNPRESET_3_M1CDEC[] = { "res", "get", "RUNPRESET_3", "M1CDEC", NULL };
+		static char *GET_RUNPRESET_3_M1HOLD[] = { "res", "get", "RUNPRESET_3", "M1HOLD", NULL };
+
+		// Over the network the controller serves the same JSON requests as GET /ajax.php?jreq=<request>, one request per connection.
+		static bool primaluce_http_exchange(indigo_device *device, const char *request) {
+			char query[3 * MAX_RESPONSE_SIZE + 1];
+			char *out = query;
+			for (const unsigned char *in = (const unsigned char *)request; *in && out < query + sizeof(query) - 4; in++) {
+				if (isalnum(*in) || strchr("-_.~", *in)) {
+					*out++ = *in;
+				} else {
+					out += sprintf(out, "%%%02X", *in);
+				}
+			}
+			*out = 0;
+			indigo_uni_handle *handle = indigo_uni_open_client_socket_with_timeout(PRIVATE_DATA->http_host, PRIVATE_DATA->http_port, SOCK_STREAM, INDIGO_DELAY(5), INDIGO_LOG_DEBUG);
+			if (handle == NULL) {
+				INDIGO_DRIVER_ERROR(DRIVER_NAME, "Can't connect to %s:%d", PRIVATE_DATA->http_host, PRIVATE_DATA->http_port);
+				return false;
+			}
+			bool result = false;
+			char reply[MAX_RESPONSE_SIZE + 1024];
+			long length = 0;
+			if (indigo_uni_printf(handle, "GET /ajax.php?jreq=%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", query, PRIVATE_DATA->http_host) > 0) {
+				char *body = NULL;
+				long content_length = -1;
+				// The controller keeps the connection open after the reply, so Content-Length ends the read.
+				while (length < (long)sizeof(reply) - 1 && indigo_uni_wait_for_data(handle, INDIGO_DELAY(5)) > 0) {
+					long count = indigo_uni_read_available(handle, reply + length, sizeof(reply) - 1 - length);
+					if (count <= 0) {
+						break;
+					}
+					length += count;
+					reply[length] = 0;
+					if (body == NULL && (body = strstr(reply, "\r\n\r\n")) != NULL) {
+						char *field = strstr(reply, "\r\nContent-Length:");
+						if (field != NULL && field < body) {
+							content_length = atol(field + 17);
+						}
+					}
+					if (body != NULL && content_length >= 0 && length >= body + 4 - reply + content_length) {
+						break;
+					}
+				}
+				reply[length] = 0;
+				if (strncmp(reply, "HTTP/1.", 7) || strncmp(reply + 8, " 200 ", 5) || body == NULL) {
+					INDIGO_DRIVER_ERROR(DRIVER_NAME, "Unexpected HTTP response: %.40s", reply);
+				} else if (strlen(body + 4) >= MAX_RESPONSE_SIZE) {
+					INDIGO_DRIVER_ERROR(DRIVER_NAME, "HTTP response too long");
+				} else {
+					strcpy(PRIVATE_DATA->response, body + 4);
+					INDIGO_DRIVER_DEBUG(DRIVER_NAME, "%s", PRIVATE_DATA->response);
+					result = *PRIVATE_DATA->response != 0;
+				}
+			}
+			indigo_uni_close(&handle);
+			return result;
+		}
+
+		static char *get_string(indigo_device *device, char *path[]);
+
+		static bool primaluce_command(indigo_device *device, char *command, ...) {
+			long result;
+			va_list args;
+			va_start(args, command);
+			if (PRIVATE_DATA->is_http) {
+				char request[MAX_RESPONSE_SIZE];
+				vsnprintf(request, sizeof(request), command, args);
+				va_end(args);
+				if (!primaluce_http_exchange(device, request)) {
+					return false;
+				}
+			} else {
+				result = indigo_uni_vprintf(PRIVATE_DATA->handle, command, args);
+				va_end(args);
+				if (result <= 0) {
+					return false;
+				}
+				while (true) {
+					result = indigo_uni_read_section(PRIVATE_DATA->handle, PRIVATE_DATA->response, MAX_RESPONSE_SIZE - 1, "\n", "\r\n", -1);
+					if (result < 1) {
+						return false;
+					}
+					if (*PRIVATE_DATA->response == '[') {
+						INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Ignored");
+						continue;
+					}
+					break;
+				}
+			}
+			memset(PRIVATE_DATA->tokens, 0, sizeof(PRIVATE_DATA->tokens));
+			jsmn_init(&PRIVATE_DATA->parser);
+			if (*PRIVATE_DATA->response == '"' || jsmn_parse(&PRIVATE_DATA->parser, PRIVATE_DATA->response, MAX_RESPONSE_SIZE, PRIVATE_DATA->tokens, MAX_TOKEN_COUT) <= 0) {
+				INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Failed to parse");
+				return false;
+			}
+			for (int i = 0; i < MAX_TOKEN_COUT; i++) {
+				if (PRIVATE_DATA->tokens[i].type == JSMN_UNDEFINED) {
+					break;
+				}
+				if (PRIVATE_DATA->tokens[i].type == JSMN_STRING) {
+					PRIVATE_DATA->response[PRIVATE_DATA->tokens[i].end] = 0;
+				}
+			}
+			// A rejected request is answered as an ERROR under the request verb
+			char *error = get_string(device, CMD_ERROR);
+			if (error == NULL) {
+				error = get_string(device, SET_ERROR);
+			}
+			if (error == NULL) {
+				error = get_string(device, GET_ERROR);
+			}
+			if (error != NULL) {
+				INDIGO_DRIVER_ERROR(DRIVER_NAME, "Request rejected: %s", error);
+				return false;
+			}
+			return true;
+		}
+
+		static int getToken(indigo_device *device, int start, char *path[]) {
+			if (PRIVATE_DATA->tokens[start].type != JSMN_OBJECT) {
+				return -1;
+			}
+			int count = PRIVATE_DATA->tokens[start].size;
+			int index = start + 1;
+			char *name = *path;
+			for (int i = 0; i < count; i++) {
+				if (PRIVATE_DATA->tokens[index].type != JSMN_STRING) {
+					return -1;
+				}
+				char *n = PRIVATE_DATA->response + PRIVATE_DATA->tokens[index].start;
+				int l = PRIVATE_DATA->tokens[index].end - PRIVATE_DATA->tokens[index].start;
+				if (!strncmp(n, name, l)) {
+					index++;
+					if (*++path == NULL) {
+						return index;
+					}
+					return getToken(device, index, path);
+				} else {
+					while (true) {
+						index++;
+						if (PRIVATE_DATA->tokens[index].type == JSMN_UNDEFINED) {
+							return -1;
+						}
+						if (PRIVATE_DATA->tokens[index].parent == start) {
+							break;
+						}
+					}
+				}
+			}
+			return -1;
+		}
+
+		static char *get_string(indigo_device *device, char *path[]) {
+			int index = getToken(device, 0, path);
+			if (index == -1 || PRIVATE_DATA->tokens[index].type != JSMN_STRING) {
+				return NULL;
+			}
+			return PRIVATE_DATA->response + PRIVATE_DATA->tokens[index].start;
+		}
+
+		static double get_number2(indigo_device *device, char *path[], char *alt_path[]) {
+			int index = getToken(device, 0, path);
+			if (index == -1) {
+				if (alt_path != NULL) {
+					index = getToken(device, 0, alt_path);
+					if (index == -1) {
+						return 0;
+					}
+				} else {
+					return 0;
+				}
+			}
+			if  (PRIVATE_DATA->tokens[index].type == JSMN_PRIMITIVE || PRIVATE_DATA->tokens[index].type == JSMN_STRING) {
+				return atof(PRIVATE_DATA->response + PRIVATE_DATA->tokens[index].start);
+			}
+			return 0;
+		}
+
+		static double get_number(indigo_device *device, char *path[]) {
+			return get_number2(device, path, NULL);
+		}
+
+		// The firmware applies a new LANCFG only after a restart, so a changed mode restarts the controller.
+		static bool primaluce_set_lan_cfg(indigo_device *device, const char *mode) {
+			char *text;
+			if (!primaluce_command(device, "{\"req\":{\"get\":{\"LANCFG\":\"\"}}}") || (text = get_string(device, GET_LANCFG)) == NULL) {
+				return false;
+			}
+			if (!strcmp(text, mode)) {
+				return true;
+			}
+			if (!primaluce_command(device, "{\"req\":{\"set\":{\"LANCFG\":\"%s\"}}}", mode) || !primaluce_command(device, "{\"req\":{\"cmd\":{\"REBOOT\":\"\"}}}")) {
+				return false;
+			}
+			if (PRIVATE_DATA->is_http) {
+				indigo_send_message(device, X_WIFI_PROPERTY, "The controller restarts to apply the WiFi mode and leaves its current network");
+				return true;
+			}
+			// The restart prints a boot log on the serial line before the controller answers again.
+			for (int i = 0; i < 20; i++) {
+				indigo_usleep(INDIGO_DELAY(0.5));
+				indigo_uni_discard(PRIVATE_DATA->handle);
+				if (primaluce_command(device, "{\"req\":{\"get\":{\"MODNAME\":\"\"}}}") && get_string(device, GET_MODNAME) != NULL) {
+					return true;
+				}
+			}
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "No answer after restart");
+			return false;
+		}
+
+		static bool primaluce_open(indigo_device *device) {
+			char *name = DEVICE_PORT_ITEM->text.value;
+			PRIVATE_DATA->is_http = indigo_uni_is_url(name, "http");
+			if (PRIVATE_DATA->is_http) {
+				// http://host[:port] or tcp://host[:port] reaches the controller on a WiFi network
+				char *host = strchr(name, ':') + 3;
+				size_t host_length = strcspn(host, ":/");
+				if (host_length == 0 || host_length >= sizeof(PRIVATE_DATA->http_host)) {
+					INDIGO_DRIVER_ERROR(DRIVER_NAME, "Malformed URL '%s'", name);
+					PRIVATE_DATA->is_http = false;
+					return false;
+				}
+				memcpy(PRIVATE_DATA->http_host, host, host_length);
+				PRIVATE_DATA->http_host[host_length] = 0;
+				PRIVATE_DATA->http_port = host[host_length] == ':' ? atoi(host + host_length + 1) : 80;
+			} else {
+				PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(name, 115200, INDIGO_LOG_DEBUG);
+			}
+			if (PRIVATE_DATA->is_http || PRIVATE_DATA->handle != NULL) {
+				char *text;
+				if (primaluce_command(device, "{\"req\":{\"get\":{\"MODNAME\":\"\"}}}") && (text = get_string(device, GET_MODNAME))) {
+					if (!strncmp(text, "SESTOSENSO", 10) || !strncmp(text, "ESATTO", 6)) {
+						PRIVATE_DATA->is_sestosenso_3 = strncmp(text, "SESTOSENSO3", 11)==0;
+						if (primaluce_command(device, "{\"req\":{\"get\":{\"SWVERS\":{\"SWAPP\":\"\"}}}}") && (text = get_string(device, GET_SWAPP))) {
+							double version = atof(text);
+							if (!PRIVATE_DATA->is_sestosenso_3 && version < 3.05) {
+								indigo_send_message(device, BUSY_PROPERTY, "%s has firmware version %.2f and at least 3.05 is needed", INFO_DEVICE_MODEL_ITEM->text.value, version);
+							}
+							// Diagnostic output would interleave with the replies on the serial line.
+							primaluce_command(device, "{\"req\":{\"cmd\":{\"LOGLEVEL\":\"no output\"}}}");
+							return true;
+						} else {
+							INDIGO_DRIVER_ERROR(DRIVER_NAME, "Unsupported version");
+						}
+					} else {
+						INDIGO_DRIVER_ERROR(DRIVER_NAME, "Unsupported device");
+					}
+				}
+				if (PRIVATE_DATA->handle != NULL) {
+					indigo_uni_close(&PRIVATE_DATA->handle);
+				}
+				PRIVATE_DATA->is_http = false;
+			}
+			return false;
+		}
+
+		static void primaluce_close(indigo_device *device) {
+			if (PRIVATE_DATA->handle != NULL || PRIVATE_DATA->is_http) {
+				if (PRIVATE_DATA->handle != NULL) {
+					indigo_uni_close(&PRIVATE_DATA->handle);
+				}
+				PRIVATE_DATA->is_http = false;
+				INDIGO_COPY_VALUE(INFO_DEVICE_MODEL_ITEM->text.value, "N/A");
+				INDIGO_COPY_VALUE(INFO_DEVICE_SERIAL_NUM_ITEM->text.value, "N/A");
+				INDIGO_COPY_VALUE(INFO_DEVICE_FW_REVISION_ITEM->text.value, "N/A");
+				indigo_update_property(device, INFO_PROPERTY, NULL);
+				INDIGO_DRIVER_LOG(DRIVER_NAME, "Disconnected from %s", DEVICE_PORT_ITEM->text.value);
+			}
+		}
+	}
+	// on_init { }
+	// on_shutdown { }
+	focuser {
+		name = "PrimaluceLab Focuser";
+		additional_instances = true;
+		code {
+			// The controller refuses to drive the motor without its 12 V supply and says so in the command reply.
+			static const char *power_message(const char *state) {
+				return state != NULL && !strcmp(state, "12V_PowerSupply_Error") ? "The motor has no 12 V power supply" : NULL;
+			}
+
+			static void focuser_motion_failed(indigo_device *device, const char *state) {
+				// A relative move keeps FOCUSER_STEPS busy while the absolute move handler runs, so
+				// a refused command has to end that property too.
+				if (FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE) {
+					INDIGO_UPDATE_PROPERTY_STATE(FOCUSER_STEPS_PROPERTY, INDIGO_ALERT_STATE, NULL);
+				}
+				INDIGO_UPDATE_PROPERTY_STATE(FOCUSER_POSITION_PROPERTY, INDIGO_ALERT_STATE, power_message(state));
+			}
+
+			static void focuser_movement_finalizer(indigo_device *device) {
+				char *get_position = PRIVATE_DATA->has_abs_pos ? "{\"req\":{\"get\":{\"MOT1\":{\"ABS_POS\":\"STEP\",\"STATUS\":\"\"}}}}" : "{\"req\":{\"get\":{\"MOT1\":{\"ABS_POS_STEP\":\"\",\"STATUS\":\"\"}}}}";
+				if (primaluce_command(device, get_position)) {
+					FOCUSER_POSITION_ITEM->number.value = get_number(device, PRIVATE_DATA->has_abs_pos ? GET_MOT1_ABS_POS : GET_MOT1_ABS_POS_STEP);
+					char *state = NULL;
+					if (!PRIVATE_DATA->is_sestosenso_3 || primaluce_command(device, "{\"req\":{\"get\":{\"MOT1\":{\"STATUS\":{\"MST\":\"\"}}}}}")) {
+						state = get_string(device, GET_MOT1_MST);
+					}
+					// A reply without MST cannot prove the motor is still running, so it counts as
+					// stopped and the settle loop decides between OK and ALERT.
+					if (state != NULL && strcmp(state, "stop")) {
+						// Progress is published on every poll, spaced like the rotator poll. Polling
+						// as fast as the link allows publishes the same property from this queue
+						// hundreds of times per second, which both floods the clients and races
+						// with a refusal published from the bus thread, so that the refusal message
+						// can be lost.
+						indigo_execute_handler_in(device, 0.2, focuser_movement_finalizer);
+					} else {
+						for (int i = 0; i < 10; i++) {
+							indigo_usleep(100000);
+							if (primaluce_command(device, get_position)) {
+								FOCUSER_POSITION_ITEM->number.value = get_number(device, PRIVATE_DATA->has_abs_pos ? GET_MOT1_ABS_POS : GET_MOT1_ABS_POS_STEP);
+							}
+							if (FOCUSER_POSITION_ITEM->number.target == FOCUSER_POSITION_ITEM->number.value) {
+								FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = INDIGO_OK_STATE;
+								break;
+							}
+						}
+						if (FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE) {
+							FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = INDIGO_ALERT_STATE;
+						}
+					}
+				} else {
+					// A failed query must not leave the motion properties busy forever.
+					FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+				indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+				indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+			}
+		}
+		on_timer {
+			if (primaluce_command(device, "{\"req\":{\"get\":{\"EXT_T\":\"\", \"VIN_12V\": \"\", \"MOT1\":{\"NTC_T\":\"\"}}}}")) {
+				double temp = get_number(device, GET_EXT_T);
+				if (temp != FOCUSER_TEMPERATURE_ITEM->number.value) {
+					FOCUSER_TEMPERATURE_ITEM->number.value = temp;
+					indigo_update_property(device, FOCUSER_TEMPERATURE_PROPERTY, NULL);
+				}
+				double motor_temp = get_number(device, GET_MOT1_NTC_T);
+				double vin12v = get_number(device, GET_VIN_12V);
+				if (motor_temp != X_STATE_MOTOR_TEMP_ITEM->number.value || vin12v != X_STATE_VIN_12V_ITEM->number.value) {
+					X_STATE_MOTOR_TEMP_ITEM->number.value = motor_temp;
+					X_STATE_VIN_12V_ITEM->number.value = vin12v;
+					indigo_update_property(device, X_STATE_PROPERTY, NULL);
+				}
+			}
+			indigo_execute_handler_in(device, 10, focuser_timer_callback);
+		}
+		on_connect {
+			char *text;
+			if (primaluce_command(device, "{\"req\":{\"get\": \"\"}}")) {
+				if ((text = get_string(device, GET_MODNAME))) {
+					INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Model: %s", text);
+					INDIGO_COPY_VALUE(INFO_DEVICE_MODEL_ITEM->text.value, text);
+					if (!strncmp(text, "SESTOSENSO", 10)) {
+						X_STATE_PROPERTY->count = 2;
+						X_CONFIG_PROPERTY->hidden = false;
+						X_RUNPRESET_PROPERTY->hidden = false;
+						X_RUNPRESET_L_PROPERTY->hidden = false;
+						X_RUNPRESET_M_PROPERTY->hidden = false;
+						X_RUNPRESET_S_PROPERTY->hidden = false;
+						X_RUNPRESET_1_PROPERTY->hidden = false;
+						X_RUNPRESET_2_PROPERTY->hidden = false;
+						X_RUNPRESET_3_PROPERTY->hidden = false;
+						X_HOLD_CURR_PROPERTY->hidden = false;
+					} else if (!strncmp(text, "ESATTO", 6)) {
+						X_STATE_PROPERTY->count = 3;
+						X_CONFIG_PROPERTY->hidden = true;
+						X_RUNPRESET_PROPERTY->hidden = true;
+						X_RUNPRESET_L_PROPERTY->hidden = true;
+						X_RUNPRESET_M_PROPERTY->hidden = true;
+						X_RUNPRESET_S_PROPERTY->hidden = true;
+						X_RUNPRESET_1_PROPERTY->hidden = true;
+						X_RUNPRESET_2_PROPERTY->hidden = true;
+						X_RUNPRESET_3_PROPERTY->hidden = true;
+						X_HOLD_CURR_PROPERTY->hidden = true;
+					} else {
+						X_STATE_PROPERTY->count = 2;
+						X_CALIBRATE_F_PROPERTY->hidden = true;
+						X_CONFIG_PROPERTY->hidden = true;
+						X_RUNPRESET_PROPERTY->hidden = true;
+						X_RUNPRESET_L_PROPERTY->hidden = true;
+						X_RUNPRESET_M_PROPERTY->hidden = true;
+						X_RUNPRESET_S_PROPERTY->hidden = true;
+						X_RUNPRESET_1_PROPERTY->hidden = true;
+						X_RUNPRESET_2_PROPERTY->hidden = true;
+						X_RUNPRESET_3_PROPERTY->hidden = true;
+						X_HOLD_CURR_PROPERTY->hidden = true;
+					}
+				}
+				if ((text = get_string(device, GET_SWAPP))) {
+					INDIGO_DRIVER_DEBUG(DRIVER_NAME, "SWAPP: %s", text);
+					INDIGO_COPY_VALUE(INFO_DEVICE_FW_REVISION_ITEM->text.value, text);
+					if ((text = get_string(device, GET_SWWEB))) {
+						INDIGO_DRIVER_DEBUG(DRIVER_NAME, "SWWEB: %s", text);
+						strcat(INFO_DEVICE_FW_REVISION_ITEM->text.value, " / ");
+						strcat(INFO_DEVICE_FW_REVISION_ITEM->text.value, text);
+					}
+				}
+				if ((text = get_string(device, GET_SN))) {
+					INDIGO_DRIVER_DEBUG(DRIVER_NAME, "SN: %s", text);
+					INDIGO_COPY_VALUE(INFO_DEVICE_SERIAL_NUM_ITEM->text.value, text);
+				}
+				indigo_update_property(device, INFO_PROPERTY, NULL);
+				if ((text = get_string(device, GET_MOT1_ERROR)) && *text) {
+					indigo_send_message(device, ALERT_PROPERTY, "%s", text);
+				}
+				if (get_number(device, GET_CALRESTART_MOT1)) {
+					indigo_send_message(device, BUSY_PROPERTY, "%s needs calibration", INFO_DEVICE_MODEL_ITEM->text.value);
+				}
+				PRIVATE_DATA->has_abs_pos = getToken(device, 0, GET_MOT1_ABS_POS) != -1;
+				// The calibrated travel limits the positions a client can request; an uncalibrated controller reports no usable range.
+				double min_position = get_number(device, GET_MOT1_CAL_MINPOS);
+				double max_position = get_number(device, GET_MOT1_CAL_MAXPOS);
+				if (max_position <= min_position) {
+					min_position = 0;
+					max_position = 1000000;
+				}
+				FOCUSER_POSITION_ITEM->number.min = min_position;
+				FOCUSER_POSITION_ITEM->number.max = max_position;
+				FOCUSER_STEPS_ITEM->number.max = max_position - min_position;
+				FOCUSER_POSITION_ITEM->number.value = FOCUSER_POSITION_ITEM->number.target = get_number(device, PRIVATE_DATA->has_abs_pos ? GET_MOT1_ABS_POS : GET_MOT1_ABS_POS_STEP);
+				if (getToken(device, 0, GET_MOT1_SPEED) == -1) {
+					FOCUSER_SPEED_PROPERTY->hidden = true;
+				} else {
+					FOCUSER_SPEED_ITEM->number.value = FOCUSER_SPEED_ITEM->number.target = get_number(device, GET_MOT1_SPEED);
+					FOCUSER_SPEED_PROPERTY->hidden = false;
+				}
+				FOCUSER_BACKLASH_ITEM->number.value = get_number(device, GET_MOT1_BKLASH);
+				// Models without stored positions report no PRESET_n.
+				bool has_presets = getToken(device, 0, GET_PRESET_1) != -1;
+				X_PRESETS_PROPERTY->hidden = X_PRESET_NAMES_PROPERTY->hidden = X_PRESET_GOTO_PROPERTY->hidden = !has_presets;
+				for (int i = 0; has_presets && i < PRESET_COUNT; i++) {
+					char key[16];
+					snprintf(key, sizeof(key), "PRESET_%d", i + 1);
+					char *position_path[] = { "res", "get", key, "M1POS", NULL };
+					char *name_path[] = { "res", "get", key, "NAME", NULL };
+					PRIVATE_DATA->preset_positions[i] = (int)get_number(device, position_path);
+					X_PRESETS_PROPERTY->items[i].number.value = X_PRESETS_PROPERTY->items[i].number.target = PRIVATE_DATA->preset_positions[i];
+					X_PRESETS_PROPERTY->items[i].number.max = FOCUSER_POSITION_ITEM->number.max;
+					INDIGO_COPY_VALUE(PRIVATE_DATA->preset_names[i], (text = get_string(device, name_path)) ? text : "");
+					INDIGO_COPY_VALUE(X_PRESET_NAMES_PROPERTY->items[i].text.value, PRIVATE_DATA->preset_names[i]);
+				}
+				X_STATE_MOTOR_TEMP_ITEM->number.value = get_number(device, GET_MOT1_NTC_T);
+				X_STATE_VIN_12V_ITEM->number.value = get_number(device, GET_VIN_12V);
+				X_STATE_VIN_USB_ITEM->number.value = get_number(device, GET_VIN_USB);
+				// LANCFG selects between the access point and a connection to an existing network
+				if ((text = get_string(device, GET_LANCFG)) && !strcmp(text, "sta")) {
+					indigo_set_switch(X_WIFI_PROPERTY, X_WIFI_STA_ITEM, true);
+				} else if ((text = get_string(device, GET_WIFIAP_STATUS))) {
+					if (!strcmp(text, "on")) {
+						indigo_set_switch(X_WIFI_PROPERTY, X_WIFI_AP_ITEM, true);
+					} else {
+						indigo_set_switch(X_WIFI_PROPERTY, X_WIFI_OFF_ITEM, true);
+					}
+				}
+				if ((text = get_string(device, GET_WIFIAP_SSID))) {
+					INDIGO_COPY_VALUE(X_WIFI_AP_SSID_ITEM->text.value, text);
+				}
+				if ((text = get_string(device, GET_WIFIAP_PWD))) {
+					INDIGO_COPY_VALUE(X_WIFI_AP_PASSWORD_ITEM->text.value, text);
+				}
+				if ((text = get_string(device, GET_WIFISTA_SSID))) {
+					INDIGO_COPY_VALUE(X_WIFI_STA_SSID_ITEM->text.value, text);
+				}
+				if ((text = get_string(device, GET_WIFISTA_PWD))) {
+					INDIGO_COPY_VALUE(X_WIFI_STA_PASSWORD_ITEM->text.value, text);
+				}
+				if ((text = get_string(device, GET_DIMLEDS))) {
+					if (!strcmp(text, "on")) {
+						indigo_set_switch(X_LEDS_PROPERTY, X_LEDS_ON_ITEM, true);
+					} else if (!strcmp(text, "low")) {
+						indigo_set_switch(X_LEDS_PROPERTY, X_LEDS_DIM_ITEM, true);
+					} else if (!strcmp(text, "middle")) {
+						indigo_set_switch(X_LEDS_PROPERTY, X_LEDS_MIDDLE_ITEM, true);
+					} else {
+						indigo_set_switch(X_LEDS_PROPERTY, X_LEDS_OFF_ITEM, true);
+					}
+				}
+				X_CONFIG_M1ACC_ITEM->number.value = X_CONFIG_M1ACC_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_ACC);
+				X_CONFIG_M1SPD_ITEM->number.value = X_CONFIG_M1SPD_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_SPD);
+				X_CONFIG_M1DEC_ITEM->number.value = X_CONFIG_M1DEC_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_DEC);
+				X_CONFIG_M1CACC_ITEM->number.value = X_CONFIG_M1CACC_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_CURR_ACC);
+				X_CONFIG_M1CSPD_ITEM->number.value = X_CONFIG_M1CSPD_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_CURR_SPD);
+				X_CONFIG_M1CDEC_ITEM->number.value = X_CONFIG_M1CDEC_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_CURR_DEC);
+				X_CONFIG_M1HOLD_ITEM->number.value = X_CONFIG_M1HOLD_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_CURR_HOLD);
+				X_RUNPRESET_L_M1ACC_ITEM->number.value = X_RUNPRESET_L_M1ACC_ITEM->number.target = get_number(device, GET_RUNPRESET_L_M1ACC);
+				X_RUNPRESET_L_M1SPD_ITEM->number.value = X_RUNPRESET_L_M1SPD_ITEM->number.target = get_number(device, GET_RUNPRESET_L_M1SPD);
+				X_RUNPRESET_L_M1DEC_ITEM->number.value = X_RUNPRESET_L_M1DEC_ITEM->number.target = get_number(device, GET_RUNPRESET_L_M1DEC);
+				X_RUNPRESET_L_M1CACC_ITEM->number.value = X_RUNPRESET_L_M1CACC_ITEM->number.target = get_number(device, GET_RUNPRESET_L_M1CACC);
+				X_RUNPRESET_L_M1CSPD_ITEM->number.value = X_RUNPRESET_L_M1CSPD_ITEM->number.target = get_number(device, GET_RUNPRESET_L_M1CSPD);
+				X_RUNPRESET_L_M1CDEC_ITEM->number.value = X_RUNPRESET_L_M1CDEC_ITEM->number.target = get_number(device, GET_RUNPRESET_L_M1CDEC);
+				X_RUNPRESET_L_M1HOLD_ITEM->number.value = X_RUNPRESET_L_M1HOLD_ITEM->number.target = get_number(device, GET_RUNPRESET_L_M1HOLD);
+				X_RUNPRESET_M_M1ACC_ITEM->number.value = X_RUNPRESET_M_M1ACC_ITEM->number.target = get_number(device, GET_RUNPRESET_M_M1ACC);
+				X_RUNPRESET_M_M1SPD_ITEM->number.value = X_RUNPRESET_M_M1SPD_ITEM->number.target = get_number(device, GET_RUNPRESET_M_M1SPD);
+				X_RUNPRESET_M_M1DEC_ITEM->number.value = X_RUNPRESET_M_M1DEC_ITEM->number.target = get_number(device, GET_RUNPRESET_M_M1DEC);
+				X_RUNPRESET_M_M1CACC_ITEM->number.value = X_RUNPRESET_M_M1CACC_ITEM->number.target = get_number(device, GET_RUNPRESET_M_M1CACC);
+				X_RUNPRESET_M_M1CSPD_ITEM->number.value = X_RUNPRESET_M_M1CSPD_ITEM->number.target = get_number(device, GET_RUNPRESET_M_M1CSPD);
+				X_RUNPRESET_M_M1CDEC_ITEM->number.value = X_RUNPRESET_M_M1CDEC_ITEM->number.target = get_number(device, GET_RUNPRESET_M_M1CDEC);
+				X_RUNPRESET_M_M1HOLD_ITEM->number.value = X_RUNPRESET_M_M1HOLD_ITEM->number.target = get_number(device, GET_RUNPRESET_M_M1HOLD);
+				X_RUNPRESET_S_M1ACC_ITEM->number.value = X_RUNPRESET_S_M1ACC_ITEM->number.target = get_number(device, GET_RUNPRESET_S_M1ACC);
+				X_RUNPRESET_S_M1SPD_ITEM->number.value = X_RUNPRESET_S_M1SPD_ITEM->number.target = get_number(device, GET_RUNPRESET_S_M1SPD);
+				X_RUNPRESET_S_M1DEC_ITEM->number.value = X_RUNPRESET_S_M1DEC_ITEM->number.target = get_number(device, GET_RUNPRESET_S_M1DEC);
+				X_RUNPRESET_S_M1CACC_ITEM->number.value = X_RUNPRESET_S_M1CACC_ITEM->number.target = get_number(device, GET_RUNPRESET_S_M1CACC);
+				X_RUNPRESET_S_M1CSPD_ITEM->number.value = X_RUNPRESET_S_M1CSPD_ITEM->number.target = get_number(device, GET_RUNPRESET_S_M1CSPD);
+				X_RUNPRESET_S_M1CDEC_ITEM->number.value = X_RUNPRESET_S_M1CDEC_ITEM->number.target = get_number(device, GET_RUNPRESET_S_M1CDEC);
+				X_RUNPRESET_S_M1HOLD_ITEM->number.value = X_RUNPRESET_S_M1HOLD_ITEM->number.target = get_number(device, GET_RUNPRESET_S_M1HOLD);
+				X_RUNPRESET_1_M1ACC_ITEM->number.value = X_RUNPRESET_1_M1ACC_ITEM->number.target = get_number(device, GET_RUNPRESET_1_M1ACC);
+				X_RUNPRESET_1_M1SPD_ITEM->number.value = X_RUNPRESET_1_M1SPD_ITEM->number.target = get_number(device, GET_RUNPRESET_1_M1SPD);
+				X_RUNPRESET_1_M1DEC_ITEM->number.value = X_RUNPRESET_1_M1DEC_ITEM->number.target = get_number(device, GET_RUNPRESET_1_M1DEC);
+				X_RUNPRESET_1_M1CACC_ITEM->number.value = X_RUNPRESET_1_M1CACC_ITEM->number.target = get_number(device, GET_RUNPRESET_1_M1CACC);
+				X_RUNPRESET_1_M1CSPD_ITEM->number.value = X_RUNPRESET_1_M1CSPD_ITEM->number.target = get_number(device, GET_RUNPRESET_1_M1CSPD);
+				X_RUNPRESET_1_M1CDEC_ITEM->number.value = X_RUNPRESET_1_M1CDEC_ITEM->number.target = get_number(device, GET_RUNPRESET_1_M1CDEC);
+				X_RUNPRESET_1_M1HOLD_ITEM->number.value = X_RUNPRESET_1_M1HOLD_ITEM->number.target = get_number(device, GET_RUNPRESET_1_M1HOLD);
+				X_RUNPRESET_2_M1ACC_ITEM->number.value = X_RUNPRESET_2_M1ACC_ITEM->number.target = get_number(device, GET_RUNPRESET_2_M1ACC);
+				X_RUNPRESET_2_M1SPD_ITEM->number.value = X_RUNPRESET_2_M1SPD_ITEM->number.target = get_number(device, GET_RUNPRESET_2_M1SPD);
+				X_RUNPRESET_2_M1DEC_ITEM->number.value = X_RUNPRESET_2_M1DEC_ITEM->number.target = get_number(device, GET_RUNPRESET_2_M1DEC);
+				X_RUNPRESET_2_M1CACC_ITEM->number.value = X_RUNPRESET_2_M1CACC_ITEM->number.target = get_number(device, GET_RUNPRESET_2_M1CACC);
+				X_RUNPRESET_2_M1CSPD_ITEM->number.value = X_RUNPRESET_2_M1CSPD_ITEM->number.target = get_number(device, GET_RUNPRESET_2_M1CSPD);
+				X_RUNPRESET_2_M1CDEC_ITEM->number.value = X_RUNPRESET_2_M1CDEC_ITEM->number.target = get_number(device, GET_RUNPRESET_2_M1CDEC);
+				X_RUNPRESET_2_M1HOLD_ITEM->number.value = X_RUNPRESET_2_M1HOLD_ITEM->number.target = get_number(device, GET_RUNPRESET_2_M1HOLD);
+				X_RUNPRESET_3_M1ACC_ITEM->number.value = X_RUNPRESET_3_M1ACC_ITEM->number.target = get_number(device, GET_RUNPRESET_3_M1ACC);
+				X_RUNPRESET_3_M1SPD_ITEM->number.value = X_RUNPRESET_3_M1SPD_ITEM->number.target = get_number(device, GET_RUNPRESET_3_M1SPD);
+				X_RUNPRESET_3_M1DEC_ITEM->number.value = X_RUNPRESET_3_M1DEC_ITEM->number.target = get_number(device, GET_RUNPRESET_3_M1DEC);
+				X_RUNPRESET_3_M1CACC_ITEM->number.value = X_RUNPRESET_3_M1CACC_ITEM->number.target = get_number(device, GET_RUNPRESET_3_M1CACC);
+				X_RUNPRESET_3_M1CSPD_ITEM->number.value = X_RUNPRESET_3_M1CSPD_ITEM->number.target = get_number(device, GET_RUNPRESET_3_M1CSPD);
+				X_RUNPRESET_3_M1CDEC_ITEM->number.value = X_RUNPRESET_3_M1CDEC_ITEM->number.target = get_number(device, GET_RUNPRESET_3_M1CDEC);
+				X_RUNPRESET_3_M1HOLD_ITEM->number.value = X_RUNPRESET_3_M1HOLD_ITEM->number.target = get_number(device, GET_RUNPRESET_3_M1HOLD);
+				if (get_number(device, GET_MOT1_HOLDCURR_STATUS)) {
+					indigo_set_switch(X_HOLD_CURR_PROPERTY, X_HOLD_CURR_ON_ITEM, true);
+				} else {
+					indigo_set_switch(X_HOLD_CURR_PROPERTY, X_HOLD_CURR_OFF_ITEM, true);
+				}
+			}
+		}
+		// on_disconnect { }
+		on_attach {
+			INFO_PROPERTY->count = 8;
+		}
+		// on_detach { }
+		number X_CONFIG {
+			// on_change { }
+			// on_attach { }
+			// on_detach { }
+			name = "X_CONFIG";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Configuration";
+			perm = INDIGO_RO_PERM;
+			// asynchronous_change = false;
+			item X_CONFIG_M1ACC {
+				name = "M1ACC";
+				label = "Acceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_CONFIG_M1SPD {
+				name = "M1SPD";
+				label = "Run speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_CONFIG_M1DEC {
+				name = "M1DEC";
+				label = "Deceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_CONFIG_M1CACC {
+				name = "M1CACC";
+				label = "Acceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_CONFIG_M1CSPD {
+				name = "M1CSPD";
+				label = "Run current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_CONFIG_M1CDEC {
+				name = "M1CDEC";
+				label = "Deceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_CONFIG_M1HOLD {
+				name = "M1HOLD";
+				label = "Hold current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+		}
+		number X_STATE {
+			// on_change { }
+			// on_attach { }
+			// on_detach { }
+			name = "X_STATE";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "State";
+			perm = INDIGO_RO_PERM;
+			// asynchronous_change = false;
+			item X_STATE_MOTOR_TEMP {
+				name = "MOTOR_TEMP";
+				label = "Motor emperature (°C)";
+				value = 0;
+				min = -50;
+				max = 100;
+				step = 0;
+			}
+			item X_STATE_VIN_12V {
+				name = "VIN_12V";
+				label = "12V power (V)";
+				value = 0;
+				min = 0;
+				max = 50;
+				step = 0;
+			}
+			item X_STATE_VIN_USB {
+				name = "VIN_USB";
+				label = "USB power (V)";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+		}
+		switch X_WIFI {
+			on_change {
+				bool result = false;
+				if (X_WIFI_OFF_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\":{\"AP_SET_STATUS\":\"off\"}}}");
+				} else if (X_WIFI_AP_ITEM->sw.value) {
+					result = primaluce_set_lan_cfg(device, "ap") && primaluce_command(device, "{\"req\":{\"cmd\":{\"AP_SET_STATUS\":\"on\"}}}");
+				} else if (X_WIFI_STA_ITEM->sw.value) {
+					result = primaluce_set_lan_cfg(device, "sta");
+				}
+				if (!result) {
+					X_WIFI_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_WIFI";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "WiFi mode";
+			// asynchronous_change = false;
+			item X_WIFI_OFF {
+				name = "OFF";
+				label = "Off";
+				value = true;
+			}
+			item X_WIFI_AP {
+				name = "AP";
+				label = "Access Point mode";
+				value = false;
+			}
+			item X_WIFI_STA {
+				name = "STA";
+				label = "Station mode";
+				value = false;
+			}
+		}
+		text X_WIFI_AP {
+			on_change {
+				if (!primaluce_command(device, "{\"req\":{\"set\":{\"WIFIAP\":{\"SSID\":\"%s\", \"PWD\":\"%s\"}}}}", X_WIFI_AP_SSID_ITEM->text.value, X_WIFI_AP_PASSWORD_ITEM->text.value)) {
+					X_WIFI_AP_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_WIFI_AP";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "AP WiFi settings";
+			// asynchronous_change = false;
+			item X_WIFI_AP_SSID {
+				name = "AP_SSID";
+				label = "SSID";
+				value = "";
+			}
+			item X_WIFI_AP_PASSWORD {
+				name = "AP_PASSWORD";
+				label = "Password";
+				value = "";
+			}
+		}
+		text X_WIFI_STA {
+			on_change {
+				if (!primaluce_command(device, "{\"req\":{\"set\":{\"WIFISTA\":{\"SSID\":\"%s\", \"PWD\":\"%s\"}}}}", X_WIFI_STA_SSID_ITEM->text.value, X_WIFI_STA_PASSWORD_ITEM->text.value)) {
+					X_WIFI_STA_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_WIFI_STA";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "STA WiFi settings";
+			// asynchronous_change = false;
+			item X_WIFI_STA_SSID {
+				name = "STA_SSID";
+				label = "SSID";
+				value = "";
+			}
+			item X_WIFI_STA_PASSWORD {
+				name = "STA_PASSWORD";
+				label = "Password";
+				value = "";
+			}
+		}
+		switch X_LEDS {
+			on_change {
+				bool result = false;
+				if (X_LEDS_OFF_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\":{\"DIMLEDS\":\"off\"}}}");
+				} else if (X_LEDS_DIM_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\":{\"DIMLEDS\":\"low\"}}}");
+				} else if (X_LEDS_MIDDLE_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\":{\"DIMLEDS\":\"middle\"}}}");
+				} else if (X_LEDS_ON_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\":{\"DIMLEDS\":\"on\"}}}");
+				}
+				if (!result) {
+					X_LEDS_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_LEDS";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "LEDs";
+			// asynchronous_change = false;
+			item X_LEDS_OFF {
+				name = "OFF";
+				label = "Off";
+				value = true;
+			}
+			item X_LEDS_DIM {
+				name = "DIM";
+				label = "Dim";
+				value = false;
+			}
+			item X_LEDS_MIDDLE {
+				name = "MIDDLE";
+				label = "Middle";
+				value = false;
+			}
+			item X_LEDS_ON {
+				name = "ON";
+				label = "On";
+				value = false;
+			}
+		}
+		number X_RUNPRESET_L {
+			// on_change { }
+			// on_attach { }
+			// on_detach { }
+			name = "X_RUNPRESET_L";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Preset light";
+			perm = INDIGO_RO_PERM;
+			// asynchronous_change = false;
+			item X_RUNPRESET_L_M1ACC {
+				name = "M1ACC";
+				label = "Acceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_L_M1SPD {
+				name = "M1SPD";
+				label = "Run speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_L_M1DEC {
+				name = "M1DEC";
+				label = "Deceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_L_M1CACC {
+				name = "M1CACC";
+				label = "Acceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_L_M1CSPD {
+				name = "M1CSPD";
+				label = "Run current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_L_M1CDEC {
+				name = "M1CDEC";
+				label = "Deceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_L_M1HOLD {
+				name = "M1HOLD";
+				label = "Hold current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+		}
+		number X_RUNPRESET_M {
+			// on_change { }
+			// on_attach { }
+			// on_detach { }
+			name = "X_RUNPRESET_M";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Preset medium";
+			perm = INDIGO_RO_PERM;
+			// asynchronous_change = false;
+			item X_RUNPRESET_M_M1ACC {
+				name = "M1ACC";
+				label = "Acceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_M_M1SPD {
+				name = "M1SPD";
+				label = "Run speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_M_M1DEC {
+				name = "M1DEC";
+				label = "Deceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_M_M1CACC {
+				name = "M1CACC";
+				label = "Acceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_M_M1CSPD {
+				name = "M1CSPD";
+				label = "Run current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_M_M1CDEC {
+				name = "M1CDEC";
+				label = "Deceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_M_M1HOLD {
+				name = "M1HOLD";
+				label = "Hold current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+		}
+		number X_RUNPRESET_S {
+			// on_change { }
+			// on_attach { }
+			// on_detach { }
+			name = "X_RUNPRESET_S";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Preset slow";
+			perm = INDIGO_RO_PERM;
+			// asynchronous_change = false;
+			item X_RUNPRESET_S_M1ACC {
+				name = "M1ACC";
+				label = "Acceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_S_M1SPD {
+				name = "M1SPD";
+				label = "Run speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_S_M1DEC {
+				name = "M1DEC";
+				label = "Deceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_S_M1CACC {
+				name = "M1CACC";
+				label = "Acceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_S_M1CSPD {
+				name = "M1CSPD";
+				label = "Run current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_S_M1CDEC {
+				name = "M1CDEC";
+				label = "Deceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_S_M1HOLD {
+				name = "M1HOLD";
+				label = "Hold current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+		}
+		number X_RUNPRESET_1 {
+			on_change {
+				if (!primaluce_command(device, "{\"req\":{\"set\":{\"RUNPRESET_1\":{\"M1ACC\":%d,\"M1DEC\":%d,\"M1SPD\":%d,\"M1CACC\":%d,\"M1CDEC\":%d,\"M1CSPD\":%d,\"M1HOLD\":%d}}}}", (int)X_RUNPRESET_1_M1ACC_ITEM->number.target, (int)X_RUNPRESET_1_M1DEC_ITEM->number.target, (int)X_RUNPRESET_1_M1SPD_ITEM->number.target, (int)X_RUNPRESET_1_M1CACC_ITEM->number.target, (int)X_RUNPRESET_1_M1CDEC_ITEM->number.target, (int)X_RUNPRESET_1_M1CSPD_ITEM->number.target, (int)X_RUNPRESET_1_M1HOLD_ITEM->number.target)) {
+					INDIGO_UPDATE_PROPERTY_STATE(X_RUNPRESET_1_PROPERTY, INDIGO_ALERT_STATE, NULL);
+					return;
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_RUNPRESET_1";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Preset #1";
+			// asynchronous_change = false;
+			item X_RUNPRESET_1_M1ACC {
+				name = "M1ACC";
+				label = "Acceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_1_M1SPD {
+				name = "M1SPD";
+				label = "Run speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_1_M1DEC {
+				name = "M1DEC";
+				label = "Deceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_1_M1CACC {
+				name = "M1CACC";
+				label = "Acceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_1_M1CSPD {
+				name = "M1CSPD";
+				label = "Run current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_1_M1CDEC {
+				name = "M1CDEC";
+				label = "Deceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_1_M1HOLD {
+				name = "M1HOLD";
+				label = "Hold current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+		}
+		number X_RUNPRESET_2 {
+			on_change {
+				if (!primaluce_command(device, "{\"req\":{\"set\":{\"RUNPRESET_2\":{\"M1ACC\":%d,\"M1DEC\":%d,\"M1SPD\":%d,\"M1CACC\":%d,\"M1CDEC\":%d,\"M1CSPD\":%d,\"M1HOLD\":%d}}}}", (int)X_RUNPRESET_2_M1ACC_ITEM->number.target, (int)X_RUNPRESET_2_M1DEC_ITEM->number.target, (int)X_RUNPRESET_2_M1SPD_ITEM->number.target, (int)X_RUNPRESET_2_M1CACC_ITEM->number.target, (int)X_RUNPRESET_2_M1CDEC_ITEM->number.target, (int)X_RUNPRESET_2_M1CSPD_ITEM->number.target, (int)X_RUNPRESET_2_M1HOLD_ITEM->number.target)) {
+					INDIGO_UPDATE_PROPERTY_STATE(X_RUNPRESET_2_PROPERTY, INDIGO_ALERT_STATE, NULL);
+					return;
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_RUNPRESET_2";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Preset #2";
+			// asynchronous_change = false;
+			item X_RUNPRESET_2_M1ACC {
+				name = "M1ACC";
+				label = "Acceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_2_M1SPD {
+				name = "M1SPD";
+				label = "Run speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_2_M1DEC {
+				name = "M1DEC";
+				label = "Deceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_2_M1CACC {
+				name = "M1CACC";
+				label = "Acceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_2_M1CSPD {
+				name = "M1CSPD";
+				label = "Run current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_2_M1CDEC {
+				name = "M1CDEC";
+				label = "Deceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_2_M1HOLD {
+				name = "M1HOLD";
+				label = "Hold current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+		}
+		number X_RUNPRESET_3 {
+			on_change {
+				if (!primaluce_command(device, "{\"req\":{\"set\":{\"RUNPRESET_3\":{\"M1ACC\":%d,\"M1DEC\":%d,\"M1SPD\":%d,\"M1CACC\":%d,\"M1CDEC\":%d,\"M1CSPD\":%d,\"M1HOLD\":%d}}}}", (int)X_RUNPRESET_3_M1ACC_ITEM->number.target, (int)X_RUNPRESET_3_M1DEC_ITEM->number.target, (int)X_RUNPRESET_3_M1SPD_ITEM->number.target, (int)X_RUNPRESET_3_M1CACC_ITEM->number.target, (int)X_RUNPRESET_3_M1CDEC_ITEM->number.target, (int)X_RUNPRESET_3_M1CSPD_ITEM->number.target, (int)X_RUNPRESET_3_M1HOLD_ITEM->number.target)) {
+					INDIGO_UPDATE_PROPERTY_STATE(X_RUNPRESET_3_PROPERTY, INDIGO_ALERT_STATE, NULL);
+					return;
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_RUNPRESET_3";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Preset #3";
+			// asynchronous_change = false;
+			item X_RUNPRESET_3_M1ACC {
+				name = "M1ACC";
+				label = "Acceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_3_M1SPD {
+				name = "M1SPD";
+				label = "Run speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_3_M1DEC {
+				name = "M1DEC";
+				label = "Deceleration speed";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_3_M1CACC {
+				name = "M1CACC";
+				label = "Acceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_3_M1CSPD {
+				name = "M1CSPD";
+				label = "Run current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_3_M1CDEC {
+				name = "M1CDEC";
+				label = "Deceleration current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+			item X_RUNPRESET_3_M1HOLD {
+				name = "M1HOLD";
+				label = "Hold current";
+				value = 0;
+				min = 0;
+				max = 10;
+				step = 0;
+			}
+		}
+		switch X_RUNPRESET {
+			on_change {
+				bool result = false;
+				X_CONFIG_PROPERTY->state = INDIGO_OK_STATE;
+				if (X_RUNPRESET_L_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\":{\"RUNPRESET\":\"light\"}}}");
+					X_RUNPRESET_L_ITEM->sw.value = false;
+				} else if (X_RUNPRESET_M_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\":{\"RUNPRESET\":\"medium\"}}}");
+					X_RUNPRESET_M_ITEM->sw.value = false;
+				} else if (X_RUNPRESET_S_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\":{\"RUNPRESET\":\"slow\"}}}");
+					X_RUNPRESET_S_ITEM->sw.value = false;
+				} else if (X_RUNPRESET_1_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\":{\"RUNPRESET\":1}}}");
+					X_RUNPRESET_1_ITEM->sw.value = false;
+				} else if (X_RUNPRESET_2_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\":{\"RUNPRESET\":2}}}");
+					X_RUNPRESET_2_ITEM->sw.value = false;
+				} else if (X_RUNPRESET_3_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\":{\"RUNPRESET\":3}}}");
+					X_RUNPRESET_3_ITEM->sw.value = false;
+				}
+				if (!result) {
+					X_RUNPRESET_PROPERTY->state = INDIGO_ALERT_STATE;
+				} else  if (!primaluce_command(device, "{\"req\":{\"get\":{\"MOT1\":{\"HOLDCURR_STATUS\":\"\",\"FnRUN_SPD\":\"\",\"FnRUN_DEC\":\"\",\"FnRUN_ACC\":\"\",\"FnRUN_CURR_SPD\":\"\",\"FnRUN_CURR_DEC\":\"\",\"FnRUN_CURR_ACC\":\"\",\"FnRUN_CURR_HOLD\":\"\"}}}}")) {
+					X_CONFIG_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+				X_CONFIG_M1ACC_ITEM->number.value = X_CONFIG_M1ACC_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_ACC);
+				X_CONFIG_M1SPD_ITEM->number.value = X_CONFIG_M1SPD_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_SPD);
+				X_CONFIG_M1DEC_ITEM->number.value = X_CONFIG_M1DEC_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_DEC);
+				X_CONFIG_M1CACC_ITEM->number.value = X_CONFIG_M1CACC_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_CURR_ACC);
+				X_CONFIG_M1CSPD_ITEM->number.value = X_CONFIG_M1CSPD_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_CURR_SPD);
+				X_CONFIG_M1CDEC_ITEM->number.value = X_CONFIG_M1CDEC_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_CURR_DEC);
+				X_CONFIG_M1HOLD_ITEM->number.value = X_CONFIG_M1HOLD_ITEM->number.target = get_number(device, GET_MOT1_FnRUN_CURR_HOLD);
+				indigo_update_property(device, X_CONFIG_PROPERTY, NULL);
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_RUNPRESET";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Presets";
+			// asynchronous_change = false;
+			item X_RUNPRESET_L {
+				name = "L";
+				label = "Preset light";
+				value = false;
+			}
+			item X_RUNPRESET_M {
+				name = "M";
+				label = "Preset medium";
+				value = false;
+			}
+			item X_RUNPRESET_S {
+				name = "S";
+				label = "Preset slow";
+				value = false;
+			}
+			item X_RUNPRESET_1 {
+				name = "1";
+				label = "Preset #1";
+				value = false;
+			}
+			item X_RUNPRESET_2 {
+				name = "2";
+				label = "Preset #2";
+				value = false;
+			}
+			item X_RUNPRESET_3 {
+				name = "3";
+				label = "Preset #3";
+				value = false;
+			}
+		}
+		number X_PRESETS {
+			on_change {
+				// The controller refuses a zero position, so only positions that changed to a stored value are written.
+				for (int i = 0; i < PRESET_COUNT; i++) {
+					int position = (int)X_PRESETS_PROPERTY->items[i].number.target;
+					if (position == PRIVATE_DATA->preset_positions[i]) {
+						continue;
+					}
+					char key[16];
+					snprintf(key, sizeof(key), "PRESET_%d", i + 1);
+					char *path[] = { "res", "set", key, "M1POS", NULL };
+					char *state;
+					if (position > 0 && primaluce_command(device, "{\"req\":{\"set\":{\"%s\":{\"M1POS\":%d}}}}", key, position) && (state = get_string(device, path)) != NULL && !strcmp(state, "done")) {
+						PRIVATE_DATA->preset_positions[i] = position;
+					} else {
+						X_PRESETS_PROPERTY->state = INDIGO_ALERT_STATE;
+					}
+					X_PRESETS_PROPERTY->items[i].number.value = X_PRESETS_PROPERTY->items[i].number.target = PRIVATE_DATA->preset_positions[i];
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_PRESETS";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Stored positions";
+			// asynchronous_change = false;
+			item X_PRESETS_1 {
+				name = "PRESET_1";
+				label = "Preset #1";
+				value = 0;
+				min = 0;
+				max = 1000000;
+				step = 1;
+			}
+			item X_PRESETS_2 {
+				name = "PRESET_2";
+				label = "Preset #2";
+				value = 0;
+				min = 0;
+				max = 1000000;
+				step = 1;
+			}
+			item X_PRESETS_3 {
+				name = "PRESET_3";
+				label = "Preset #3";
+				value = 0;
+				min = 0;
+				max = 1000000;
+				step = 1;
+			}
+			item X_PRESETS_4 {
+				name = "PRESET_4";
+				label = "Preset #4";
+				value = 0;
+				min = 0;
+				max = 1000000;
+				step = 1;
+			}
+			item X_PRESETS_5 {
+				name = "PRESET_5";
+				label = "Preset #5";
+				value = 0;
+				min = 0;
+				max = 1000000;
+				step = 1;
+			}
+			item X_PRESETS_6 {
+				name = "PRESET_6";
+				label = "Preset #6";
+				value = 0;
+				min = 0;
+				max = 1000000;
+				step = 1;
+			}
+			item X_PRESETS_7 {
+				name = "PRESET_7";
+				label = "Preset #7";
+				value = 0;
+				min = 0;
+				max = 1000000;
+				step = 1;
+			}
+			item X_PRESETS_8 {
+				name = "PRESET_8";
+				label = "Preset #8";
+				value = 0;
+				min = 0;
+				max = 1000000;
+				step = 1;
+			}
+			item X_PRESETS_9 {
+				name = "PRESET_9";
+				label = "Preset #9";
+				value = 0;
+				min = 0;
+				max = 1000000;
+				step = 1;
+			}
+		}
+		text X_PRESET_NAMES {
+			on_change {
+				for (int i = 0; i < PRESET_COUNT; i++) {
+					char *name = X_PRESET_NAMES_PROPERTY->items[i].text.value;
+					if (!strcmp(name, PRIVATE_DATA->preset_names[i])) {
+						continue;
+					}
+					char key[16];
+					snprintf(key, sizeof(key), "PRESET_%d", i + 1);
+					char *path[] = { "res", "set", key, "NAME", NULL };
+					char *state;
+					if (strchr(name, '"') == NULL && strchr(name, '\\') == NULL && primaluce_command(device, "{\"req\":{\"set\":{\"%s\":{\"NAME\":\"%s\"}}}}", key, name) && (state = get_string(device, path)) != NULL && !strcmp(state, "done")) {
+						INDIGO_COPY_VALUE(PRIVATE_DATA->preset_names[i], name);
+					} else {
+						X_PRESET_NAMES_PROPERTY->state = INDIGO_ALERT_STATE;
+						INDIGO_COPY_VALUE(name, PRIVATE_DATA->preset_names[i]);
+					}
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_PRESET_NAMES";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Stored position names";
+			// asynchronous_change = false;
+			item X_PRESET_NAMES_1 {
+				name = "PRESET_1";
+				label = "Preset #1";
+				value = "";
+			}
+			item X_PRESET_NAMES_2 {
+				name = "PRESET_2";
+				label = "Preset #2";
+				value = "";
+			}
+			item X_PRESET_NAMES_3 {
+				name = "PRESET_3";
+				label = "Preset #3";
+				value = "";
+			}
+			item X_PRESET_NAMES_4 {
+				name = "PRESET_4";
+				label = "Preset #4";
+				value = "";
+			}
+			item X_PRESET_NAMES_5 {
+				name = "PRESET_5";
+				label = "Preset #5";
+				value = "";
+			}
+			item X_PRESET_NAMES_6 {
+				name = "PRESET_6";
+				label = "Preset #6";
+				value = "";
+			}
+			item X_PRESET_NAMES_7 {
+				name = "PRESET_7";
+				label = "Preset #7";
+				value = "";
+			}
+			item X_PRESET_NAMES_8 {
+				name = "PRESET_8";
+				label = "Preset #8";
+				value = "";
+			}
+			item X_PRESET_NAMES_9 {
+				name = "PRESET_9";
+				label = "Preset #9";
+				value = "";
+			}
+		}
+		switch X_PRESET_GOTO {
+			on_change {
+				int index = -1;
+				for (int i = 0; i < PRESET_COUNT; i++) {
+					if (X_PRESET_GOTO_PROPERTY->items[i].sw.value) {
+						index = i;
+					}
+					X_PRESET_GOTO_PROPERTY->items[i].sw.value = false;
+				}
+				if (index < 0) {
+					// Nothing selected, nothing to do.
+				} else if (PRIVATE_DATA->preset_positions[index] <= 0) {
+					X_PRESET_GOTO_PROPERTY->state = INDIGO_ALERT_STATE;
+					indigo_update_property(device, X_PRESET_GOTO_PROPERTY, "Preset #%d has no stored position", index + 1);
+					return;
+				} else if (FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE) {
+					X_PRESET_GOTO_PROPERTY->state = INDIGO_ALERT_STATE;
+					indigo_update_property(device, X_PRESET_GOTO_PROPERTY, "Another motion operation is pending");
+					return;
+				} else {
+					// The stored position is reached through the absolute move, which reports the motion.
+					FOCUSER_POSITION_ITEM->number.target = PRIVATE_DATA->preset_positions[index];
+					FOCUSER_POSITION_PROPERTY->state = INDIGO_BUSY_STATE;
+					indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+					focuser_position_handler(device);
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_PRESET_GOTO";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Go to stored position";
+			// asynchronous_change = false;
+			item X_PRESET_GOTO_1 {
+				name = "PRESET_1";
+				label = "Preset #1";
+				value = false;
+			}
+			item X_PRESET_GOTO_2 {
+				name = "PRESET_2";
+				label = "Preset #2";
+				value = false;
+			}
+			item X_PRESET_GOTO_3 {
+				name = "PRESET_3";
+				label = "Preset #3";
+				value = false;
+			}
+			item X_PRESET_GOTO_4 {
+				name = "PRESET_4";
+				label = "Preset #4";
+				value = false;
+			}
+			item X_PRESET_GOTO_5 {
+				name = "PRESET_5";
+				label = "Preset #5";
+				value = false;
+			}
+			item X_PRESET_GOTO_6 {
+				name = "PRESET_6";
+				label = "Preset #6";
+				value = false;
+			}
+			item X_PRESET_GOTO_7 {
+				name = "PRESET_7";
+				label = "Preset #7";
+				value = false;
+			}
+			item X_PRESET_GOTO_8 {
+				name = "PRESET_8";
+				label = "Preset #8";
+				value = false;
+			}
+			item X_PRESET_GOTO_9 {
+				name = "PRESET_9";
+				label = "Preset #9";
+				value = false;
+			}
+		}
+		switch X_HOLD_CURR {
+			on_change {
+				bool result = false;
+				if (X_HOLD_CURR_OFF_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"set\":{\"MOT1\":{\"HOLDCURR_STATUS\":0}}}}");
+				} else if (X_HOLD_CURR_ON_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"set\":{\"MOT1\":{\"HOLDCURR_STATUS\":1}}}}");
+				}
+				if (!result) {
+					X_HOLD_CURR_PROPERTY->state = INDIGO_ALERT_STATE;
+				} else {
+					char *state = get_string(device, SET_MOT1_HOLDCURR_STATUS);
+					if (state == NULL || strcmp(state, "done")) {
+						X_HOLD_CURR_PROPERTY->state = INDIGO_ALERT_STATE;
+					}
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_HOLD_CURR";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Hold current";
+			// asynchronous_change = false;
+			item X_HOLD_CURR_OFF {
+				name = "OFF";
+				label = "Off";
+				value = true;
+			}
+			item X_HOLD_CURR_ON {
+				name = "ON";
+				label = "On";
+				value = false;
+			}
+		}
+		switch X_CALIBRATE_F {
+			on_change {
+				bool result = true;
+				if (X_CALIBRATE_F_START_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\": {\"MOT1\": {\"CAL_FOCUSER\":\"Init\"}}}}");
+					if (result) {
+						indigo_usleep(1000000);
+						result = primaluce_command(device, "{\"req\":{\"set\": {\"MOT1\": {\"CAL_DIR\":\"normal\"}}}}");
+					}
+					if (result) {
+						indigo_usleep(1000000);
+						result = primaluce_command(device, "{\"req\":{\"cmd\": {\"MOT1\": {\"CAL_FOCUSER\":\"StoreAsMinPos\"}}}}");
+					}
+					if (result) {
+						indigo_usleep(1000000);
+						result = primaluce_command(device, "{\"req\":{\"cmd\": {\"MOT1\": {\"CAL_FOCUSER\":\"GoOutToFindMaxPos\"}}}}");
+					}
+				} else if (X_CALIBRATE_F_START_INVERTED_ITEM->sw.value) {
+					result = primaluce_command(device, "{\"req\":{\"cmd\": {\"MOT1\": {\"CAL_FOCUSER\":\"Init\"}}}}");
+					if (result) {
+						indigo_usleep(1000000);
+						result = primaluce_command(device, "{\"req\":{\"set\": {\"MOT1\": {\"CAL_DIR\":\"invert\"}}}}");
+					}
+					if (result) {
+						indigo_usleep(1000000);
+						result = primaluce_command(device, "{\"req\":{\"cmd\": {\"MOT1\": {\"CAL_FOCUSER\":\"StoreAsMinPos\"}}}}");
+					}
+					if (result) {
+						indigo_usleep(1000000);
+						result = primaluce_command(device, "{\"req\":{\"cmd\": {\"MOT1\": {\"CAL_FOCUSER\":\"GoOutToFindMaxPos\"}}}}");
+					}
+				} else if (X_CALIBRATE_F_END_ITEM->sw.value) {
+					X_CALIBRATE_F_START_ITEM->sw.value = X_CALIBRATE_F_START_INVERTED_ITEM->sw.value = X_CALIBRATE_F_END_ITEM->sw.value = false;
+					result = primaluce_command(device, "{\"req\":{\"cmd\": {\"MOT1\": {\"CAL_FOCUSER\":\"StoreAsMaxPos\"}}}}");
+					if (result) {
+						char *get_pos_command = PRIVATE_DATA->has_abs_pos ? "{\"req\":{\"get\":{\"MOT1\":{\"ABS_POS\":\"STEP\",\"STATUS\":\"\"}}}}" : "{\"req\":{\"get\":{\"MOT1\":{\"ABS_POS_STEP\":\"\",\"STATUS\":\"\"}}}}";
+						if (primaluce_command(device, get_pos_command)) {
+							FOCUSER_POSITION_ITEM->number.value = FOCUSER_POSITION_ITEM->number.target = get_number(device, PRIVATE_DATA->has_abs_pos ? GET_MOT1_ABS_POS : GET_MOT1_ABS_POS_STEP);
+							indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+						}
+					}
+				}
+				if (!result) {
+					X_CALIBRATE_F_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_CALIBRATE";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Calibrate focuser";
+			// asynchronous_change = false;
+			item X_CALIBRATE_F_START {
+				name = "START";
+				label = "Start";
+				value = false;
+			}
+			item X_CALIBRATE_F_START_INVERTED {
+				name = "START_INVERTED";
+				label = "Start inverted";
+				value = false;
+			}
+			item X_CALIBRATE_F_END {
+				name = "END";
+				label = "End";
+				value = false;
+			}
+		}
+		inherited FOCUSER_TEMPERATURE {
+			hidden = false;
+			// on_change { }
+			// on_attach { }
+			// on_detach { }
+		}
+		inherited FOCUSER_BACKLASH {
+			hidden = false;
+			on_change {
+				if (!primaluce_command(device, "{\"req\":{\"set\":{\"MOT1\":{\"BKLASH\":%d}}}}", (int)FOCUSER_BACKLASH_ITEM->number.target)) {
+					INDIGO_UPDATE_PROPERTY_STATE(FOCUSER_BACKLASH_PROPERTY, INDIGO_ALERT_STATE, NULL);
+					return;
+				}
+				char *state = get_string(device, SET_MOT1_BKLASH);
+				if (state == NULL || strcmp(state, "done")) {
+					INDIGO_UPDATE_PROPERTY_STATE(FOCUSER_BACKLASH_PROPERTY, INDIGO_ALERT_STATE, NULL);
+					return;
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+		}
+		inherited FOCUSER_POSITION {
+			reject_change {
+				// A relative move runs through this property too, so both motion properties are
+				// busy while any move runs and both have to be inspected. Without the second term
+				// a refusal of one property would clear the only guard the other one has, and
+				// without the first term INDIGO_COPY_NUMBER_PROCESS_CHANGE would drop an
+				// overlapping absolute move silently.
+				condition = FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE;
+				message = "Another motion operation is pending";
+			}
+			on_change {
+				if (!primaluce_command(device, PRIVATE_DATA->is_sestosenso_3 ? "{\"req\":{\"cmd\":{\"MOT1\":{\"GOTO\":%d}}}}" : "{\"req\":{\"cmd\":{\"MOT1\":{\"MOVE_ABS\":{\"STEP\":%d}}}}}", (int)FOCUSER_POSITION_ITEM->number.target)) {
+					focuser_motion_failed(device, NULL);
+				} else {
+					char *state = get_string(device, PRIVATE_DATA->is_sestosenso_3 ? CMD_MOT1_GOTO : CMD_MOT1_STEP);
+					if (state == NULL || strcmp(state, "done")) {
+						focuser_motion_failed(device, state);
+					} else {
+						indigo_execute_handler(device, focuser_movement_finalizer);
+					}
+				}
+			}
+			on_attach {
+				FOCUSER_POSITION_ITEM->number.min = 0;
+				FOCUSER_POSITION_ITEM->number.max = 1000000;
+				strcpy(FOCUSER_POSITION_ITEM->number.format, "%.0f");
+			}
+			// on_detach { }
+		}
+		inherited FOCUSER_STEPS {
+			reject_change {
+				condition = FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE;
+				message = "Another motion operation is pending";
+			}
+			on_change {
+				int steps = FOCUSER_DIRECTION_MOVE_OUTWARD_ITEM->sw.value ? (int)FOCUSER_STEPS_ITEM->number.target : -(int)FOCUSER_STEPS_ITEM->number.target;
+				FOCUSER_POSITION_ITEM->number.target = FOCUSER_POSITION_ITEM->number.value + steps;
+				// A move longer than the remaining travel stops at the calibrated end.
+				if (FOCUSER_POSITION_ITEM->number.target < FOCUSER_POSITION_ITEM->number.min) {
+					FOCUSER_POSITION_ITEM->number.target = FOCUSER_POSITION_ITEM->number.min;
+				} else if (FOCUSER_POSITION_ITEM->number.target > FOCUSER_POSITION_ITEM->number.max) {
+					FOCUSER_POSITION_ITEM->number.target = FOCUSER_POSITION_ITEM->number.max;
+				}
+				// The relative move is carried out by the absolute move handler, so both motion
+				// properties have to be published as busy here and both have to stay busy until
+				// the shared finalizer completes them. The state of this property must not be
+				// derived from the position property afterwards: a refused request published from
+				// the bus thread overwrites that state with ALERT, which would silently disarm the
+				// guard that refuses a second move.
+				FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = INDIGO_BUSY_STATE;
+				indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+				focuser_position_handler(device);
+			}
+			on_attach {
+				FOCUSER_STEPS_ITEM->number.min = 0;
+				FOCUSER_STEPS_ITEM->number.max = 1000000;
+				strcpy(FOCUSER_STEPS_ITEM->number.format, "%.0f");
+			}
+			// on_detach { }
+		}
+		inherited FOCUSER_SPEED {
+			on_change {
+				if (!primaluce_command(device, "{\"req\":{\"set\":{\"MOT1\":{\"SPEED\":%d}}}}", (int)FOCUSER_SPEED_ITEM->number.target)) {
+					INDIGO_UPDATE_PROPERTY_STATE(FOCUSER_SPEED_PROPERTY, INDIGO_ALERT_STATE, NULL);
+					return;
+				}
+				char *state = get_string(device, SET_MOT1_SPEED);
+				if (state == NULL || strcmp(state, "done")) {
+					INDIGO_UPDATE_PROPERTY_STATE(FOCUSER_SPEED_PROPERTY, INDIGO_ALERT_STATE, NULL);
+					return;
+				}
+			}
+			on_attach {
+				FOCUSER_SPEED_ITEM->number.min = 0;
+				FOCUSER_SPEED_ITEM->number.max = 0;
+			}
+			// on_detach { }
+		}
+		inherited FOCUSER_ABORT_MOTION {
+			on_change {
+				// A running motion is always owned by the focuser movement finalizer at this point,
+				// so the motion properties are left busy here. That finalizer observes the stop,
+				// reads the position the draw tube actually reached and publishes it as ALERT
+				// because the requested target was not reached.
+				// MOT_ABORT stops the motor at once, MOT_STOP decelerates first and is the fallback.
+				char *state = NULL;
+				if (!primaluce_command(device, "{\"req\":{\"cmd\":{\"MOT1\":{\"MOT_ABORT\":\"\"}}}}") || (state = get_string(device, CMD_MOT1_MOT_ABORT)) == NULL || strcmp(state, "done")) {
+					state = NULL;
+					if (!primaluce_command(device, "{\"req\":{\"cmd\":{\"MOT1\":{\"MOT_STOP\":\"\"}}}}")) {
+						INDIGO_UPDATE_PROPERTY_STATE(FOCUSER_ABORT_MOTION_PROPERTY, INDIGO_ALERT_STATE, NULL);
+						return;
+					}
+					state = get_string(device, CMD_MOT1_MOT_STOP);
+					if (state == NULL || strcmp(state, "done")) {
+						INDIGO_UPDATE_PROPERTY_STATE(FOCUSER_ABORT_MOTION_PROPERTY, INDIGO_ALERT_STATE, power_message(state));
+						return;
+					}
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+		}
+	}
+	rotator {
+		name = "PrimaluceLab Rotator";
+		code {
+			// POSITION_DEG is the angle after a sync and ABS_POS_DEG the mechanical one, so the
+			// synced angle is reported where the firmware has it.
+			static bool rotator_read_angle(indigo_device *device) {
+				bool result;
+				if (PRIVATE_DATA->rotator_has_position_deg) {
+					result = primaluce_command(device, "{\"req\":{\"get\":{\"MOT2\":{\"POSITION_DEG\":\"\",\"STATUS\":\"\"}}}}");
+				} else {
+					result = primaluce_command(device, PRIVATE_DATA->rotator_has_abs_pos ? "{\"req\":{\"get\":{\"MOT2\":{\"ABS_POS\":\"DEG\",\"STATUS\":\"\"}}}}" : "{\"req\":{\"get\":{\"MOT2\":{\"ABS_POS_DEG\":\"\",\"STATUS\":\"\"}}}}");
+				}
+				if (result) {
+					ROTATOR_POSITION_ITEM->number.value = get_number(device, PRIVATE_DATA->rotator_has_position_deg ? GET_MOT2_POSITION_DEG : (PRIVATE_DATA->rotator_has_abs_pos ? GET_MOT2_ABS_POS : GET_MOT2_ABS_POS_DEG));
+				}
+				return result;
+			}
+
+			// The controller calibrates the ARCO on its own and reports CAL_STATUS "stop" when it is done.
+			static void rotator_calibration_poll(indigo_device *device) {
+				char *state;
+				// An abort ends the calibration while a poll may already be queued.
+				if (X_CALIBRATE_R_PROPERTY->state != INDIGO_BUSY_STATE) {
+					return;
+				}
+				if (!primaluce_command(device, "{\"req\":{\"get\":{\"MOT2\":{\"CAL_STATUS\":\"\"}}}}") || (state = get_string(device, GET_MOT2_CAL_STATUS)) == NULL) {
+					INDIGO_UPDATE_PROPERTY_STATE(X_CALIBRATE_R_PROPERTY, INDIGO_ALERT_STATE, NULL);
+				} else if (strcmp(state, "stop")) {
+					if (++PRIVATE_DATA->rotator_calibration_polls > 600) {
+						INDIGO_UPDATE_PROPERTY_STATE(X_CALIBRATE_R_PROPERTY, INDIGO_ALERT_STATE, "Calibration did not finish");
+					} else {
+						indigo_execute_handler_in(device, 1, rotator_calibration_poll);
+					}
+				} else {
+					if (rotator_read_angle(device)) {
+						ROTATOR_POSITION_ITEM->number.target = ROTATOR_POSITION_ITEM->number.value;
+						indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
+					}
+					INDIGO_UPDATE_PROPERTY_STATE(X_CALIBRATE_R_PROPERTY, INDIGO_OK_STATE, NULL);
+				}
+			}
+
+			static void rotator_movement_finalizer(indigo_device *device) {
+				if (rotator_read_angle(device)) {
+					char *state = get_string(device, GET_MOT2_MST);
+					if (state != NULL && strcmp(state, "stop")) {
+						indigo_execute_handler_in(device, 0.2, rotator_movement_finalizer);
+					} else {
+						for (int i = 0; i < 10; i++) {
+							indigo_usleep(100000);
+							rotator_read_angle(device);
+							if (ROTATOR_POSITION_ITEM->number.target == ROTATOR_POSITION_ITEM->number.value) {
+								ROTATOR_POSITION_PROPERTY->state = INDIGO_OK_STATE;
+								break;
+							}
+						}
+						if (ROTATOR_POSITION_PROPERTY->state == INDIGO_BUSY_STATE) {
+							ROTATOR_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
+						}
+						indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
+					}
+				} else {
+					ROTATOR_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
+					indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
+				}
+			}
+		}
+		// on_timer { }
+		on_connect {
+			char *text;
+			if (primaluce_command(device, "{\"req\":{\"set\": {\"ARCO\":1}}}")) {
+				if (primaluce_command(device, "{\"req\":{\"get\": \"\"}}")) {
+					if ((text = get_string(device, GET_MOT2_ERROR)) && *text) {
+						indigo_send_message(device, ALERT_PROPERTY, "%s", text);
+					}
+					if (get_number(device, GET_CALRESTART_MOT2)) {
+						indigo_send_message(device, BUSY_PROPERTY, "ARCO needs calibration");
+					}
+				}
+				PRIVATE_DATA->rotator_has_abs_pos = getToken(device, 0, GET_MOT2_ABS_POS) != -1;
+				PRIVATE_DATA->rotator_has_position_deg = getToken(device, 0, GET_MOT2_POSITION_DEG) != -1;
+				ROTATOR_POSITION_ITEM->number.value = ROTATOR_POSITION_ITEM->number.target = get_number(device, PRIVATE_DATA->rotator_has_position_deg ? GET_MOT2_POSITION_DEG : (PRIVATE_DATA->rotator_has_abs_pos ? GET_MOT2_ABS_POS : GET_MOT2_ABS_POS_DEG));
+			} else {
+				connection_result = false;
+			}
+		}
+		on_disconnect {
+			primaluce_command(device, "{\"req\":{\"set\": {\"ARCO\":0}}}");
+		}
+		// on_attach { }
+		// on_detach { }
+		switch X_CALIBRATE_R {
+			on_change {
+				if (X_CALIBRATE_R_START_ITEM->sw.value) {
+					X_CALIBRATE_R_START_ITEM->sw.value = false;
+					char *state;
+					if (!primaluce_command(device, "{\"req\":{\"set\":{\"MOT2\":{\"CAL_STATUS\":\"exec\"}}}}") || (state = get_string(device, SET_MOT2_CAL_STATUS)) == NULL || strcmp(state, "done")) {
+						INDIGO_UPDATE_PROPERTY_STATE(X_CALIBRATE_R_PROPERTY, INDIGO_ALERT_STATE, NULL);
+					} else {
+						// The property stays busy until the controller reports the calibration finished.
+						X_CALIBRATE_R_PROPERTY->state = INDIGO_BUSY_STATE;
+						PRIVATE_DATA->rotator_calibration_polls = 0;
+						indigo_execute_handler_in(device, 1, rotator_calibration_poll);
+					}
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+			name = "X_CALIBRATE_A";
+			group = FOCUSER_ADVANCED_GROUP;
+			label = "Calibrate rotator";
+			// asynchronous_change = false;
+			item X_CALIBRATE_R_START {
+				name = "START";
+				label = "Start";
+				value = false;
+			}
+		}
+		inherited ROTATOR_ON_POSITION_SET {
+			// on_change { }
+			// on_attach { }
+			// on_detach { }
+		}
+		inherited ROTATOR_POSITION {
+			on_change {
+				if (ROTATOR_ON_POSITION_SET_SYNC_ITEM->sw.value) {
+					// A sync redefines the current angle without moving the rotator.
+					char *state = NULL;
+					if (primaluce_command(device, "{\"req\":{\"cmd\":{\"MOT2\":{\"SYNC_POS\":{\"DEG\":%g}}}}}", ROTATOR_POSITION_ITEM->number.target) && (state = get_string(device, CMD_MOT2_SYNC_POS)) != NULL && !strcmp(state, "done")) {
+						ROTATOR_POSITION_ITEM->number.value = ROTATOR_POSITION_ITEM->number.target;
+						ROTATOR_POSITION_PROPERTY->state = INDIGO_OK_STATE;
+					} else {
+						// The request already replaced the value, so the angle the rotator keeps is read back.
+						if (rotator_read_angle(device)) {
+							ROTATOR_POSITION_ITEM->number.target = ROTATOR_POSITION_ITEM->number.value;
+						}
+						ROTATOR_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
+					}
+					indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
+				} else if (!primaluce_command(device, "{\"req\":{\"cmd\":{\"MOT2\":{\"MOVE_ABS\":{\"DEG\":%g}}}}}", ROTATOR_POSITION_ITEM->number.target)) {
+					ROTATOR_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
+					indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
+				} else {
+					char *state = get_string(device, CMD_MOT2_STEP);
+					if (state == NULL || strcmp(state, "done")) {
+						ROTATOR_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
+						indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
+					} else {
+						indigo_execute_handler(device, rotator_movement_finalizer);
+					}
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+		}
+		inherited ROTATOR_ABORT_MOTION {
+			on_change {
+				indigo_cancel_pending_handler(device, rotator_position_handler);
+				if (X_CALIBRATE_R_PROPERTY->state == INDIGO_BUSY_STATE) {
+					indigo_cancel_pending_handler(device, rotator_calibration_poll);
+					primaluce_command(device, "{\"req\":{\"set\":{\"MOT2\":{\"CAL_STATUS\":\"stop\"}}}}");
+					INDIGO_UPDATE_PROPERTY_STATE(X_CALIBRATE_R_PROPERTY, INDIGO_ALERT_STATE, "Calibration aborted");
+				}
+				if (ROTATOR_POSITION_PROPERTY->state == INDIGO_BUSY_STATE) {
+					INDIGO_UPDATE_PROPERTY_STATE(ROTATOR_POSITION_PROPERTY, INDIGO_ALERT_STATE, NULL);
+				}
+				ROTATOR_ABORT_MOTION_ITEM->sw.value = false;
+				if (!primaluce_command(device, "{\"req\":{\"cmd\":{\"MOT2\":{\"MOT_STOP\":\"\"}}}}")) {
+					ROTATOR_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
+				} else {
+					char *state = get_string(device, CMD_MOT2_MOT_STOP);
+					if (state == NULL || strcmp(state, "done")) {
+						ROTATOR_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
+					}
+				}
+			}
+			// on_attach { }
+			// on_detach { }
+		}
+	}
+}

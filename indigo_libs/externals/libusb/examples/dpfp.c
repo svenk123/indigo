@@ -1,8 +1,11 @@
+/* -*- Mode: C; indent-tabs-mode:t ; c-basic-offset:4 -*- */
 /*
  * libusb example program to manipulate U.are.U 4000B fingerprint scanner.
  * Copyright © 2007 Daniel Drake <dsd@gentoo.org>
  * Copyright © 2016 Nathan Hjelm <hjelmn@mac.com>
  * Copyright © 2020 Chris Dickens <christopher.a.dickens@gmail.com>
+ *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
  *
  * Basic image capture program only, does not consider the powerup quirks or
  * the fact that image encryption may be enabled. Not expected to work
@@ -53,7 +56,7 @@ static inline semaphore_t semaphore_create(void)
 	sem_t *semaphore;
 	char name[50];
 
-	sprintf(name, "/org.libusb.example.dpfp_threaded:%d", (int)getpid());
+	snprintf(name, sizeof(name), "/org.libusb.example.dpfp_threaded:%d", (int)getpid());
 	semaphore = sem_open(name, O_CREAT | O_EXCL, 0, 0);
 	if (semaphore == SEM_FAILED)
 		return NULL;
@@ -317,7 +320,7 @@ static void LIBUSB_CALL cb_mode_changed(struct libusb_transfer *transfer)
 
 static int set_mode_async(unsigned char data)
 {
-	unsigned char *buf = malloc(LIBUSB_CONTROL_SETUP_SIZE + 1);
+	unsigned char *buf = (unsigned char *)malloc(LIBUSB_CONTROL_SETUP_SIZE + 1);
 	struct libusb_transfer *transfer;
 
 	if (!buf) {
@@ -388,7 +391,7 @@ static int save_to_file(unsigned char *data)
 		return -1;
 
 	fputs("P5 384 289 255 ", f);
-	(void)fwrite(data + 64, 1, 384*289, f);
+	(void)fwrite(data + 64, 1, 384L*289L, f);
 	fclose(f);
 	printf("saved image to %s\n", filename);
 	return 0;
@@ -601,7 +604,7 @@ int main(void)
 {
 	int r;
 
-	r = libusb_init(NULL);
+	r = libusb_init_context(/*ctx=*/NULL, /*options=*/NULL, /*num_options=*/0);
 	if (r < 0) {
 		fprintf(stderr, "failed to initialise libusb %d - %s\n", r, libusb_strerror(r));
 		exit(1);

@@ -1,4 +1,4 @@
-// Copyright (c) 2018 CloudMakers, s. r. o.
+// Copyright (c) 2018-2025 CloudMakers, s. r. o.
 // All rights reserved.
 //
 // You can use this software under the terms of 'INDIGO Astronomy
@@ -24,7 +24,7 @@
  */
 
 #include <stdio.h>
-#include "indigo_ccd_simulator.h"
+#include "indigo_ccd_simulator_data.h"
 
 unsigned short indigo_ccd_simulator_raw_image[] = {
 #include "indigo_ccd_simulator_mono.h"
@@ -100,4 +100,3 @@ unsigned char indigo_ccd_simulator_bahtinov_image[][500 * 500] = { {
 #include "indigo_ccd_simulator_bahtinov_15.h"
 }
 };
-

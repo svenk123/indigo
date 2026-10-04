@@ -1,24 +1,23 @@
 #ifndef __bressercam_h__
 #define __bressercam_h__
 
-/* Version: 57.27650.20250209 */
+/* Version: 60.32499.20260902 */
 /*
    Platform & Architecture:
        (1) Win32:
               (a) x64: Win7 or above
               (b) x86: XP SP3 or above; CPU supports SSE2 instruction set or above
               (c) arm64: Win10 or above
-              (d) arm: Win10 or above
-       (2) WinRT: x64, x86, arm64, arm; Win10 or above
-       (3) macOS:
-              (a) x64+x86: macOS 10.10 or above
-              (b) x64+arm64: macOS 11.0 or above, support x64 and Apple silicon (such as M1, M2, etc)
+       (2) WinRT: x64, x86, arm64; Win10 or above
+       (3) macOS: x64+arm64: macOS 11.0 or above, support x64 and Apple silicon (such as M1, M2, etc)
        (4) Linux: kernel 2.6.27 or above
               (a) x64: GLIBC 2.14 or above
               (b) x86: CPU supports SSE3 instruction set or above; GLIBC 2.8 or above
-              (c) arm64: GLIBC 2.17 or above; built by toolchain aarch64-linux-gnu (version 5.4.0)
-              (d) armhf: GLIBC 2.8 or above; built by toolchain arm-linux-gnueabihf (version 5.4.0)
-              (e) armel: GLIBC 2.8 or above; built by toolchain arm-linux-gnueabi (version 5.4.0)
+              (c) arm64: GLIBC 2.17 or above
+              (d) arm64: musl libc
+              (e) armhf: GLIBC 2.8 or above
+              (f) armel: GLIBC 2.8 or above
+              (g) ostl: STMicroelectronics OpenSTLinux
        (5) Android: __ANDROID_API__ >= 24 (Android 7.0); built by android-ndk-r18b; see https://developer.android.com/ndk/guides/abis
               (a) arm64: arm64-v8a
               (b) arm: armeabi-v7a
@@ -37,10 +36,16 @@
         (b) Camera ID (camId) may change due to connection or system restart. Enumerate the cameras to get the camera ID, and then call the Open function to pass in the camId parameter to open the camera.
 */
 
-#if defined(_WIN32)
-#ifndef _INC_WINDOWS
+/*
+    Coordinate:
+        (a) Functions with coordinate parameters, such as Bressercam_put_Roi, Bressercam_put_AEAuxRect, etc., the coordinate is always relative to the original resolution,
+            even that the image has been flipped, rotated, digital binning, ROI, or combination of the previous operations.
+        (b) Exception: if the image is upside down (see here), the coordinate must be also upsize down.
+        (c) Exception: hardware binning.
+*/
+
+#if defined(_WIN32) && (!defined(_INC_WINDOWS))
 #include <windows.h>
-#endif
 #endif
 
 #ifdef __cplusplus
@@ -61,13 +66,17 @@ extern "C" {
 #pragma pack(push, 8)
 #ifdef BRESSERCAM_EXPORTS
 #define BRESSERCAM_API(x)    __declspec(dllexport)   x   __stdcall  /* in Windows, we use __stdcall calling convention, see https://docs.microsoft.com/en-us/cpp/cpp/stdcall */
+#define BRESSERCAM_APIV(x)   __declspec(dllexport)   x   __cdecl
 #elif !defined(BRESSERCAM_NOIMPORTS)
 #define BRESSERCAM_API(x)    __declspec(dllimport)   x   __stdcall
+#define BRESSERCAM_APIV(x)   __declspec(dllimport)   x   __cdecl
 #else
 #define BRESSERCAM_API(x)    x   __stdcall
+#define BRESSERCAM_APIV(x)   x   __cdecl
 #endif
 #else   /* Linux or macOS */
 #define BRESSERCAM_API(x)    x
+#define BRESSERCAM_APIV(x)   x
 #if (!defined(HRESULT)) && (!defined(__COREFOUNDATION_CFPLUGINCOM__)) /* CFPlugInCOM.h */
 #define HRESULT int
 #endif
@@ -102,160 +111,189 @@ extern "C" {
 #define S_FALSE             (HRESULT)(0x00000001) /* Yet another success */ /* Remark: Different from S_OK, such as internal values and user-set values have coincided, equivalent to noop */
 #define E_UNEXPECTED        (HRESULT)(0x8000ffff) /* Catastrophic failure */ /* Remark: Generally indicates that the conditions are not met, such as calling put_Option setting some options that do not support modification when the camera is running, and so on */
 #define E_NOTIMPL           (HRESULT)(0x80004001) /* Not supported or not implemented */ /* Remark: This feature is not supported on this model of camera */
-#define E_NOINTERFACE       (HRESULT)(0x80004002)
-#define E_ACCESSDENIED      (HRESULT)(0x80070005) /* Permission denied */ /* Remark: The program on Linux does not have permission to open the USB device, please enable udev rules file or run as root */
 #define E_OUTOFMEMORY       (HRESULT)(0x8007000e) /* Out of memory */
 #define E_INVALIDARG        (HRESULT)(0x80070057) /* One or more arguments are not valid */
+#define E_NOINTERFACE       (HRESULT)(0x80004002)
 #define E_POINTER           (HRESULT)(0x80004003) /* Pointer that is not valid */ /* Remark: Pointer is NULL */
 #define E_FAIL              (HRESULT)(0x80004005) /* Generic failure */
+#define E_ACCESSDENIED      (HRESULT)(0x80070005) /* Permission denied */ /* Remark: Insufficient permissions. This may be blocked by system security policies; on Linux, USB devices often require additional permission configuration, which can be resolved by setting up udev rules or running with root privileges */
 #define E_WRONG_THREAD      (HRESULT)(0x8001010e) /* Call function in the wrong thread */
-#define E_GEN_FAILURE       (HRESULT)(0x8007001f) /* Device not functioning */ /* Remark: It is generally caused by hardware errors, such as cable problems, USB port problems, poor contact, camera hardware damage, etc */
+#define E_GEN_FAILURE       (HRESULT)(0x8007001f) /* Device not functioning */ /* Remark: It is generally caused by hardware errors, such as cable problems, USB port problems, poor contact, insufficient power supply, camera hardware damage, etc */
 #define E_BUSY              (HRESULT)(0x800700aa) /* The requested resource is in use */ /* Remark: The camera is already in use, such as duplicated opening/starting the camera, or being used by other application, etc */
 #define E_PENDING           (HRESULT)(0x8000000a) /* The data necessary to complete this operation is not yet available */ /* Remark: No data is available at this time */
 #define E_TIMEOUT           (HRESULT)(0x8001011f) /* This operation returned because the timeout period expired */
+#define E_UNREACH           (HRESULT)(0x80072743) /* Network is unreachable */ /* Remark: Please check the IP settings of the camera and the computer, or the firewall settings */
+#define E_CANCELLED         (HRESULT)(0x800704C7) /* The operation was canceled by the user */
 #endif
 
 /* handle */
 typedef struct Bressercam_t { int unused; } *HBressercam;
 
-#define BRESSERCAM_MAX                      128
-                                         
-#define BRESSERCAM_FLAG_CMOS                0x00000001  /* cmos sensor */
-#define BRESSERCAM_FLAG_CCD_PROGRESSIVE     0x00000002  /* progressive ccd sensor */
-#define BRESSERCAM_FLAG_CCD_INTERLACED      0x00000004  /* interlaced ccd sensor */
-#define BRESSERCAM_FLAG_ROI_HARDWARE        0x00000008  /* support hardware ROI */
-#define BRESSERCAM_FLAG_MONO                0x00000010  /* monochromatic */
-#define BRESSERCAM_FLAG_BINSKIP_SUPPORTED   0x00000020  /* support bin/skip mode, see Bressercam_put_Mode and Bressercam_get_Mode */
-#define BRESSERCAM_FLAG_USB30               0x00000040  /* usb3.0 */
-#define BRESSERCAM_FLAG_TEC                 0x00000080  /* Thermoelectric Cooler */
-#define BRESSERCAM_FLAG_USB30_OVER_USB20    0x00000100  /* usb3.0 camera connected to usb2.0 port */
-#define BRESSERCAM_FLAG_ST4                 0x00000200  /* ST4 port */
-#define BRESSERCAM_FLAG_GETTEMPERATURE      0x00000400  /* support to get the temperature of the sensor */
-#define BRESSERCAM_FLAG_HIGH_FULLWELL       0x00000800  /* high fullwell capacity */
-#define BRESSERCAM_FLAG_RAW10               0x00001000  /* pixel format, RAW 10bits */
-#define BRESSERCAM_FLAG_RAW12               0x00002000  /* pixel format, RAW 12bits */
-#define BRESSERCAM_FLAG_RAW14               0x00004000  /* pixel format, RAW 14bits */
-#define BRESSERCAM_FLAG_RAW16               0x00008000  /* pixel format, RAW 16bits */
-#define BRESSERCAM_FLAG_FAN                 0x00010000  /* cooling fan */
-#define BRESSERCAM_FLAG_TEC_ONOFF           0x00020000  /* Thermoelectric Cooler can be turn on or off, support to set the target temperature of TEC */
-#define BRESSERCAM_FLAG_ISP                 0x00040000  /* ISP (Image Signal Processing) chip */
-#define BRESSERCAM_FLAG_TRIGGER_SOFTWARE    0x00080000  /* support software trigger */
-#define BRESSERCAM_FLAG_TRIGGER_EXTERNAL    0x00100000  /* support external trigger */
-#define BRESSERCAM_FLAG_TRIGGER_SINGLE      0x00200000  /* only support trigger single: one trigger, one image */
-#define BRESSERCAM_FLAG_BLACKLEVEL          0x00400000  /* support set and get the black level */
-#define BRESSERCAM_FLAG_AUTO_FOCUS          0x00800000  /* support auto focus */
-#define BRESSERCAM_FLAG_BUFFER              0x01000000  /* frame buffer */
-#define BRESSERCAM_FLAG_DDR                 0x02000000  /* use very large capacity DDR (Double Data Rate SDRAM) for frame buffer. The capacity is not less than one full frame */
-#define BRESSERCAM_FLAG_CG                  0x04000000  /* Conversion Gain: HCG, LCG */
-#define BRESSERCAM_FLAG_YUV411              0x08000000  /* pixel format, yuv411 */
-#define BRESSERCAM_FLAG_VUYY                0x10000000  /* pixel format, yuv422, VUYY */
-#define BRESSERCAM_FLAG_YUV444              0x20000000  /* pixel format, yuv444 */
-#define BRESSERCAM_FLAG_RGB888              0x40000000  /* pixel format, RGB888 */
-#define BRESSERCAM_FLAG_RAW8                0x80000000  /* pixel format, RAW 8 bits */
-#define BRESSERCAM_FLAG_GMCY8               0x0000000100000000  /* pixel format, GMCY, 8bits */
-#define BRESSERCAM_FLAG_GMCY12              0x0000000200000000  /* pixel format, GMCY, 12bits */
-#define BRESSERCAM_FLAG_UYVY                0x0000000400000000  /* pixel format, yuv422, UYVY */
-#define BRESSERCAM_FLAG_CGHDR               0x0000000800000000  /* Conversion Gain: HCG, LCG, HDR */
-#define BRESSERCAM_FLAG_GLOBALSHUTTER       0x0000001000000000  /* global shutter */
-#define BRESSERCAM_FLAG_FOCUSMOTOR          0x0000002000000000  /* support focus motor */
-#define BRESSERCAM_FLAG_PRECISE_FRAMERATE   0x0000004000000000  /* support precise framerate & bandwidth, see BRESSERCAM_OPTION_PRECISE_FRAMERATE & BRESSERCAM_OPTION_BANDWIDTH */
-#define BRESSERCAM_FLAG_HEAT                0x0000008000000000  /* support heat to prevent fogging up */
-#define BRESSERCAM_FLAG_LOW_NOISE           0x0000010000000000  /* support low noise mode (Higher signal noise ratio, lower frame rate) */
-#define BRESSERCAM_FLAG_LEVELRANGE_HARDWARE 0x0000020000000000  /* hardware level range, put(get)_LevelRangeV2 */
-#define BRESSERCAM_FLAG_EVENT_HARDWARE      0x0000040000000000  /* hardware event, such as exposure start & stop */
-#define BRESSERCAM_FLAG_LIGHTSOURCE         0x0000080000000000  /* embedded light source */
-#define BRESSERCAM_FLAG_FILTERWHEEL         0x0000100000000000  /* astro filter wheel */
-#define BRESSERCAM_FLAG_GIGE                0x0000200000000000  /* 1 Gigabit GigE */
-#define BRESSERCAM_FLAG_10GIGE              0x0000400000000000  /* 10 Gigabit GigE */
-#define BRESSERCAM_FLAG_5GIGE               0x0000800000000000  /* 5 Gigabit GigE */
-#define BRESSERCAM_FLAG_25GIGE              0x0001000000000000  /* 2.5 Gigabit GigE */
-#define BRESSERCAM_FLAG_AUTOFOCUSER         0x0002000000000000  /* astro auto focuser */
-#define BRESSERCAM_FLAG_LIGHT_SOURCE        0x0004000000000000  /* stand alone light source */
-#define BRESSERCAM_FLAG_CAMERALINK          0x0008000000000000  /* camera link */
-#define BRESSERCAM_FLAG_CXP                 0x0010000000000000  /* CXP: CoaXPress */
-#define BRESSERCAM_FLAG_RAW12PACK           0x0020000000000000  /* pixel format, RAW 12bits packed */
-#define BRESSERCAM_FLAG_SELFTRIGGER         0x0040000000000000  /* self trigger */
-#define BRESSERCAM_FLAG_RAW11               0x0080000000000000  /* pixel format, RAW 11bits */
-#define BRESSERCAM_FLAG_GHOPTO              0x0100000000000000  /* ghopto sensor */
+#define BRESSERCAM_MAX                       128
 
-#define BRESSERCAM_EXPOGAIN_DEF             100     /* exposure gain, default value */
-#define BRESSERCAM_EXPOGAIN_MIN             100     /* exposure gain, minimum value */
-#define BRESSERCAM_TEMP_DEF                 6503    /* color temperature, default value */
-#define BRESSERCAM_TEMP_MIN                 2000    /* color temperature, minimum value */
-#define BRESSERCAM_TEMP_MAX                 15000   /* color temperature, maximum value */
-#define BRESSERCAM_TINT_DEF                 1000    /* tint */
-#define BRESSERCAM_TINT_MIN                 200     /* tint */
-#define BRESSERCAM_TINT_MAX                 2500    /* tint */
-#define BRESSERCAM_HUE_DEF                  0       /* hue */
-#define BRESSERCAM_HUE_MIN                  (-180)  /* hue */
-#define BRESSERCAM_HUE_MAX                  180     /* hue */
-#define BRESSERCAM_SATURATION_DEF           128     /* saturation */
-#define BRESSERCAM_SATURATION_MIN           0       /* saturation */
-#define BRESSERCAM_SATURATION_MAX           255     /* saturation */
-#define BRESSERCAM_BRIGHTNESS_DEF           0       /* brightness */
-#define BRESSERCAM_BRIGHTNESS_MIN           (-255)  /* brightness */
-#define BRESSERCAM_BRIGHTNESS_MAX           255     /* brightness */
-#define BRESSERCAM_CONTRAST_DEF             0       /* contrast */
-#define BRESSERCAM_CONTRAST_MIN             (-255)  /* contrast */
-#define BRESSERCAM_CONTRAST_MAX             255     /* contrast */
-#define BRESSERCAM_GAMMA_DEF                100     /* gamma */
-#define BRESSERCAM_GAMMA_MIN                20      /* gamma */
-#define BRESSERCAM_GAMMA_MAX                180     /* gamma */
-#define BRESSERCAM_AETARGET_DEF             120     /* target of auto exposure */
-#define BRESSERCAM_AETARGET_MIN             16      /* target of auto exposure */
-#define BRESSERCAM_AETARGET_MAX             220     /* target of auto exposure */
-#define BRESSERCAM_WBGAIN_DEF               0       /* white balance gain */
-#define BRESSERCAM_WBGAIN_MIN               (-127)  /* white balance gain */
-#define BRESSERCAM_WBGAIN_MAX               127     /* white balance gain */
-#define BRESSERCAM_BLACKLEVEL_MIN           0       /* minimum black level */
-#define BRESSERCAM_BLACKLEVEL8_MAX          31              /* maximum black level for bitdepth = 8 */
-#define BRESSERCAM_BLACKLEVEL10_MAX         (31 * 4)        /* maximum black level for bitdepth = 10 */
-#define BRESSERCAM_BLACKLEVEL11_MAX         (31 * 8)        /* maximum black level for bitdepth = 11 */
-#define BRESSERCAM_BLACKLEVEL12_MAX         (31 * 16)       /* maximum black level for bitdepth = 12 */
-#define BRESSERCAM_BLACKLEVEL14_MAX         (31 * 64)       /* maximum black level for bitdepth = 14 */
-#define BRESSERCAM_BLACKLEVEL16_MAX         (31 * 256)      /* maximum black level for bitdepth = 16 */
-#define BRESSERCAM_SHARPENING_STRENGTH_DEF  0       /* sharpening strength */
-#define BRESSERCAM_SHARPENING_STRENGTH_MIN  0       /* sharpening strength */
-#define BRESSERCAM_SHARPENING_STRENGTH_MAX  500     /* sharpening strength */
-#define BRESSERCAM_SHARPENING_RADIUS_DEF    2       /* sharpening radius */
-#define BRESSERCAM_SHARPENING_RADIUS_MIN    1       /* sharpening radius */
-#define BRESSERCAM_SHARPENING_RADIUS_MAX    10      /* sharpening radius */
-#define BRESSERCAM_SHARPENING_THRESHOLD_DEF 0       /* sharpening threshold */
-#define BRESSERCAM_SHARPENING_THRESHOLD_MIN 0       /* sharpening threshold */
-#define BRESSERCAM_SHARPENING_THRESHOLD_MAX 255     /* sharpening threshold */
-#define BRESSERCAM_AUTOEXPO_THRESHOLD_DEF   5       /* auto exposure threshold */
-#define BRESSERCAM_AUTOEXPO_THRESHOLD_MIN   2       /* auto exposure threshold */
-#define BRESSERCAM_AUTOEXPO_THRESHOLD_MAX   15      /* auto exposure threshold */
-#define BRESSERCAM_AUTOEXPO_DAMP_DEF        0       /* auto exposure damping coefficient: thousandths */
-#define BRESSERCAM_AUTOEXPO_DAMP_MIN        0       /* auto exposure damping coefficient: thousandths */
-#define BRESSERCAM_AUTOEXPO_DAMP_MAX        1000    /* auto exposure damping coefficient: thousandths */
-#define BRESSERCAM_BANDWIDTH_DEF            100     /* bandwidth */
-#define BRESSERCAM_BANDWIDTH_MIN            1       /* bandwidth */
-#define BRESSERCAM_BANDWIDTH_MAX            100     /* bandwidth */
-#define BRESSERCAM_DENOISE_DEF              0       /* denoise */
-#define BRESSERCAM_DENOISE_MIN              0       /* denoise */
-#define BRESSERCAM_DENOISE_MAX              100     /* denoise */
-#define BRESSERCAM_HEARTBEAT_MIN            100     /* millisecond */
-#define BRESSERCAM_HEARTBEAT_MAX            10000   /* millisecond */
-#define BRESSERCAM_AE_PERCENT_MIN           0       /* auto exposure percent; 0 or 100 => full roi average, means "disabled" */
-#define BRESSERCAM_AE_PERCENT_MAX           100
-#define BRESSERCAM_AE_PERCENT_DEF           10      /* auto exposure percent: enabled, percentage = 10% */
-#define BRESSERCAM_NOPACKET_TIMEOUT_MIN     500     /* no packet timeout minimum: 500ms */
-#define BRESSERCAM_NOFRAME_TIMEOUT_MIN      500     /* no frame timeout minimum: 500ms */
-#define BRESSERCAM_DYNAMIC_DEFECT_T1_MIN    0       /* dynamic defect pixel correction, dead pixel ratio: the smaller the dead ratio is, the more stringent the conditions for processing dead pixels are, and fewer pixels will be processed */
-#define BRESSERCAM_DYNAMIC_DEFECT_T1_MAX    100     /* means: 1.0 */
-#define BRESSERCAM_DYNAMIC_DEFECT_T1_DEF    90      /* means: 0.9 */
-#define BRESSERCAM_DYNAMIC_DEFECT_T2_MIN    0       /* dynamic defect pixel correction, hot pixel ratio: the smaller the hot ratio is, the more stringent the conditions for processing hot pixels are, and fewer pixels will be processed */
-#define BRESSERCAM_DYNAMIC_DEFECT_T2_MAX    100
-#define BRESSERCAM_DYNAMIC_DEFECT_T2_DEF    90
-#define BRESSERCAM_HDR_K_MIN                1       /* HDR synthesize */
-#define BRESSERCAM_HDR_K_MAX                25500
-#define BRESSERCAM_HDR_B_MIN                0
-#define BRESSERCAM_HDR_B_MAX                65535
-#define BRESSERCAM_HDR_THRESHOLD_MIN        0
-#define BRESSERCAM_HDR_THRESHOLD_MAX        4094
-#define BRESSERCAM_CDS_MIN                  0       /* Correlated Double Sampling */
-#define BRESSERCAM_CDS_MAX                  100
+#define BRESSERCAM_FLAG_CMOS                 0x00000001  /* cmos sensor */
+#define BRESSERCAM_FLAG_CCD_PROGRESSIVE      0x00000002  /* progressive ccd sensor */
+#define BRESSERCAM_FLAG_CCD_INTERLACED       0x00000004  /* interlaced ccd sensor */
+#define BRESSERCAM_FLAG_ROI_HARDWARE         0x00000008  /* support hardware ROI */
+#define BRESSERCAM_FLAG_MONO                 0x00000010  /* monochromatic */
+#define BRESSERCAM_FLAG_BINSKIP_SUPPORTED    0x00000020  /* support bin/skip mode, see Bressercam_put_Mode and Bressercam_get_Mode */
+#define BRESSERCAM_FLAG_USB30                0x00000040  /* usb3.0 */
+#define BRESSERCAM_FLAG_TEC                  0x00000080  /* Thermoelectric Cooler */
+#define BRESSERCAM_FLAG_USB30_OVER_USB20     0x00000100  /* usb3.0 camera connected to usb2.0 port */
+#define BRESSERCAM_FLAG_ST4                  0x00000200  /* ST4 port */
+#define BRESSERCAM_FLAG_GETTEMPERATURE       0x00000400  /* support to get the temperature of the sensor */
+#define BRESSERCAM_FLAG_HIGH_FULLWELL        0x00000800  /* high fullwell capacity */
+#define BRESSERCAM_FLAG_RAW10                0x00001000  /* pixel format, RAW 10bits */
+#define BRESSERCAM_FLAG_RAW12                0x00002000  /* pixel format, RAW 12bits */
+#define BRESSERCAM_FLAG_RAW14                0x00004000  /* pixel format, RAW 14bits */
+#define BRESSERCAM_FLAG_RAW16                0x00008000  /* pixel format, RAW 16bits */
+#define BRESSERCAM_FLAG_FAN                  0x00010000  /* cooling fan */
+#define BRESSERCAM_FLAG_TEC_ONOFF            0x00020000  /* Thermoelectric Cooler can be turn on or off, support to set the target temperature of TEC */
+#define BRESSERCAM_FLAG_ISP                  0x00040000  /* ISP (Image Signal Processing) chip */
+#define BRESSERCAM_FLAG_TRIGGER_SOFTWARE     0x00080000  /* support software trigger */
+#define BRESSERCAM_FLAG_TRIGGER_EXTERNAL     0x00100000  /* support external trigger */
+#define BRESSERCAM_FLAG_TRIGGER_SINGLE       0x00200000  /* only support trigger single: one trigger, one image */
+#define BRESSERCAM_FLAG_BLACKLEVEL           0x00400000  /* support set and get the black level */
+#define BRESSERCAM_FLAG_AUTO_FOCUS           0x00800000  /* support auto focus */
+#define BRESSERCAM_FLAG_BUFFER               0x01000000  /* frame buffer */
+#define BRESSERCAM_FLAG_DDR                  0x02000000  /* use very large capacity DDR (Double Data Rate SDRAM) for frame buffer. The capacity is not less than one full frame */
+#define BRESSERCAM_FLAG_CG                   0x04000000  /* Conversion Gain: HCG, LCG */
+#define BRESSERCAM_FLAG_YUV411               0x08000000  /* pixel format, yuv411 */
+#define BRESSERCAM_FLAG_VUYY                 0x10000000  /* pixel format, yuv422, VUYY */
+#define BRESSERCAM_FLAG_YUV444               0x20000000  /* pixel format, yuv444 */
+#define BRESSERCAM_FLAG_RGB888               0x40000000  /* pixel format, RGB888 */
+#define BRESSERCAM_FLAG_RAW8                 0x80000000  /* pixel format, RAW 8 bits */
+#define BRESSERCAM_FLAG_GMCY8                0x0000000100000000  /* pixel format, GMCY, 8bits */
+#define BRESSERCAM_FLAG_GMCY12               0x0000000200000000  /* pixel format, GMCY, 12bits */
+#define BRESSERCAM_FLAG_UYVY                 0x0000000400000000  /* pixel format, yuv422, UYVY */
+#define BRESSERCAM_FLAG_CGHDR                0x0000000800000000  /* Conversion Gain: HCG, LCG, HDR */
+#define BRESSERCAM_FLAG_GLOBALSHUTTER        0x0000001000000000  /* global shutter */
+#define BRESSERCAM_FLAG_FOCUSMOTOR           0x0000002000000000  /* support focus motor */
+#define BRESSERCAM_FLAG_PRECISE_FRAMERATE    0x0000004000000000  /* support precise framerate & bandwidth, see BRESSERCAM_OPTION_PRECISE_FRAMERATE & BRESSERCAM_OPTION_BANDWIDTH */
+#define BRESSERCAM_FLAG_HEAT                 0x0000008000000000  /* support heat to prevent fogging up */
+#define BRESSERCAM_FLAG_LOW_NOISE            0x0000010000000000  /* support low noise mode (Higher signal noise ratio, lower frame rate) */
+#define BRESSERCAM_FLAG_LEVELRANGE_HARDWARE  0x0000020000000000  /* hardware level range, put(get)_LevelRangeV2 */
+#define BRESSERCAM_FLAG_EVENT_HARDWARE       0x0000040000000000  /* hardware event, such as exposure start & stop */
+#define BRESSERCAM_FLAG_LIGHTSOURCE          0x0000080000000000  /* embedded light source */
+#define BRESSERCAM_FLAG_FILTERWHEEL          0x0000100000000000  /* astro filter wheel */
+#define BRESSERCAM_FLAG_GIGE                 0x0000200000000000  /* 1 Gigabit GigE */
+#define BRESSERCAM_FLAG_10GIGE               0x0000400000000000  /* 10 Gigabit GigE */
+#define BRESSERCAM_FLAG_5GIGE                0x0000800000000000  /* 5 Gigabit GigE */
+#define BRESSERCAM_FLAG_40GIGE               0x0001000000000000  /* 40 Gigabit GigE */
+#define BRESSERCAM_FLAG_AUTOFOCUSER          0x0002000000000000  /* astro auto focuser */
+#define BRESSERCAM_FLAG_LIGHT_SOURCE         0x0004000000000000  /* stand alone light source */
+#define BRESSERCAM_FLAG_CAMERALINK           0x0008000000000000  /* camera link */
+#define BRESSERCAM_FLAG_CXP                  0x0010000000000000  /* CXP: CoaXPress */
+#define BRESSERCAM_FLAG_RAW12PACK            0x0020000000000000  /* pixel format, RAW 12bits packed */
+#define BRESSERCAM_FLAG_SELFTRIGGER          0x0040000000000000  /* self trigger */
+#define BRESSERCAM_FLAG_RAW11                0x0080000000000000  /* pixel format, RAW 11bits */
+#define BRESSERCAM_FLAG_GHOPTO               0x0100000000000000  /* ghopto sensor */
+#define BRESSERCAM_FLAG_RAW10PACK            0x0200000000000000  /* pixel format, RAW 10bits packed */
+#define BRESSERCAM_FLAG_USB32                0x0400000000000000  /* USB 3.2 Gen 2 */
+#define BRESSERCAM_FLAG_USB32_OVER_USB30     0x0800000000000000  /* USB 3.2 Gen 2 camera connected to usb3.0 port */
+#define BRESSERCAM_FLAG_LINESCAN             0x1000000000000000  /* line scan camera */
+#define BRESSERCAM_FLAG_25GIGE               0x2000000000000000  /* 2.5 Gigabit GigE */
+#define BRESSERCAM_FLAG_RAW14PACK            0x4000000000000000  /* pixel format, RAW 14bits packed */
+
+#define BRESSERCAM_EXPOGAIN_DEF              100     /* exposure gain, default value */
+#define BRESSERCAM_EXPOGAIN_MIN              100     /* exposure gain, minimum value */
+#define BRESSERCAM_TEMP_DEF                  6503    /* color temperature, default value */
+#define BRESSERCAM_TEMP_MIN                  2000    /* color temperature, minimum value */
+#define BRESSERCAM_TEMP_MAX                  15000   /* color temperature, maximum value */
+#define BRESSERCAM_TINT_DEF                  1000    /* tint */
+#define BRESSERCAM_TINT_MIN                  200     /* tint */
+#define BRESSERCAM_TINT_MAX                  2500    /* tint */
+#define BRESSERCAM_HUE_DEF                   0       /* hue */
+#define BRESSERCAM_HUE_MIN                   (-180)  /* hue */
+#define BRESSERCAM_HUE_MAX                   180     /* hue */
+#define BRESSERCAM_SATURATION_DEF            128     /* saturation */
+#define BRESSERCAM_SATURATION_MIN            0       /* saturation */
+#define BRESSERCAM_SATURATION_MAX            255     /* saturation */
+#define BRESSERCAM_BRIGHTNESS_DEF            0       /* brightness */
+#define BRESSERCAM_BRIGHTNESS_MIN            (-255)  /* brightness */
+#define BRESSERCAM_BRIGHTNESS_MAX            255     /* brightness */
+#define BRESSERCAM_CONTRAST_DEF              0       /* contrast */
+#define BRESSERCAM_CONTRAST_MIN              (-255)  /* contrast */
+#define BRESSERCAM_CONTRAST_MAX              255     /* contrast */
+#define BRESSERCAM_GAMMA_DEF                 100     /* gamma */
+#define BRESSERCAM_GAMMA_MIN                 20      /* gamma */
+#define BRESSERCAM_GAMMA_MAX                 180     /* gamma */
+#define BRESSERCAM_AETARGET_DEF              120     /* target of auto exposure */
+#define BRESSERCAM_AETARGET_MIN              16      /* target of auto exposure */
+#define BRESSERCAM_AETARGET_MAX              220     /* target of auto exposure */
+#define BRESSERCAM_WBGAIN_DEF                0       /* white balance gain */
+#define BRESSERCAM_WBGAIN_MIN                (-127)  /* white balance gain */
+#define BRESSERCAM_WBGAIN_MAX                127     /* white balance gain */
+#define BRESSERCAM_BLACKLEVEL_MIN            0       /* minimum black level */
+#define BRESSERCAM_BLACKLEVEL8_MAX           31              /* maximum black level for bitdepth = 8 */
+#define BRESSERCAM_BLACKLEVEL10_MAX          (31 * 4)        /* maximum black level for bitdepth = 10 */
+#define BRESSERCAM_BLACKLEVEL11_MAX          (31 * 8)        /* maximum black level for bitdepth = 11 */
+#define BRESSERCAM_BLACKLEVEL12_MAX          (31 * 16)       /* maximum black level for bitdepth = 12 */
+#define BRESSERCAM_BLACKLEVEL14_MAX          (31 * 64)       /* maximum black level for bitdepth = 14 */
+#define BRESSERCAM_BLACKLEVEL16_MAX          (31 * 256)      /* maximum black level for bitdepth = 16 */
+#define BRESSERCAM_SHARPENING_STRENGTH_DEF   0       /* sharpening strength */
+#define BRESSERCAM_SHARPENING_STRENGTH_MIN   0       /* sharpening strength */
+#define BRESSERCAM_SHARPENING_STRENGTH_MAX   500     /* sharpening strength */
+#define BRESSERCAM_SHARPENING_RADIUS_DEF     2       /* sharpening radius */
+#define BRESSERCAM_SHARPENING_RADIUS_MIN     1       /* sharpening radius */
+#define BRESSERCAM_SHARPENING_RADIUS_MAX     10      /* sharpening radius */
+#define BRESSERCAM_SHARPENING_THRESHOLD_DEF  0       /* sharpening threshold */
+#define BRESSERCAM_SHARPENING_THRESHOLD_MIN  0       /* sharpening threshold */
+#define BRESSERCAM_SHARPENING_THRESHOLD_MAX  255     /* sharpening threshold */
+#define BRESSERCAM_AUTOEXPO_THRESHOLD_DEF    5       /* auto exposure threshold */
+#define BRESSERCAM_AUTOEXPO_THRESHOLD_MIN    2       /* auto exposure threshold */
+#define BRESSERCAM_AUTOEXPO_THRESHOLD_MAX    15      /* auto exposure threshold */
+#define BRESSERCAM_AUTOEXPO_THLD_TRIGGER_DEF 5       /* auto exposure trigger threshold */
+#define BRESSERCAM_AUTOEXPO_THLD_TRIGGER_MIN 2       /* auto exposure trigger threshold */
+#define BRESSERCAM_AUTOEXPO_THLD_TRIGGER_MAX 64      /* auto exposure trigger threshold */
+#define BRESSERCAM_AUTOEXPO_DAMP_DEF         0       /* auto exposure damping coefficient: thousandths */
+#define BRESSERCAM_AUTOEXPO_DAMP_MIN         0       /* auto exposure damping coefficient: thousandths */
+#define BRESSERCAM_AUTOEXPO_DAMP_MAX         1000    /* auto exposure damping coefficient: thousandths */
+#define BRESSERCAM_BANDWIDTH_DEF             100     /* bandwidth */
+#define BRESSERCAM_BANDWIDTH_MIN             1       /* bandwidth */
+#define BRESSERCAM_BANDWIDTH_MAX             100     /* bandwidth */
+#define BRESSERCAM_DENOISE_DEF               0       /* denoise */
+#define BRESSERCAM_DENOISE_MIN               0       /* denoise */
+#define BRESSERCAM_DENOISE_MAX               100     /* denoise */
+#define BRESSERCAM_HEARTBEAT_MIN             100     /* millisecond */
+#define BRESSERCAM_HEARTBEAT_MAX             10000   /* millisecond */
+#define BRESSERCAM_AE_PERCENT_MIN            0       /* auto exposure percent; 0 or 100 => full roi average, means "disabled" */
+#define BRESSERCAM_AE_PERCENT_MAX            100
+#define BRESSERCAM_AE_PERCENT_DEF            1       /* auto exposure percent: enabled, percentage = 1% */
+#define BRESSERCAM_NOPACKET_TIMEOUT_MIN      500     /* no packet timeout minimum: 500ms */
+#define BRESSERCAM_NOFRAME_TIMEOUT_MIN       500     /* no frame timeout minimum: 500ms */
+#define BRESSERCAM_DYNAMIC_DEFECT_T1_MIN     0       /* dynamic defect pixel correction, dead pixel ratio: the smaller the dead ratio is, the more stringent the conditions for processing dead pixels are, and fewer pixels will be processed */
+#define BRESSERCAM_DYNAMIC_DEFECT_T1_MAX     100     /* means: 1.0 */
+#define BRESSERCAM_DYNAMIC_DEFECT_T1_DEF     90      /* means: 0.9 */
+#define BRESSERCAM_DYNAMIC_DEFECT_T2_MIN     0       /* dynamic defect pixel correction, hot pixel ratio: the smaller the hot ratio is, the more stringent the conditions for processing hot pixels are, and fewer pixels will be processed */
+#define BRESSERCAM_DYNAMIC_DEFECT_T2_MAX     100
+#define BRESSERCAM_DYNAMIC_DEFECT_T2_DEF     90
+#define BRESSERCAM_HDR_K_MIN                 1       /* HDR synthesize */
+#define BRESSERCAM_HDR_K_MAX                 25500
+#define BRESSERCAM_HDR_B_MIN                 0
+#define BRESSERCAM_HDR_B_MAX                 65535
+#define BRESSERCAM_HDR_THRESHOLD_MIN         0
+#define BRESSERCAM_HDR_THRESHOLD_MAX         4094
+#define BRESSERCAM_CDS_MIN                   0       /* Correlated Double Sampling */
+#define BRESSERCAM_ANTIBLOOMING_MIN          0       /* Anti Blooming */
+#define BRESSERCAM_GVCP_RETRY_DEF            4       /* GVCP Retry */
+#define BRESSERCAM_GVCP_RETRY_MIN            2
+#define BRESSERCAM_GVCP_RETRY_MAX            20
+#define BRESSERCAM_GVCP_TIMEOUT_DEF          40      /* GVCP Timeout */
+#define BRESSERCAM_GVCP_TIMEOUT_MIN          20
+#define BRESSERCAM_GVCP_TIMEOUT_MAX          200
+#define BRESSERCAM_GVSP_WAIT_PERCENT_DEF     1       /* GVSP wait percent */
+#define BRESSERCAM_GVSP_WAIT_PERCENT_MIN     0
+#define BRESSERCAM_GVSP_WAIT_PERCENT_MAX     100
+#define BRESSERCAM_FRONTEND_MAX              1024    /* frontend frame buffer deque length */
+#define BRESSERCAM_FRONTEND_DEF              4
+#define BRESSERCAM_FRONTEND_MIN              2
+#define BRESSERCAM_BACKEND_MAX               1024    /* backend frame buffer deque length */
+#define BRESSERCAM_BACKEND_DEF               3
+#define BRESSERCAM_BACKEND_MIN               2
+#define BRESSERCAM_HEAT_MIN                  0       /* Heat */
+#define BRESSERCAM_LANE_MIN                  0       /* Lane */
+#define BRESSERCAM_FAN_MIN                   0       /* Fan */
 
 typedef struct {
     unsigned    width;
@@ -290,11 +328,11 @@ typedef struct {
     char                  displayname[64];    /* display name: model name or user-defined name (if any and Bressercam_EnumWithName) */
     char                  id[64];             /* unique and opaque id of a connected camera, for Bressercam_Open */
 #endif
-    const BressercamModelV2* model;
+    const BressercamModelV2* model;              /* Functionally equivalent to a global constant, remaining valid and unchanged throughout the lifetime of the process */
 } BressercamDeviceV2; /* device instance for enumerating */
 
 /*
-    get the version of this dll/so/dylib, which is: 57.27650.20250209
+    get the version of this dll/so/dylib, which is: 60.32499.20260902
 */
 #if defined(_WIN32)
 BRESSERCAM_API(const wchar_t*)   Bressercam_Version();
@@ -317,6 +355,12 @@ BRESSERCAM_API(unsigned) Bressercam_EnumV2(BressercamDeviceV2 arr[BRESSERCAM_MAX
 
 /* use the camId of BressercamDeviceV2, which is enumerated by Bressercam_EnumV2.
     if camId is NULL, Bressercam_Open will open the first enumerated camera.
+    For USB, GigE, CameraLink or CXP camera, the camId can also be specified as (case sensitive, no spaces):
+        (a) "sn:xxxxxxxxxxxx" (Use SN, such as sn:ZP250212241204105), or
+        (b) "name:xxxxxx" (Use user-defined name, such as name:Camera1)
+    Moreover, for GigE camera, the camId can also be specified as (case sensitive, no spaces):
+        (a) "ip:xxx.xxx.xxx.xxx" (Use IP address, such as ip:192.168.1.100), or
+        (b) "mac:xxxxxxxxxxxx" (Use MAC address, such as mac:d05f64ffff23)
     For the issue of opening the camera on Android, please refer to the documentation
 */
 #if defined(_WIN32)
@@ -336,6 +380,18 @@ BRESSERCAM_API(HBressercam) Bressercam_OpenByIndex(unsigned index);
 /* close the handle. After it is closed, never use the handle any more. */
 BRESSERCAM_API(void)     Bressercam_Close(HBressercam h);
 
+/* load cfg:
+     (1) nullptr or empty string, load from EEPROM (address = 0)
+     (2) eeprom=???, load from EEPROM (address = 0x???)
+     (3) path\to\file.ini, load from ini file
+     (4) path\to\file.json, load from json file
+*/
+#if defined(_WIN32)
+BRESSERCAM_API(HRESULT)  Bressercam_Load(HBressercam h, const wchar_t* strPara);
+#else
+BRESSERCAM_API(HRESULT)  Bressercam_Load(HBressercam h, const char* strPara);
+#endif
+
 #define BRESSERCAM_EVENT_EXPOSURE          0x0001    /* exposure time or gain changed */
 #define BRESSERCAM_EVENT_TEMPTINT          0x0002    /* white balance changed, Temp/Tint mode */
 #define BRESSERCAM_EVENT_IMAGE             0x0004    /* live image arrived, use Bressercam_PullImageXXXX to get this image */
@@ -350,6 +406,8 @@ BRESSERCAM_API(void)     Bressercam_Close(HBressercam h);
 #define BRESSERCAM_EVENT_AUTOEXPO_CONV     0x000d    /* auto exposure convergence */
 #define BRESSERCAM_EVENT_AUTOEXPO_CONVFAIL 0x000e    /* auto exposure once mode convergence failed */
 #define BRESSERCAM_EVENT_FPNC              0x000f    /* fix pattern noise correction status changed */
+#define BRESSERCAM_EVENT_FRONT_OVERFLOW    0x0010    /* front buffer overflow */
+#define BRESSERCAM_EVENT_BACK_OVERFLOW     0x0011    /* back buffer overflow */
 #define BRESSERCAM_EVENT_ERROR             0x0080    /* generic error */
 #define BRESSERCAM_EVENT_DISCONNECTED      0x0081    /* camera disconnected */
 #define BRESSERCAM_EVENT_NOFRAMETIMEOUT    0x0082    /* no frame timeout error */
@@ -363,7 +421,7 @@ BRESSERCAM_API(void)     Bressercam_Close(HBressercam h);
 #define BRESSERCAM_EVENT_FACTORY           0x8001    /* restore factory settings */
 
 #if defined(_WIN32)
-BRESSERCAM_API(HRESULT)  Bressercam_StartPullModeWithWndMsg(HBressercam h, HWND hWnd, UINT nMsg);
+BRESSERCAM_API(HRESULT)  Bressercam_StartPullModeWithWndMsg(HBressercam h, HWND hWnd, unsigned msgWnd);
 #endif
 
 /* Do NOT call Bressercam_Close, Bressercam_Stop in this callback context, it deadlocks. */
@@ -381,6 +439,8 @@ BRESSERCAM_API(HRESULT)  Bressercam_StartPullModeWithCallback(HBressercam h, PBR
 #define BRESSERCAM_FRAMEINFO_FLAG_AUTOFOCUS          0x00000080 /* auto focus: uLum & uFV */
 #define BRESSERCAM_FRAMEINFO_FLAG_COUNT              0x00000100 /* timecount, framecount, tricount */
 #define BRESSERCAM_FRAMEINFO_FLAG_MECHANICALSHUTTER  0x00000200 /* Mechanical shutter: closed */
+#define BRESSERCAM_FRAMEINFO_FLAG_HOB                0x00000400 /* Horizontal Optical Black */
+#define BRESSERCAM_FRAMEINFO_FLAG_VOB                0x00000800 /* Vertical Optical Black */
 #define BRESSERCAM_FRAMEINFO_FLAG_STILL              0x00008000 /* still image */
 #define BRESSERCAM_FRAMEINFO_FLAG_CG                 0x00010000 /* Conversion Gain: High */
 
@@ -408,7 +468,8 @@ typedef struct {
 
 typedef struct {
     BressercamFrameInfoV3 v3;
-    unsigned reserved; /* not used */
+    unsigned short hob; /* Horizontal Optical Black */
+    unsigned short vob; /* Vertical Optical Black */
     unsigned uLum;
     unsigned long long uFV;
     unsigned long long timecount;
@@ -416,9 +477,42 @@ typedef struct {
     BressercamGps gps;
 } BressercamFrameInfoV4;
 
+typedef struct {
+    unsigned id;                    /* 0 is reserved as an invalid id */
+    unsigned char pixelFormat;      /* BRESSERCAM_PIXELFORMAT_xxxx */
+    unsigned char ergb;             /* see BRESSERCAM_OPTION_RGB */
+    unsigned char snapR;            /* see Bressercam_SnapR */
+    unsigned char infoVer;          /* BressercamFrameInfo version >= 4 */
+    unsigned reserved;
+    unsigned strideRaw;             /* stride of RAW, 0 means = image width (no padding) */
+    BressercamFrameInfoV4* ptrInfo;
+    void* snapCtx;
+    void* ptrRaw;                   /* RAW, see BRESSERCAM_OPTION_IMAGEPTRRAW */
+    unsigned char* ptr8;
+    unsigned short* ptr16;
+} BressercamImagePtr;
+
+/* Obtains a pointer to the frame buffer directly from the SDK, eliminating the need to copy frame data and thus improving performance */
+/* bStill: to pull still image, set to 1, otherwise 0 */
+BRESSERCAM_API(HRESULT)  Bressercam_PullImagePtr(HBressercam h, int bStill, BressercamImagePtr* ptrImage);
+
+/* After a frame buffer has been used, it must be returned to the SDK for reuse. Please note the following:
+    (a) The frame buffer must only be returned back after it is no longer in use. Any access after returning it is unsafe, as the SDK may have already reused the buffer and overwritten the memory with new data.
+    (b) If a frame buffer is not returned, the pool of available buffers will gradually decrease.
+    (c) Each frame buffer obtained via Pull (identified by its ID) may be returned only once; duplicate returns are not allowed.
+    (d) The return order does not need to match the Pull order; buffers may be returned out of order.
+    (e) Frame buffers that have not been returned remain valid after Bressercam_Stop. Frame buffers that have not been returned become invalid immediately after Bressercam_Close.
+*/
+BRESSERCAM_API(HRESULT)  Bressercam_PushImagePtr(HBressercam h, unsigned ptrId);
+
+/* waitMS: The timeout interval, in milliseconds. If a nonzero value is specified, the function waits until the image is ok or the interval elapses.
+            If waitMS is zero, the function does not enter a wait state if the image is not available; it always returns immediately; this is equal to Bressercam_PullImagePtr.
+*/
+BRESSERCAM_API(HRESULT)  Bressercam_WaitImagePtr(HBressercam h, unsigned waitMS, int bStill, BressercamImagePtr* ptrImage);
+
 /*
-    nWaitMS: The timeout interval, in milliseconds. If a nonzero value is specified, the function waits until the image is ok or the interval elapses.
-             If nWaitMS is zero, the function does not enter a wait state if the image is not available; it always returns immediately; this is equal to Bressercam_PullImageV4.
+    waitMS: The timeout interval, in milliseconds. If a nonzero value is specified, the function waits until the image is ok or the interval elapses.
+             If waitMS is zero, the function does not enter a wait state if the image is not available; it always returns immediately; this is equal to Bressercam_PullImageV4.
     bStill: to pull still image, set to 1, otherwise 0
     bits: 24 (RGB24), 32 (RGB32), 48 (RGB48), 8 (Grey), 16 (Grey), 64 (RGB64).
           In RAW mode, this parameter is ignored.
@@ -459,9 +553,9 @@ typedef struct {
             |-----------|------------------------|-------------------------------|-----------------------|
 */
 BRESSERCAM_API(HRESULT)  Bressercam_PullImageV4(HBressercam h, void* pImageData, int bStill, int bits, int rowPitch, BressercamFrameInfoV4* pInfo);
-BRESSERCAM_API(HRESULT)  Bressercam_WaitImageV4(HBressercam h, unsigned nWaitMS, void* pImageData, int bStill, int bits, int rowPitch, BressercamFrameInfoV4* pInfo);
+BRESSERCAM_API(HRESULT)  Bressercam_WaitImageV4(HBressercam h, unsigned waitMS, void* pImageData, int bStill, int bits, int rowPitch, BressercamFrameInfoV4* pInfo);
 BRESSERCAM_API(HRESULT)  Bressercam_PullImageV3(HBressercam h, void* pImageData, int bStill, int bits, int rowPitch, BressercamFrameInfoV3* pInfo);
-BRESSERCAM_API(HRESULT)  Bressercam_WaitImageV3(HBressercam h, unsigned nWaitMS, void* pImageData, int bStill, int bits, int rowPitch, BressercamFrameInfoV3* pInfo);
+BRESSERCAM_API(HRESULT)  Bressercam_WaitImageV3(HBressercam h, unsigned waitMS, void* pImageData, int bStill, int bits, int rowPitch, BressercamFrameInfoV3* pInfo);
 
 typedef struct {
     unsigned            width;
@@ -505,6 +599,8 @@ BRESSERCAM_API(HRESULT)  Bressercam_Pause(HBressercam h, int bPause); /* 1 => pa
 BRESSERCAM_API(HRESULT)  Bressercam_Snap(HBressercam h, unsigned nResolutionIndex);  /* still image snap */
 BRESSERCAM_API(HRESULT)  Bressercam_SnapN(HBressercam h, unsigned nResolutionIndex, unsigned nNumber);  /* multiple still image snap */
 BRESSERCAM_API(HRESULT)  Bressercam_SnapR(HBressercam h, unsigned nResolutionIndex, unsigned nNumber);  /* multiple RAW still image snap */
+BRESSERCAM_API(HRESULT)  Bressercam_SnapV2(HBressercam h, unsigned nResolutionIndex, unsigned nNumber, int eRGB, void* snapCtx);
+
 /*
     soft trigger:
     nNumber:    0xffff:     trigger continuously
@@ -515,12 +611,12 @@ BRESSERCAM_API(HRESULT)  Bressercam_Trigger(HBressercam h, unsigned short nNumbe
 
 /*
     trigger synchronously
-    nWaitMS:    0:              by default, exposure * 102% + 4000 milliseconds
+    waitMS:     0:              by default, exposure * 102% + 4000 milliseconds
                 0xffffffff:     wait infinite
                 other:          milliseconds to wait
 */
-BRESSERCAM_API(HRESULT)  Bressercam_TriggerSyncV4(HBressercam h, unsigned nWaitMS, void* pImageData, int bits, int rowPitch, BressercamFrameInfoV4* pInfo);
-BRESSERCAM_API(HRESULT)  Bressercam_TriggerSync(HBressercam h, unsigned nWaitMS, void* pImageData, int bits, int rowPitch, BressercamFrameInfoV3* pInfo);
+BRESSERCAM_API(HRESULT)  Bressercam_TriggerSyncV4(HBressercam h, unsigned waitMS, void* pImageData, int bits, int rowPitch, BressercamFrameInfoV4* pInfo);
+BRESSERCAM_API(HRESULT)  Bressercam_TriggerSync(HBressercam h, unsigned waitMS, void* pImageData, int bits, int rowPitch, BressercamFrameInfoV3* pInfo);
 
 /*
     put_Size, put_eSize, can be used to set the video output resolution BEFORE Bressercam_StartXXXX.
@@ -609,13 +705,13 @@ typedef void (__stdcall* PIBRESSERCAM_PROGRESS)(int percent, void* ctxProgress);
 typedef void (__stdcall* PIBRESSERCAM_HISTOGRAM_CALLBACKV2)(const unsigned* aHist, unsigned nFlag, void* ctxHistogramV2);
 
 /*
-* bAutoExposure:
+* mode:
 *   0: disable auto exposure
-*   1: auto exposure continue mode
-*   2: auto exposure once mode
+*   1: auto exposure continuous mode
+*   2: auto exposure once
 */
-BRESSERCAM_API(HRESULT)  Bressercam_get_AutoExpoEnable(HBressercam h, int* bAutoExposure);
-BRESSERCAM_API(HRESULT)  Bressercam_put_AutoExpoEnable(HBressercam h, int bAutoExposure);
+BRESSERCAM_API(HRESULT)  Bressercam_get_AutoExpoEnable(HBressercam h, int* mode);
+BRESSERCAM_API(HRESULT)  Bressercam_put_AutoExpoEnable(HBressercam h, int mode);
 
 BRESSERCAM_API(HRESULT)  Bressercam_get_AutoExpoTarget(HBressercam h, unsigned short* Target);
 BRESSERCAM_API(HRESULT)  Bressercam_put_AutoExpoTarget(HBressercam h, unsigned short Target);
@@ -665,6 +761,7 @@ BRESSERCAM_API(HRESULT)  Bressercam_FfcImport(HBressercam h, const wchar_t* file
 BRESSERCAM_API(HRESULT)  Bressercam_FfcExport(HBressercam h, const char* filePath);
 BRESSERCAM_API(HRESULT)  Bressercam_FfcImport(HBressercam h, const char* filePath);
 #endif
+BRESSERCAM_API(HRESULT)  Bressercam_FfcFile(const void* data[], unsigned num, unsigned width, unsigned height, unsigned fourcc, unsigned bits, const char* outfile);
 
 /* Dark Field Correction */
 BRESSERCAM_API(HRESULT)  Bressercam_DfcOnce(HBressercam h);
@@ -718,7 +815,7 @@ BRESSERCAM_API(HRESULT)  Bressercam_get_FanMaxSpeed(HBressercam h); /* get the m
 
 BRESSERCAM_API(HRESULT)  Bressercam_get_MaxBitDepth(HBressercam h); /* get the max bitdepth of this camera, such as 8, 10, 12, 14, 16 */
 
-/* power supply of lighting:
+/* Light Frequency:
         0 => 60HZ AC
         1 => 50Hz AC
         2 => DC
@@ -741,13 +838,14 @@ typedef struct {
 #endif
 #endif
 
-BRESSERCAM_API(HRESULT)  Bressercam_put_AWBAuxRect(HBressercam h, const RECT* pAuxRect); /* auto white balance ROI */
-BRESSERCAM_API(HRESULT)  Bressercam_get_AWBAuxRect(HBressercam h, RECT* pAuxRect);
-BRESSERCAM_API(HRESULT)  Bressercam_put_AEAuxRect(HBressercam h, const RECT* pAuxRect);  /* auto exposure ROI */
-BRESSERCAM_API(HRESULT)  Bressercam_get_AEAuxRect(HBressercam h, RECT* pAuxRect);
+/* Minimum width & height: 4 */
+BRESSERCAM_API(HRESULT)  Bressercam_put_AWBAuxRect(HBressercam h, const RECT* pRect); /* auto white balance ROI */
+BRESSERCAM_API(HRESULT)  Bressercam_get_AWBAuxRect(HBressercam h, RECT* pRect);
+BRESSERCAM_API(HRESULT)  Bressercam_put_AEAuxRect(HBressercam h, const RECT* pRect);  /* auto exposure ROI */
+BRESSERCAM_API(HRESULT)  Bressercam_get_AEAuxRect(HBressercam h, RECT* pRect);
 
-BRESSERCAM_API(HRESULT)  Bressercam_put_ABBAuxRect(HBressercam h, const RECT* pAuxRect); /* auto black balance ROI */
-BRESSERCAM_API(HRESULT)  Bressercam_get_ABBAuxRect(HBressercam h, RECT* pAuxRect);
+BRESSERCAM_API(HRESULT)  Bressercam_put_ABBAuxRect(HBressercam h, const RECT* pRect); /* auto black balance ROI */
+BRESSERCAM_API(HRESULT)  Bressercam_get_ABBAuxRect(HBressercam h, RECT* pRect);
 
 /*
     S_FALSE:    color mode
@@ -758,13 +856,14 @@ BRESSERCAM_API(HRESULT)  Bressercam_get_MonoMode(HBressercam h);
 BRESSERCAM_API(HRESULT)  Bressercam_get_StillResolutionNumber(HBressercam h);
 BRESSERCAM_API(HRESULT)  Bressercam_get_StillResolution(HBressercam h, unsigned nResolutionIndex, int* pWidth, int* pHeight);
 
-/*  0: no realtime
+/*  0: Off
           stop grab frame when frame buffer deque is full, until the frames in the queue are pulled away and the queue is not full
-    1: realtime
+    1: Both
           use minimum frame buffer. When new frame arrive, drop all the pending frame regardless of whether the frame buffer is full.
           If DDR present, also limit the DDR frame buffer to only one frame.
-    2: soft realtime
-          Drop the oldest frame when the queue is full and then enqueue the new frame
+    2: Soft
+          use minimum frame buffer. When new frame arrive, drop all the pending frame regardless of whether the frame buffer is full.
+          If DDR present, the DDR frame buffer unchanged.
     default: 0
 */
 BRESSERCAM_API(HRESULT)  Bressercam_put_RealTime(HBressercam h, int val);
@@ -856,164 +955,190 @@ BRESSERCAM_API(HRESULT)  Bressercam_read_Pipe(HBressercam h, unsigned pipeId, vo
 BRESSERCAM_API(HRESULT)  Bressercam_write_Pipe(HBressercam h, unsigned pipeId, const void* pBuffer, unsigned nBufferLen);
 BRESSERCAM_API(HRESULT)  Bressercam_feed_Pipe(HBressercam h, unsigned pipeId);
 
-#define BRESSERCAM_OPTION_NOFRAME_TIMEOUT        0x01       /* no frame timeout: 0 => disable, positive value (>= BRESSERCAM_NOFRAME_TIMEOUT_MIN) => timeout milliseconds. default: disable */
-#define BRESSERCAM_OPTION_THREAD_PRIORITY        0x02       /* set the priority of the internal thread which grab data from the usb device.
+BRESSERCAM_API(HRESULT)  Bressercam_put_Option(HBressercam h, unsigned iOption, int iValue);
+BRESSERCAM_API(HRESULT)  Bressercam_get_Option(HBressercam h, unsigned iOption, int* piValue);
+
+/* Case insensitive */
+BRESSERCAM_API(HRESULT)  Bressercam_put_Int(HBressercam h, const char* strName, int iValue);
+BRESSERCAM_API(HRESULT)  Bressercam_get_Int(HBressercam h, const char* strName, int* piValue);
+BRESSERCAM_API(HRESULT)  Bressercam_put_Str(HBressercam h, const char* strName, const char* strValue);
+/* strValue: output buffer (128 bytes are always sufficient) */
+BRESSERCAM_API(HRESULT)  Bressercam_get_Str(HBressercam h, const char* strName, char strValue[]);
+BRESSERCAM_API(HRESULT)  Bressercam_get_Enum(HBressercam h, const char* strName, int* pNumber, int arrValue[], const char* arrString[]);
+BRESSERCAM_API(HRESULT)  Bressercam_get_StrPtr(HBressercam h, const char* strName, const char** strValue);
+
+/* [RW] = Read/Write; [RO] = Read Only; [WO] = Write Only */
+#define BRESSERCAM_OPTION_NOFRAME_TIMEOUT        0x01       /* [RW] no frame timeout: 0 => disable, positive value (>= BRESSERCAM_NOFRAME_TIMEOUT_MIN) => timeout milliseconds. default: disable */
+#define BRESSERCAM_OPTION_THREAD_PRIORITY        0x02       /* [RW] set the priority of the internal thread which grab data from the usb device.
                                                              Win: iValue: 0 => THREAD_PRIORITY_NORMAL; 1 => THREAD_PRIORITY_ABOVE_NORMAL; 2 => THREAD_PRIORITY_HIGHEST; 3 => THREAD_PRIORITY_TIME_CRITICAL; default: 1; see: https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadpriority
-                                                             Linux & macOS: The high 16 bits for the scheduling policy, and the low 16 bits for the priority; see: https://linux.die.net/man/3/pthread_setschedparam
+                                                             Linux & macOS: similar to Win
                                                          */
-#define BRESSERCAM_OPTION_PROCESSMODE            0x03       /* obsolete & useless, noop. 0 = better image quality, more cpu usage. this is the default value; 1 = lower image quality, less cpu usage */
-#define BRESSERCAM_OPTION_RAW                    0x04       /* raw data mode, read the sensor "raw" data. This can be set only while camea is NOT running. 0 = rgb, 1 = raw, default value: 0 */
-#define BRESSERCAM_OPTION_HISTOGRAM              0x05       /* 0 = only one, 1 = continue mode */
-#define BRESSERCAM_OPTION_BITDEPTH               0x06       /* 0 = 8 bits mode, 1 = 16 bits mode, subset of BRESSERCAM_OPTION_PIXEL_FORMAT */
-#define BRESSERCAM_OPTION_FAN                    0x07       /* 0 = turn off the cooling fan, [1, max] = fan speed, , set to "-1" means to use default fan speed */
-#define BRESSERCAM_OPTION_TEC                    0x08       /* 0 = turn off the thermoelectric cooler, 1 = turn on the thermoelectric cooler */
-#define BRESSERCAM_OPTION_LINEAR                 0x09       /* 0 = turn off the builtin linear tone mapping, 1 = turn on the builtin linear tone mapping, default value: 1 */
-#define BRESSERCAM_OPTION_CURVE                  0x0a       /* 0 = turn off the builtin curve tone mapping, 1 = turn on the builtin polynomial curve tone mapping, 2 = logarithmic curve tone mapping, default value: 2 */
-#define BRESSERCAM_OPTION_TRIGGER                0x0b       /* 0 = video mode, 1 = software or simulated trigger mode, 2 = external trigger mode, 3 = external + software trigger, 4 = self trigger, default value = 0 */
-#define BRESSERCAM_OPTION_RGB                    0x0c       /* 0 => RGB24; 1 => enable RGB48 format when bitdepth > 8; 2 => RGB32; 3 => 8 Bits Grey (only for mono camera); 4 => 16 Bits Grey (only for mono camera when bitdepth > 8); 5 => 64(RGB64) */
-#define BRESSERCAM_OPTION_COLORMATIX             0x0d       /* enable or disable the builtin color matrix, default value: 1 */
-#define BRESSERCAM_OPTION_WBGAIN                 0x0e       /* enable or disable the builtin white balance gain, default value: 1 */
-#define BRESSERCAM_OPTION_TECTARGET              0x0f       /* get or set the target temperature of the thermoelectric cooler, in 0.1 degree Celsius. For example, 125 means 12.5 degree Celsius, -35 means -3.5 degree Celsius. Set "-2730" or below means using the default for that model */
-#define BRESSERCAM_OPTION_AUTOEXP_POLICY         0x10       /* auto exposure policy:
+#define BRESSERCAM_OPTION_PROCESSMODE            0x03       /* [RW] obsolete & useless, noop. 0 = better image quality, more cpu usage. this is the default value; 1 = lower image quality, less cpu usage */
+#define BRESSERCAM_OPTION_RAW                    0x04       /* [RW]
+                                                            0: RGB mode
+                                                            1: RAW mode, read the CMOS or CCD raw data
+                                                            -1: RAW mode, the difference from 1 is the execution of FFC, DFC, FPNC, black balance, and white balance
+                                                            default value: 0
+                                                         */
+#define BRESSERCAM_OPTION_HISTOGRAM              0x05       /* [RW] 0 = only one, 1 = continue mode */
+#define BRESSERCAM_OPTION_BITDEPTH               0x06       /* [RW] 0 = 8 bits mode, 1 = 16 bits mode, subset of BRESSERCAM_OPTION_PIXEL_FORMAT */
+#define BRESSERCAM_OPTION_FAN                    0x07       /* [RW] 0 = turn off the cooling fan, [1, max] = fan speed, set to "-1" means to use default fan speed */
+#define BRESSERCAM_OPTION_TEC                    0x08       /* [RW] 0 = turn off the thermoelectric cooler, 1 = turn on the thermoelectric cooler */
+#define BRESSERCAM_OPTION_LINEAR                 0x09       /* [RW] 0 = turn off the builtin linear tone mapping, 1 = turn on the builtin linear tone mapping, default value: 1 */
+#define BRESSERCAM_OPTION_CURVE                  0x0a       /* [RW] 0 = turn off the builtin curve tone mapping, 1 = turn on the builtin polynomial curve tone mapping, 2 = logarithmic curve tone mapping, default value: 2 */
+#define BRESSERCAM_OPTION_TRIGGER                0x0b       /* [RW] 0 = video mode, 1 = software or simulated trigger mode, 2 = external trigger mode, 3 = external + software trigger, 4 = self trigger, default value = 0 */
+#define BRESSERCAM_OPTION_RGB                    0x0c       /* [RW] 0 => RGB24; 1 => enable RGB48 format when bitdepth > 8; 2 => RGB32; 3 => 8 Bits Grey (only for mono camera); 4 => 16 Bits Grey (only for mono camera when bitdepth > 8); 5 => 64(RGB64) */
+#define BRESSERCAM_OPTION_COLORMATIX             0x0d       /* [RW] enable or disable the builtin color matrix, default value: 1 */
+#define BRESSERCAM_OPTION_WBGAIN                 0x0e       /* [RW] enable or disable the builtin white balance gain, default value: 1 */
+#define BRESSERCAM_OPTION_TECTARGET              0x0f       /* [RW] get or set the target temperature of the thermoelectric cooler, in 0.1 degree Celsius. For example, 125 means 12.5 degree Celsius, -35 means -3.5 degree Celsius. Set "-2730" or below means using the default for that model */
+#define BRESSERCAM_OPTION_AUTOEXP_POLICY         0x10       /* [RW] auto exposure policy:
                                                              0: Exposure Only
                                                              1: Exposure Preferred
                                                              2: Gain Only
                                                              3: Gain Preferred
                                                              default value: 1
                                                          */
-#define BRESSERCAM_OPTION_FRAMERATE              0x11       /* limit the frame rate, the default value 0 means no limit */
-#define BRESSERCAM_OPTION_DEMOSAIC               0x12       /* demosaic method for both video and still image: BILINEAR = 0, VNG(Variable Number of Gradients) = 1, PPG(Patterned Pixel Grouping) = 2, AHD(Adaptive Homogeneity Directed) = 3, EA(Edge Aware) = 4, see https://en.wikipedia.org/wiki/Demosaicing
+#define BRESSERCAM_OPTION_FRAMERATE              0x11       /* [RW] limit the frame rate, the default value 0 means no limit */
+#define BRESSERCAM_OPTION_DEMOSAIC               0x12       /* [RW] demosaic method for both video and still image: BILINEAR = 0, VNG(Variable Number of Gradients) = 1, PPG(Patterned Pixel Grouping) = 2, AHD(Adaptive Homogeneity Directed) = 3, EA(Edge Aware) = 4, see https://en.wikipedia.org/wiki/Demosaicing
                                                               In terms of CPU usage, EA is the lowest, followed by BILINEAR, and the others are higher.
                                                               default value: 0
                                                          */
-#define BRESSERCAM_OPTION_DEMOSAIC_VIDEO         0x13       /* demosaic method for video */
-#define BRESSERCAM_OPTION_DEMOSAIC_STILL         0x14       /* demosaic method for still image */
-#define BRESSERCAM_OPTION_BLACKLEVEL             0x15       /* black level */
-#define BRESSERCAM_OPTION_MULTITHREAD            0x16       /* multithread image processing */
-#define BRESSERCAM_OPTION_BINNING                0x17       /* binning
+#define BRESSERCAM_OPTION_DEMOSAIC_VIDEO         0x13       /* [RW] demosaic method for video */
+#define BRESSERCAM_OPTION_DEMOSAIC_STILL         0x14       /* [RW] demosaic method for still image */
+#define BRESSERCAM_OPTION_BLACKLEVEL             0x15       /* [RW] the black level refers to the baseline signal value output by an image sensor under no-light (completely dark) conditions.
+                                                              In digital imaging systems, a fixed voltage offset is intentionally added to the signal to ensure that dark-region signals remain above zero, thereby preventing the loss of faint shadow details during A/D conversion.
+                                                                  (a) Prevent clipping: The sensor circuit's intrinsic noise may occasionally produce negative values. Without an offset, these negative values would be forcibly clipped to zero, resulting in the loss of shadow details.
+                                                                  (b) Preserve linearity: Raising the black level helps ensure that the sensor maintains consistent linear output behavior across the entire dynamic range.
+                                                         */
+#define BRESSERCAM_OPTION_MULTITHREAD            0x16       /* [RW] multithread image processing */
+#define BRESSERCAM_OPTION_BINNING                0x17       /* [RW] digital binning
                                                                 0x01: (no binning)
                                                                 n: (saturating add, n*n), 0x02(2*2), 0x03(3*3), 0x04(4*4), 0x05(5*5), 0x06(6*6), 0x07(7*7), 0x08(8*8). The Bitdepth of the data remains unchanged.
                                                                 0x40 | n: (unsaturated add, n*n, works only in RAW mode), 0x42(2*2), 0x43(3*3), 0x44(4*4), 0x45(5*5), 0x46(6*6), 0x47(7*7), 0x48(8*8). The Bitdepth of the data is increased. For example, the original data with bitdepth of 12 will increase the bitdepth by 2 bits and become 14 after 2*2 binning.
                                                                 0x80 | n: (average, n*n), 0x82(2*2), 0x83(3*3), 0x84(4*4), 0x85(5*5), 0x86(6*6), 0x87(7*7), 0x88(8*8). The Bitdepth of the data remains unchanged.
                                                             The final image size is rounded down to an even number, such as 640/3 to get 212
                                                          */
-#define BRESSERCAM_OPTION_ROTATE                 0x18       /* rotate clockwise: 0, 90, 180, 270 */
-#define BRESSERCAM_OPTION_CG                     0x19       /* Conversion Gain:
+#define BRESSERCAM_OPTION_ROTATE                 0x18       /* [RW] rotate clockwise: 0, 90, 180, 270 */
+#define BRESSERCAM_OPTION_CG                     0x19       /* [RW] Conversion Gain:
                                                                 0 = LCG
                                                                 1 = HCG
                                                                 2 = HDR (for camera with flag BRESSERCAM_FLAG_CGHDR)
                                                                 2 = MCG (for camera with flag BRESSERCAM_FLAG_GHOPTO)
                                                          */
-#define BRESSERCAM_OPTION_PIXEL_FORMAT           0x1a       /* pixel format, BRESSERCAM_PIXELFORMAT_xxxx */
-#define BRESSERCAM_OPTION_FFC                    0x1b       /* flat field correction
+#define BRESSERCAM_OPTION_PIXEL_FORMAT           0x1a       /* [RW] pixel format, BRESSERCAM_PIXELFORMAT_xxxx */
+#define BRESSERCAM_OPTION_FFC                    0x1b       /* [RW] flat field correction
                                                              set:
                                                                   0: disable
                                                                   1: enable
                                                                  -1: reset
-                                                                 (0xff000000 | n): set the average number to n, [1~255]
+                                                                 (0xff000000 | n): set the average number to n, [1, 255]
                                                              get:
                                                                   (val & 0xff): 0 => disable, 1 => enable, 2 => inited
                                                                   ((val & 0xff00) >> 8): sequence
                                                                   ((val & 0xff0000) >> 16): average number
                                                          */
-#define BRESSERCAM_OPTION_DDR_DEPTH              0x1c       /* the number of the frames that DDR can cache
+#define BRESSERCAM_OPTION_DDR_DEPTH              0x1c       /* [RW] the number of the frames that DDR can cache
                                                                  1: DDR cache only one frame
                                                                  0: Auto:
                                                                          => one for video mode when auto exposure is enabled
                                                                          => full capacity for others
                                                                 -1: DDR can cache frames to full capacity
+                                                            default: 0
                                                          */
-#define BRESSERCAM_OPTION_DFC                    0x1d       /* dark field correction
+#define BRESSERCAM_OPTION_DFC                    0x1d       /* [RW] dark field correction
                                                              set:
                                                                  0: disable
                                                                  1: enable
                                                                 -1: reset
-                                                                 (0xff000000 | n): set the average number to n, [1~255]
+                                                                 (0xff000000 | n): set the average number to n, [1, 255]
                                                              get:
                                                                  (val & 0xff): 0 => disable, 1 => enable, 2 => inited
                                                                  ((val & 0xff00) >> 8): sequence
                                                                  ((val & 0xff0000) >> 16): average number
                                                          */
-#define BRESSERCAM_OPTION_SHARPENING             0x1e       /* Sharpening: (threshold << 24) | (radius << 16) | strength)
+#define BRESSERCAM_OPTION_SHARPENING             0x1e       /* [RW] Sharpening: (threshold << 24) | (radius << 16) | strength)
                                                              strength: [0, 500], default: 0 (disable)
                                                              radius: [1, 10]
                                                              threshold: [0, 255]
                                                          */
-#define BRESSERCAM_OPTION_FACTORY                0x1f       /* restore the factory settings */
-#define BRESSERCAM_OPTION_TEC_VOLTAGE            0x20       /* get the current TEC voltage in 0.1V, 59 mean 5.9V; readonly */
-#define BRESSERCAM_OPTION_TEC_VOLTAGE_MAX        0x21       /* TEC maximum voltage in 0.1V */
-#define BRESSERCAM_OPTION_DEVICE_RESET           0x22       /* reset usb device, simulate a replug */
-#define BRESSERCAM_OPTION_UPSIDE_DOWN            0x23       /* upsize down:
+#define BRESSERCAM_OPTION_FACTORY                0x1f       /* [WO] restore the factory settings */
+#define BRESSERCAM_OPTION_TEC_VOLTAGE            0x20       /* [RO] get the current TEC voltage in 0.1V, 59 mean 5.9V; readonly */
+#define BRESSERCAM_OPTION_TEC_VOLTAGE_MAX        0x21       /* [RW] TEC maximum voltage in 0.1V */
+#define BRESSERCAM_OPTION_DEVICE_RESET           0x22       /* [WO] reset usb device, simulate a replug */
+#define BRESSERCAM_OPTION_UPSIDE_DOWN            0x23       /* [RW] upsize down:
                                                              1: yes
                                                              0: no
                                                              default: 1 (win), 0 (linux/macos)
                                                          */
-#define BRESSERCAM_OPTION_FOCUSPOS               0x24       /* focus positon */
-#define BRESSERCAM_OPTION_AFMODE                 0x25       /* auto focus mode, see BressercamAFMode */
-#define BRESSERCAM_OPTION_AFSTATUS               0x27       /* auto focus status, see BressercamAFStaus */
-#define BRESSERCAM_OPTION_TESTPATTERN            0x28       /* test pattern:
+#define BRESSERCAM_OPTION_FOCUSPOS               0x24       /* [RW] focus positon */
+#define BRESSERCAM_OPTION_AFMODE                 0x25       /* [RW] auto focus mode, see BressercamAFMode */
+#define BRESSERCAM_OPTION_AFSTATUS               0x27       /* [RO] auto focus status, see BressercamAFStaus */
+#define BRESSERCAM_OPTION_TESTPATTERN            0x28       /* [RW] test pattern:
                                                             0: off
                                                             3: monochrome diagonal stripes
                                                             5: monochrome vertical stripes
                                                             7: monochrome horizontal stripes
                                                             9: chromatic diagonal stripes
                                                          */
-#define BRESSERCAM_OPTION_AUTOEXP_THRESHOLD      0x29       /* threshold of auto exposure, default value: 5, range = [2, 15] */
-#define BRESSERCAM_OPTION_BYTEORDER              0x2a       /* Byte order, BGR or RGB: 0 => RGB, 1 => BGR, default value: 1(Win), 0(macOS, Linux, Android) */
-#define BRESSERCAM_OPTION_NOPACKET_TIMEOUT       0x2b       /* no packet timeout: 0 => disable, positive value (>= BRESSERCAM_NOPACKET_TIMEOUT_MIN) => timeout milliseconds. default: disable */
-#define BRESSERCAM_OPTION_MAX_PRECISE_FRAMERATE  0x2c       /* get the precise frame rate maximum value in 0.1 fps, such as 115 means 11.5 fps */
-#define BRESSERCAM_OPTION_PRECISE_FRAMERATE      0x2d       /* precise frame rate current value in 0.1 fps. use BRESSERCAM_OPTION_MAX_PRECISE_FRAMERATE, BRESSERCAM_OPTION_MIN_PRECISE_FRAMERATE to get the range. if the set value is out of range, E_INVALIDARG will be returned */
-#define BRESSERCAM_OPTION_BANDWIDTH              0x2e       /* bandwidth, [1-100]% */
-#define BRESSERCAM_OPTION_RELOAD                 0x2f       /* reload the last frame in trigger mode */
-#define BRESSERCAM_OPTION_CALLBACK_THREAD        0x30       /* dedicated thread for callback: 0 => disable, 1 => enable, default: 0 */
-#define BRESSERCAM_OPTION_FRONTEND_DEQUE_LENGTH  0x31       /* frontend (raw) frame buffer deque length, range: [2, 1024], default: 4
+#define BRESSERCAM_OPTION_AUTOEXP_THRESHOLD      0x29       /* [RW] threshold of auto exposure, default value: 5, range = [2, 15] */
+#define BRESSERCAM_OPTION_BYTEORDER              0x2a       /* [RW] Byte order, BGR or RGB: 0 => RGB, 1 => BGR, default value: 1(Win), 0(macOS, Linux, Android) */
+#define BRESSERCAM_OPTION_NOPACKET_TIMEOUT       0x2b       /* [RW] no packet timeout: 0 => disable, positive value (>= BRESSERCAM_NOPACKET_TIMEOUT_MIN) => timeout milliseconds. default: disable */
+#define BRESSERCAM_OPTION_MAX_PRECISE_FRAMERATE  0x2c       /* [RO] get the precise frame rate maximum value in 0.1 fps, such as 115 means 11.5 fps */
+#define BRESSERCAM_OPTION_PRECISE_FRAMERATE      0x2d       /* [RW] precise frame rate current value in 0.1 fps. use BRESSERCAM_OPTION_MAX_PRECISE_FRAMERATE, BRESSERCAM_OPTION_MIN_PRECISE_FRAMERATE to get the range. if the set value is out of range, E_INVALIDARG will be returned */
+#define BRESSERCAM_OPTION_BANDWIDTH              0x2e       /* [RW] bandwidth, [1-100]% */
+#define BRESSERCAM_OPTION_RELOAD                 0x2f       /* [RW] reload the last frame in trigger mode */
+#define BRESSERCAM_OPTION_CALLBACK_THREAD        0x30       /* [RW] dedicated thread for callback: 0 => disable, 1 => enable
+                                                                 default: 1
+                                                         */
+#define BRESSERCAM_OPTION_FRONTEND_DEQUE_LENGTH  0x31       /* [RW] frontend (raw) frame buffer deque length, range: [2, 1024], default: 4
                                                             All the memory will be pre-allocated when the camera starts, so, please attention to memory usage
                                                          */
-#define BRESSERCAM_OPTION_FRAME_DEQUE_LENGTH     0x31       /* alias of BRESSERCAM_OPTION_FRONTEND_DEQUE_LENGTH */
-#define BRESSERCAM_OPTION_MIN_PRECISE_FRAMERATE  0x32       /* get the precise frame rate minimum value in 0.1 fps, such as 15 means 1.5 fps */
-#define BRESSERCAM_OPTION_SEQUENCER_ONOFF        0x33       /* sequencer trigger: on/off */
-#define BRESSERCAM_OPTION_SEQUENCER_NUMBER       0x34       /* sequencer trigger: number, range = [1, 255] */
-#define BRESSERCAM_OPTION_SEQUENCER_EXPOTIME     0x01000000 /* sequencer trigger: exposure time, iOption = BRESSERCAM_OPTION_SEQUENCER_EXPOTIME | index, iValue = exposure time
+#define BRESSERCAM_OPTION_FRAME_DEQUE_LENGTH     0x31       /* [RW] alias of BRESSERCAM_OPTION_FRONTEND_DEQUE_LENGTH */
+#define BRESSERCAM_OPTION_MIN_PRECISE_FRAMERATE  0x32       /* [RO] get the precise frame rate minimum value in 0.1 fps, such as 15 means 1.5 fps */
+#define BRESSERCAM_OPTION_SEQUENCER_ONOFF        0x33       /* [RW] sequencer trigger: on/off */
+#define BRESSERCAM_OPTION_SEQUENCER_NUMBER       0x34       /* [RW] sequencer trigger: number, range = [1, 255] */
+#define BRESSERCAM_OPTION_SEQUENCER_EXPOTIME     0x01000000 /* [RW] sequencer trigger: exposure time, iOption = BRESSERCAM_OPTION_SEQUENCER_EXPOTIME | index, iValue = exposure time
                                                              For example, to set the exposure time of the third group to 50ms, call:
                                                                 Bressercam_put_Option(BRESSERCAM_OPTION_SEQUENCER_EXPOTIME | 3, 50000)
                                                          */
-#define BRESSERCAM_OPTION_SEQUENCER_EXPOGAIN     0x02000000 /* sequencer trigger: exposure gain, iOption = BRESSERCAM_OPTION_SEQUENCER_EXPOGAIN | index, iValue = gain */
-#define BRESSERCAM_OPTION_DENOISE                0x35       /* denoise, strength range: [0, 100], 0 means disable */
-#define BRESSERCAM_OPTION_HEAT_MAX               0x36       /* get maximum level: heat to prevent fogging up */
-#define BRESSERCAM_OPTION_HEAT                   0x37       /* heat to prevent fogging up */
-#define BRESSERCAM_OPTION_LOW_NOISE              0x38       /* low noise mode (Higher signal noise ratio, lower frame rate): 1 => enable */
-#define BRESSERCAM_OPTION_POWER                  0x39       /* get power consumption, unit: milliwatt */
-#define BRESSERCAM_OPTION_GLOBAL_RESET_MODE      0x3a       /* global reset mode */
-#define BRESSERCAM_OPTION_OPEN_ERRORCODE         0x3b       /* get the open camera error code */
-#define BRESSERCAM_OPTION_FLUSH                  0x3d       /* 1 = hard flush, discard frames cached by camera DDR (if any)
+#define BRESSERCAM_OPTION_SEQUENCER_EXPOGAIN     0x02000000 /* [RW] sequencer trigger: exposure gain, iOption = BRESSERCAM_OPTION_SEQUENCER_EXPOGAIN | index, iValue = gain */
+#define BRESSERCAM_OPTION_DENOISE                0x35       /* [RW] denoise, strength range: [0, 100], 0 means disable */
+#define BRESSERCAM_OPTION_HEAT_MAX               0x36       /* [RO] get maximum level: heat to prevent fogging up */
+#define BRESSERCAM_OPTION_HEAT                   0x37       /* [RW] heat to prevent fogging up */
+#define BRESSERCAM_OPTION_LOW_NOISE              0x38       /* [RW] low noise mode (Higher signal noise ratio, lower frame rate): 1 => enable */
+#define BRESSERCAM_OPTION_POWER                  0x39       /* [RO] get power consumption, unit: milliwatt */
+#define BRESSERCAM_OPTION_GLOBAL_RESET_MODE      0x3a       /* [RW] global reset mode */
+#define BRESSERCAM_OPTION_OPEN_ERRORCODE         0x3b       /* [RO] get the open camera error code */
+#define BRESSERCAM_OPTION_FLUSH                  0x3d       /* [WO]
+                                                            1 = hard flush, discard frames cached by camera DDR (if any)
                                                             2 = soft flush, discard frames cached by bressercam.dll (if any)
                                                             3 = both flush
                                                             Bressercam_Flush means 'both flush'
                                                             return the number of soft flushed frames if successful, HRESULT if failed
                                                          */
-#define BRESSERCAM_OPTION_NUMBER_DROP_FRAME      0x3e       /* get the number of frames that have been grabbed from the USB but dropped by the software */
-#define BRESSERCAM_OPTION_DUMP_CFG               0x3f       /* 0 = when camera is stopped, do not dump configuration automatically
+#define BRESSERCAM_OPTION_NUMBER_DROP_FRAME      0x3e       /* [RO] get the number of frames that have been grabbed from the USB but dropped by the software */
+#define BRESSERCAM_OPTION_DUMP_CFG               0x3f       /* [RW] 0 = when camera is stopped, do not dump configuration automatically
                                                             1 = when camera is stopped, dump configuration automatically
                                                             -1 = explicitly dump configuration once
                                                             default: 1
                                                          */
-#define BRESSERCAM_OPTION_DEFECT_PIXEL           0x40       /* Defect Pixel Correction: 0 => disable, 1 => enable; default: 1 */
-#define BRESSERCAM_OPTION_BACKEND_DEQUE_LENGTH   0x41       /* backend (pipelined) frame buffer deque length (Only available in pull mode), range: [2, 1024], default: 3
+#define BRESSERCAM_OPTION_DEFECT_PIXEL           0x40       /* [RW] Defect Pixel Correction: 0 => disable, 1 => enable; default: 1 */
+#define BRESSERCAM_OPTION_BACKEND_DEQUE_LENGTH   0x41       /* [RW] backend (pipelined) frame buffer deque length (Only available in pull mode), range: [2, 1024], default: 3
                                                             All the memory will be pre-allocated when the camera starts, so, please attention to memory usage
                                                          */
-#define BRESSERCAM_OPTION_LIGHTSOURCE_MAX        0x42       /* get the light source range, [0 ~ max] */
-#define BRESSERCAM_OPTION_LIGHTSOURCE            0x43       /* light source */
-#define BRESSERCAM_OPTION_HEARTBEAT              0x44       /* Heartbeat interval in millisecond, range = [BRESSERCAM_HEARTBEAT_MIN, BRESSERCAM_HEARTBEAT_MAX], 0 = disable, default: disable */
-#define BRESSERCAM_OPTION_FRONTEND_DEQUE_CURRENT 0x45       /* get the current number in frontend deque */
-#define BRESSERCAM_OPTION_BACKEND_DEQUE_CURRENT  0x46       /* get the current number in backend deque */
-#define BRESSERCAM_OPTION_EVENT_HARDWARE         0x04000000 /* enable or disable hardware event: 0 => disable, 1 => enable; default: disable
+#define BRESSERCAM_OPTION_LIGHTSOURCE_MAX        0x42       /* [RO] get the light source range, [0, max] */
+#define BRESSERCAM_OPTION_LIGHTSOURCE            0x43       /* [RW] light source */
+#define BRESSERCAM_OPTION_HEARTBEAT              0x44       /* [RW] Heartbeat interval in millisecond, range = [BRESSERCAM_HEARTBEAT_MIN, BRESSERCAM_HEARTBEAT_MAX], 0 = disable, default: disable */
+#define BRESSERCAM_OPTION_FRONTEND_DEQUE_CURRENT 0x45       /* [RO] get the current number in frontend deque */
+#define BRESSERCAM_OPTION_BACKEND_DEQUE_CURRENT  0x46       /* [RO] get the current number in backend deque */
+#define BRESSERCAM_OPTION_EVENT_HARDWARE         0x04000000 /* [RW] enable or disable hardware event: 0 => disable, 1 => enable; default: disable
                                                                 (1) iOption = BRESSERCAM_OPTION_EVENT_HARDWARE, master switch for notification of all hardware events
                                                                 (2) iOption = BRESSERCAM_OPTION_EVENT_HARDWARE | (event type), a specific type of sub-switch
                                                             Only if both the master switch and the sub-switch of a particular type remain on are actually enabled for that type of event notification.
                                                          */
-#define BRESSERCAM_OPTION_PACKET_NUMBER          0x47       /* get the received packet number */
-#define BRESSERCAM_OPTION_FILTERWHEEL_SLOT       0x48       /* filter wheel slot number */
-#define BRESSERCAM_OPTION_FILTERWHEEL_POSITION   0x49       /* filter wheel position:
+#define BRESSERCAM_OPTION_PACKET_NUMBER          0x47       /* [RO] get the received packet number */
+#define BRESSERCAM_OPTION_FILTERWHEEL_SLOT       0x48       /* [RW] filter wheel slot number */
+#define BRESSERCAM_OPTION_FILTERWHEEL_POSITION   0x49       /* [RW] filter wheel position:
                                                                 set:
                                                                     -1: reset
                                                                     val & 0xff: position between 0 and N-1, where N is the number of filter slots
@@ -1022,41 +1147,41 @@ BRESSERCAM_API(HRESULT)  Bressercam_feed_Pipe(HBressercam h, unsigned pipeId);
                                                                      -1: in motion
                                                                      val: position arrived
                                                          */
-#define BRESSERCAM_OPTION_AUTOEXPOSURE_PERCENT   0x4a       /* auto exposure percent to average:
+#define BRESSERCAM_OPTION_AUTOEXPOSURE_PERCENT   0x4a       /* [RW] auto exposure percent to average:
                                                                 1~99: peak percent average
                                                                 0 or 100: full roi average, means "disabled"
                                                          */
-#define BRESSERCAM_OPTION_ANTI_SHUTTER_EFFECT    0x4b       /* anti shutter effect: 1 => enable, 0 => disable; default: 0 */
-#define BRESSERCAM_OPTION_CHAMBER_HT             0x4c       /* get chamber humidity & temperature:
+#define BRESSERCAM_OPTION_ANTI_SHUTTER_EFFECT    0x4b       /* [RW] anti shutter effect: 1 => enable, 0 => disable; default: 0 */
+#define BRESSERCAM_OPTION_CHAMBER_HT             0x4c       /* [RO] get chamber humidity & temperature:
                                                                 high 16 bits: humidity, in 0.1%, such as: 325 means humidity is 32.5%
                                                                 low 16 bits: temperature, in 0.1 degrees Celsius, such as: 32 means 3.2 degrees Celsius
                                                          */
-#define BRESSERCAM_OPTION_ENV_HT                 0x4d       /* get environment humidity & temperature */
-#define BRESSERCAM_OPTION_EXPOSURE_PRE_DELAY     0x4e       /* exposure signal pre-delay, microsecond */
-#define BRESSERCAM_OPTION_EXPOSURE_POST_DELAY    0x4f       /* exposure signal post-delay, microsecond */
-#define BRESSERCAM_OPTION_AUTOEXPO_CONV          0x50       /* get auto exposure convergence status: 1(YES) or 0(NO), -1(NA) */
-#define BRESSERCAM_OPTION_AUTOEXPO_TRIGGER       0x51       /* auto exposure on trigger mode: 0 => disable, 1 => enable; default: 0 */
-#define BRESSERCAM_OPTION_LINE_PRE_DELAY         0x52       /* specified line signal pre-delay, microsecond */
-#define BRESSERCAM_OPTION_LINE_POST_DELAY        0x53       /* specified line signal post-delay, microsecond */
-#define BRESSERCAM_OPTION_TEC_VOLTAGE_MAX_RANGE  0x54       /* get the tec maximum voltage range:
+#define BRESSERCAM_OPTION_ENV_HT                 0x4d       /* [RO] get environment humidity & temperature */
+#define BRESSERCAM_OPTION_EXPOSURE_PRE_DELAY     0x4e       /* [RW] exposure signal pre-delay, microsecond */
+#define BRESSERCAM_OPTION_EXPOSURE_POST_DELAY    0x4f       /* [RW] exposure signal post-delay, microsecond */
+#define BRESSERCAM_OPTION_AUTOEXPO_CONV          0x50       /* [RO] get auto exposure convergence status: 1(YES) or 0(NO), -1(PENDING) */
+#define BRESSERCAM_OPTION_AUTOEXPO_TRIGGER       0x51       /* [RW] auto exposure on trigger mode: 0 => disable, 1 => enable; default: 0 */
+#define BRESSERCAM_OPTION_LINE_PRE_DELAY         0x52       /* [RW] specified line signal pre-delay, microsecond */
+#define BRESSERCAM_OPTION_LINE_POST_DELAY        0x53       /* [RW] specified line signal post-delay, microsecond */
+#define BRESSERCAM_OPTION_TEC_VOLTAGE_MAX_RANGE  0x54       /* [RO] get the tec maximum voltage range:
                                                                 high 16 bits: max
                                                                 low 16 bits: min
                                                          */
-#define BRESSERCAM_OPTION_HIGH_FULLWELL          0x55       /* high fullwell capacity: 0 => disable, 1 => enable */
-#define BRESSERCAM_OPTION_DYNAMIC_DEFECT         0x56       /* dynamic defect pixel correction:
+#define BRESSERCAM_OPTION_HIGH_FULLWELL          0x55       /* [RW] high fullwell capacity: 0 => disable, 1 => enable */
+#define BRESSERCAM_OPTION_DYNAMIC_DEFECT         0x56       /* [RW] dynamic defect pixel correction:
                                                                 dead pixel ratio, t1: (high 16 bits): [0, 100], means: [0.0, 1.0]
                                                                 hot pixel ratio, t2: (low 16 bits): [0, 100], means: [0.0, 1.0]
                                                          */
-#define BRESSERCAM_OPTION_HDR_KB                 0x57       /* HDR synthesize
+#define BRESSERCAM_OPTION_HDR_KB                 0x57       /* [RW] HDR synthesize
                                                                 K (high 16 bits): [1, 25500]
                                                                 B (low 16 bits): [0, 65535]
                                                                 0xffffffff => set to default
                                                          */
-#define BRESSERCAM_OPTION_HDR_THRESHOLD          0x58       /* HDR synthesize
+#define BRESSERCAM_OPTION_HDR_THRESHOLD          0x58       /* [RW] HDR synthesize
                                                                 threshold: [1, 4094]
                                                                 0xffffffff => set to default
                                                          */
-#define BRESSERCAM_OPTION_GIGETIMEOUT            0x5a       /* For GigE cameras, the application periodically sends heartbeat signals to the camera to keep the connection to the camera alive.
+#define BRESSERCAM_OPTION_GIGETIMEOUT            0x5a       /* [RW] For GigE cameras, the application periodically sends heartbeat signals to the camera to keep the connection to the camera alive.
                                                             If the camera doesn't receive heartbeat signals within the time period specified by the heartbeat timeout counter, the camera resets the connection.
                                                             When the application is stopped by the debugger, the application cannot send the heartbeat signals
                                                                 0 => auto: when the camera is opened, enable if no debugger is present or disable if debugger is present
@@ -1064,94 +1189,138 @@ BRESSERCAM_API(HRESULT)  Bressercam_feed_Pipe(HBressercam h, unsigned pipeId);
                                                                 2 => disable
                                                                 default: auto
                                                          */
-#define BRESSERCAM_OPTION_EEPROM_SIZE            0x5b       /* get EEPROM size */
-#define BRESSERCAM_OPTION_OVERCLOCK_MAX          0x5c       /* get overclock range: [0, max] */
-#define BRESSERCAM_OPTION_OVERCLOCK              0x5d       /* overclock, default: 0 */
-#define BRESSERCAM_OPTION_RESET_SENSOR           0x5e       /* reset sensor */
-#define BRESSERCAM_OPTION_ISP                    0x5f       /* Enable hardware ISP: 0 => auto (disable in RAW mode, otherwise enable), 1 => enable, -1 => disable; default: 0 */
-#define BRESSERCAM_OPTION_AUTOEXP_EXPOTIME_DAMP  0x60       /* Auto exposure damping coefficient: time (thousandths). The larger the damping coefficient, the smoother and slower the exposure time changes */
-#define BRESSERCAM_OPTION_AUTOEXP_GAIN_DAMP      0x61       /* Auto exposure damping coefficient: gain (thousandths). The larger the damping coefficient, the smoother and slower the gain changes */
-#define BRESSERCAM_OPTION_MOTOR_NUMBER           0x62       /* range: [1, 20] */
-#define BRESSERCAM_OPTION_MOTOR_POS              0x10000000 /* range: [1, 702] */
-#define BRESSERCAM_OPTION_PSEUDO_COLOR_START     0x63       /* Pseudo: start color, BGR format */
-#define BRESSERCAM_OPTION_PSEUDO_COLOR_END       0x64       /* Pseudo: end color, BGR format */
-#define BRESSERCAM_OPTION_PSEUDO_COLOR_ENABLE    0x65       /* Pseudo: -1 => custom: use startcolor & endcolor to generate the colormap
-                                                                    0 => disable
-                                                                    1 => spot
-                                                                    2 => spring
-                                                                    3 => summer
-                                                                    4 => autumn
-                                                                    5 => winter
-                                                                    6 => bone
-                                                                    7 => jet
-                                                                    8 => rainbow
-                                                                    9 => deepgreen
-                                                                    10 => ocean
-                                                                    11 => cool
-                                                                    12 => hsv
-                                                                    13 => pink
-                                                                    14 => hot
-                                                                    15 => parula
-                                                                    16 => magma
-                                                                    17 => inferno
-                                                                    18 => plasma
-                                                                    19 => viridis
-                                                                    20 => cividis
-                                                                    21 => twilight
-                                                                    22 => twilight_shifted
-                                                                    23 => turbo
-                                                                    24 => red
-                                                                    25 => green
-                                                                    26 => blue
+#define BRESSERCAM_OPTION_EEPROM_SIZE            0x5b       /* [RO] get EEPROM size */
+#define BRESSERCAM_OPTION_OVERCLOCK_MAX          0x5c       /* [RO] get overclock range: [0, max] */
+#define BRESSERCAM_OPTION_OVERCLOCK              0x5d       /* [RW] overclock, default: 0 */
+#define BRESSERCAM_OPTION_RESET_SENSOR           0x5e       /* [WO] reset sensor */
+#define BRESSERCAM_OPTION_ISP                    0x5f       /* [RW] Enable hardware ISP: 0 => auto (disable in RAW mode, otherwise enable), 1 => enable, -1 => disable; default: 0 */
+#define BRESSERCAM_OPTION_AUTOEXP_EXPOTIME_DAMP  0x60       /* [RW] Auto exposure damping coefficient: time (thousandths). The larger the damping coefficient, the smoother and slower the exposure time changes */
+#define BRESSERCAM_OPTION_AUTOEXP_GAIN_DAMP      0x61       /* [RW] Auto exposure damping coefficient: gain (thousandths). The larger the damping coefficient, the smoother and slower the gain changes */
+#define BRESSERCAM_OPTION_MOTOR_NUMBER           0x62       /* [RW] range: [1, 20] */
+#define BRESSERCAM_OPTION_MOTOR_POS              0x10000000 /* [RW] range: [1, 702] */
+#define BRESSERCAM_OPTION_PSEUDO_COLOR_START     0x63       /* [RW] Pseudo: start color, BGR format */
+#define BRESSERCAM_OPTION_PSEUDO_COLOR_END       0x64       /* [RW] Pseudo: end color, BGR format */
+#define BRESSERCAM_OPTION_PSEUDO_COLOR_ENABLE    0x65       /* [RW] Pseudo: -1 => Custom: use startcolor & endcolor to generate the colormap
+                                                                    0 => Disable
+                                                                    1 => Spot
+                                                                    2 => Spring
+                                                                    3 => Summer
+                                                                    4 => Autumn
+                                                                    5 => Winter
+                                                                    6 => Bone
+                                                                    7 => Jet
+                                                                    8 => Rainbow
+                                                                    9 => DeepGreen
+                                                                    10 => Ocean
+                                                                    11 => Cool
+                                                                    12 => HSV
+                                                                    13 => Pink
+                                                                    14 => Hot
+                                                                    15 => Parula
+                                                                    16 => Magma
+                                                                    17 => Inferno
+                                                                    18 => Plasma
+                                                                    19 => Viridis
+                                                                    20 => Cividis
+                                                                    21 => Twilight
+                                                                    22 => TwilightShifted
+                                                                    23 => Turbo
+                                                                    24 => Red
+                                                                    25 => Green
+                                                                    26 => Blue
+                                                                    27 => Spectrum
                                                          */
-#define BRESSERCAM_OPTION_LOW_POWERCONSUMPTION   0x66       /* Low Power Consumption: 0 => disable, 1 => enable */
-#define BRESSERCAM_OPTION_FPNC                   0x67       /* Fix Pattern Noise Correction
+#define BRESSERCAM_OPTION_LOW_POWERCONSUMPTION   0x66       /* [RW] Low Power Consumption: 0 => disable, 1 => enable */
+#define BRESSERCAM_OPTION_FPNC                   0x67       /* [RW] Fix Pattern Noise Correction
                                                              set:
                                                                  0: disable
                                                                  1: enable
                                                                 -1: reset
-                                                                 (0xff000000 | n): set the average number to n, [1~255]
+                                                                 (0xff000000 | n): set the average number to n, [1, 255]
                                                              get:
                                                                  (val & 0xff): 0 => disable, 1 => enable, 2 => inited
                                                                  ((val & 0xff00) >> 8): sequence
                                                                  ((val & 0xff0000) >> 16): average number
                                                          */
-#define BRESSERCAM_OPTION_OVEREXP_POLICY         0x68       /* Auto exposure over exposure policy: when overexposed,
+#define BRESSERCAM_OPTION_OVEREXP_POLICY         0x68       /* [RW] Auto exposure overexposure policy: when overexposed,
                                                                 0 => directly reduce the exposure time/gain to the minimum value; or
-                                                                1 => reduce exposure time/gain in proportion to current and target brightness.
-                                                                n(n>1) => first adjust the exposure time to (maximum automatic exposure time * maximum automatic exposure gain) * n / 1000, and then adjust according to the strategy of 1
+                                                                1 => reduce exposure time/gain according to the ratio between current and target brightness; or
+                                                                n(n>1) => first, adjust the exposure time to (maximum automatic exposure time * maximum automatic exposure gain) * n / 1000, and then adjust according to the strategy of 1
                                                             The advantage of policy 0 is that the convergence speed is faster, but there is black screen.
                                                             Policy 1 avoids the black screen, but the convergence speed is slower.
                                                             Default: 0
                                                          */
-#define BRESSERCAM_OPTION_READOUT_MODE           0x69       /* Readout mode: 0 = IWR (Integrate While Read), 1 = ITR (Integrate Then Read)
+#define BRESSERCAM_OPTION_READOUT_MODE           0x69       /* [RW] Readout mode: 0 = IWR (Integrate While Read), 1 = ITR (Integrate Then Read)
                                                               The working modes of the detector readout circuit can be divided into two types: ITR and IWR. Using the IWR readout mode can greatly increase the frame rate. In the ITR mode, the integration of the (n+1)th frame starts after all the data of the nth frame are read out, while in the IWR mode, the data of the nth frame is read out at the same time when the (n+1)th frame is integrated
                                                          */
-#define BRESSERCAM_OPTION_TAILLIGHT              0x6a       /* Turn on/off tail Led light: 0 => off, 1 => on; default: on */
-#define BRESSERCAM_OPTION_LENSSTATE              0x6b       /* Load/Save lens state to EEPROM: 0 => load, 1 => save */
-#define BRESSERCAM_OPTION_AWB_CONTINUOUS         0x6c       /* Auto White Balance: continuous mode
+#define BRESSERCAM_OPTION_TAILLIGHT              0x6a       /* [RW] Turn on/off tail Led light: 0 => off, 1 => on; default: on */
+#define BRESSERCAM_OPTION_LENSSTATE              0x6b       /* [RW] Load/Save lens state to EEPROM: 0 => load, 1 => save */
+#define BRESSERCAM_OPTION_AWB_CONTINUOUS         0x6c       /* [RW] Auto White Balance: continuous mode
                                                                 0:  disable (default)
                                                                 n>0: every n millisecond(s)
                                                                 n<0: every -n frame
                                                          */
-#define BRESSERCAM_OPTION_TECTARGET_RANGE        0x6d       /* TEC target range: min(low 16 bits) = (short)(val & 0xffff), max(high 16 bits) = (short)((val >> 16) & 0xffff) */
-#define BRESSERCAM_OPTION_CDS                    0x6e       /* Correlated Double Sampling */
-#define BRESSERCAM_OPTION_LOW_POWER_EXPOTIME     0x6f       /* Low Power Consumption: Enable if exposure time is greater than the set value */
-#define BRESSERCAM_OPTION_ZERO_OFFSET            0x70       /* Sensor output offset to zero: 0 => disable, 1 => eanble; default: 0 */
-#define BRESSERCAM_OPTION_GVCP_TIMEOUT           0x71       /* GVCP Timeout: millisecond, range = [3, 75], default: 15
+#define BRESSERCAM_OPTION_TECTARGET_RANGE        0x6d       /* [RO] TEC target range: min(low 16 bits) = (short)(val & 0xffff), max(high 16 bits) = (short)((val >> 16) & 0xffff) */
+#define BRESSERCAM_OPTION_CDS                    0x6e       /* [RW] Correlated Double Sampling: 0~max (BRESSERCAM_OPTION_CDS_MAX)
+                                                              see https://www.next.gr/tutorials/sensors-and-transducers/image-sensor-noise-reduction-techniques-tutorial#correlated-double-sampling-cds
+                                                         */
+#define BRESSERCAM_OPTION_LOW_POWER_EXPOTIME     0x6f       /* [RW] Low Power Consumption: Enable if exposure time is greater than the set value */
+#define BRESSERCAM_OPTION_ZERO_OFFSET            0x70       /* [RW] Sensor output offset to zero: 0 => disable, 1 => eanble; default: 0 */
+#define BRESSERCAM_OPTION_GVCP_TIMEOUT           0x71       /* [RW] GVCP Timeout: millisecond, range = [5, 150], default: 15(wire), 30(wireless)
                                                               Unless in very special circumstances, generally no modification is required, just use the default value
                                                          */
-#define BRESSERCAM_OPTION_GVCP_RETRY             0x72       /* GVCP Retry: range = [2, 8], default: 4
+#define BRESSERCAM_OPTION_GVCP_RETRY             0x72       /* [RW] GVCP Retry: range = [2, 16], default: 4(wire), 8(wireless)
                                                               Unless in very special circumstances, generally no modification is required, just use the default value
                                                          */
-#define BRESSERCAM_OPTION_GVSP_WAIT_PERCENT      0x73       /* GVSP wait percent: range = [0, 100], default = (trigger mode: 100, realtime: 0, other: 1) */
-#define BRESSERCAM_OPTION_RESET_SEQ_TIMESTAMP    0x74       /* Reset to 0: 1 => seq; 2 => timestamp; 3 => both */
-#define BRESSERCAM_OPTION_TRIGGER_CANCEL_MODE    0x75       /* Trigger cancel mode: 0 => no frame, 1 => output frame; default: 0 */
-#define BRESSERCAM_OPTION_MECHANICALSHUTTER      0x76       /* Mechanical shutter: 0 => open, 1 => close; default: 0 */
-#define BRESSERCAM_OPTION_LINE_TIME              0x77       /* Line-time of sensor in nanosecond */
-#define BRESSERCAM_OPTION_ZERO_PADDING           0x78       /* Zero padding: 0 => high, 1 => low; default: 0 */
-#define BRESSERCAM_OPTION_UPTIME                 0x79       /* device uptime in millisecond */
-#define BRESSERCAM_OPTION_BITRANGE               0x7a       /* Bit range: [0, 8] */
+#define BRESSERCAM_OPTION_GVSP_WAIT_PERCENT      0x73       /* [RW] GVSP wait percent: range = [0, 100], default = (trigger mode: 100, realtime: 0, other: 1) */
+#define BRESSERCAM_OPTION_RESET_SEQ_TIMESTAMP    0x74       /* [WO] Reset to 0: 1 => seq; 2 => timestamp; 3 => both */
+#define BRESSERCAM_OPTION_TRIGGER_CANCEL_MODE    0x75       /* [RW] Trigger cancel mode: 0 => no frame, 1 => output frame; default: 0 */
+#define BRESSERCAM_OPTION_MECHANICALSHUTTER      0x76       /* [RW] Mechanical shutter: 0 => open, 1 => close; default: 0 */
+#define BRESSERCAM_OPTION_LINE_TIME              0x77       /* [RO] Line-time of sensor in nanosecond */
+#define BRESSERCAM_OPTION_ZERO_PADDING           0x78       /* [RW] Zero padding: 0 => high, 1 => low; default: 0 */
+#define BRESSERCAM_OPTION_UPTIME                 0x79       /* [RO] device uptime in millisecond */
+#define BRESSERCAM_OPTION_BITRANGE               0x7a       /* [RW] Bit range: [0, 8] */
+#define BRESSERCAM_OPTION_MODE_SEQ_TIMESTAMP     0x7b       /* [RW] Mode of seq & timestamp: 0 => reset to 0 automatically; 1 => never reset automatically; default: 0 */
+#define BRESSERCAM_OPTION_TIMED_TRIGGER_NUM      0x7c       /* [RW] Timed trigger number */
+#define BRESSERCAM_OPTION_TIMED_TRIGGER_LOW      0x20000000 /* [RW] Timed trigger: lower 32 bits of 64-bit integer, nanosecond since epoch (00:00:00 UTC on Thursday, 1 January 1970, see https://en.wikipedia.org/wiki/Unix_time) */
+#define BRESSERCAM_OPTION_TIMED_TRIGGER_HIGH     0x40000000 /* [RW] Timed trigger: high 32 bits. The lower 32 bits must be set first, followed by the higher 32 bits */
+#define BRESSERCAM_OPTION_AUTOEXP_THLD_TRIGGER   0x7d       /* [RW] trigger threshold of auto exposure */
+#define BRESSERCAM_OPTION_LANE                   0x7e       /* [RW] Lane */
+#define BRESSERCAM_OPTION_VOLTAGEBIAS            0x7f       /* [RW] Voltage bias */
+#define BRESSERCAM_OPTION_VOLTAGEBIAS_RANGE      0x80       /* [RO] Voltage bias range: min (low 16bits), max (high 16bits) */
+#define BRESSERCAM_OPTION_READ_TIME              0x81       /* [RO] */
+#define BRESSERCAM_OPTION_ALL_EXPO_TIME          0x82       /* [RO] */
+#define BRESSERCAM_OPTION_CAMERA_PERIOD          0x83       /* [RO] */
+#define BRESSERCAM_OPTION_FRONTEND_FULL          0x84       /* [RO] get the number of frontend deque full */
+#define BRESSERCAM_OPTION_BACKEND_FULL           0x85       /* [RO] get the number of backend deque full */
+#define BRESSERCAM_OPTION_GPS                    0x86       /* [RO] gps status: 0 => not supported; -1 => gps device offline; 1 => gps device online */
+#define BRESSERCAM_OPTION_LINE_LENGTH            0x87       /* [RW] Line length in pixel clock */
+#define BRESSERCAM_OPTION_SCAN_DIRECTION         0x88       /* [RW] Scan direction: 0(forward), 1(reverse), 2(alternate) */
+#define BRESSERCAM_OPTION_BLACKLEVEL_AUTOADJUST  0x89       /* [RW] Black level automatic adjustment function: 0: off, 1: on
+                                                                This setting turn on/off black level auto adjust function by OB(Optical Black) level.
+                                                                In case of long exposure and so on, OB level is offset by leak or any other reason.
+                                                                Because of it, if the adjustment becomes a problem, this setting is introduced for one of the solution.
+                                                         */
+#define BRESSERCAM_OPTION_USER_SET               0x8a       /* [RW] user set */
+#define BRESSERCAM_OPTION_DIGITAL_GAIN           0x1001     /* [RW] digital gain */
+#define BRESSERCAM_OPTION_ANTI_BLOOMING          0x8b       /* [RW] Anti Blooming, maximum
+                                                              Blooming occurs when the charge in a pixel exceeds the saturation level and the charge starts to fill adjacent pixels.
+                                                              Some sensors are designed with structures built into them to limit blooming - anti-blooming structures.
+                                                              Anti-blooming structures bleed off any excess charge before they can overflow the pixel and thereby stop blooming.
+                                                              However, anti-blooming structures can reduce the effective quantum efficiency and introduce non linearity into the sensor.
+                                                              Therefore, anti-blooming sensors are not recommended for applications requiring very low light or high accuracy measurements.
+                                                         */
+#define BRESSERCAM_OPTION_ANTI_BLOOMING_MAX      0x8c       /* [RO] Anti Blooming */
+#define BRESSERCAM_OPTION_CDS_MAX                0x8d       /* [RO] Correlated Double Sampling */
+#define BRESSERCAM_OPTION_SCANTYPE               0x8e       /* [RW] Scan Type: 0(areascan), 1(linescan) */
+#define BRESSERCAM_OPTION_OPERATIONMODE          0x8f       /* [RW] TDI Operation Mode: 1(area), 2(TDI) */
+#define BRESSERCAM_OPTION_TDITRIGGERMODE         0x90       /* [RW] TDI Trigger Mode: 1(normal), 2(both) */
+#define BRESSERCAM_OPTION_TDISTAGE               0x91       /* [RW] TDI Trigger Stage: sensor scan stage */
+#define BRESSERCAM_OPTION_FRAMEINTERVAL          0x92       /* [RW] Frame Interval in microseconds */
+#define BRESSERCAM_OPTION_FRAMEINTERVAL_MIN      0x93       /* [RO] Frame Interval, minimum */
+#define BRESSERCAM_OPTION_FRAMEINTERVAL_MAX      0x94       /* [RO] Frame Interval, maximum */
+#define BRESSERCAM_OPTION_IMAGEPTRRAW            0x95       /* [RW] default: 0 */
+#define BRESSERCAM_OPTION_IMAGEPTRBOTH           0x96       /* [RW] default: 0 */
 
 /* pixel format */
 #define BRESSERCAM_PIXELFORMAT_RAW8              0x00
@@ -1173,6 +1342,8 @@ BRESSERCAM_API(HRESULT)  Bressercam_feed_Pipe(HBressercam h, unsigned pipeId);
 #define BRESSERCAM_PIXELFORMAT_HDR11HL           0x10   /* HDR, Bitdepth: 11, Conversion Gain: High + Low */
 #define BRESSERCAM_PIXELFORMAT_HDR12HL           0x11   /* HDR, Bitdepth: 12, Conversion Gain: High + Low */
 #define BRESSERCAM_PIXELFORMAT_HDR14HL           0x12   /* HDR, Bitdepth: 14, Conversion Gain: High + Low */
+#define BRESSERCAM_PIXELFORMAT_RAW10PACK         0x13
+#define BRESSERCAM_PIXELFORMAT_RAW14PACK         0x14
 
 /*
 * cmd: input
@@ -1186,12 +1357,11 @@ BRESSERCAM_API(HRESULT)     Bressercam_get_PixelFormatSupport(HBressercam h, cha
 * pixelFormat: BRESSERCAM_PIXELFORMAT_XXXX
 */
 BRESSERCAM_API(const char*) Bressercam_get_PixelFormatName(int pixelFormat);
-
-BRESSERCAM_API(HRESULT)  Bressercam_put_Option(HBressercam h, unsigned iOption, int iValue);
-BRESSERCAM_API(HRESULT)  Bressercam_get_Option(HBressercam h, unsigned iOption, int* piValue);
+BRESSERCAM_API(int)         Bressercam_get_PixelFormatBitdepth(int pixelFormat);
 
 /*
     xOffset, yOffset, xWidth, yHeight: must be even numbers
+    Minimum width & height: 8
 */
 BRESSERCAM_API(HRESULT)  Bressercam_put_Roi(HBressercam h, unsigned xOffset, unsigned yOffset, unsigned xWidth, unsigned yHeight);
 BRESSERCAM_API(HRESULT)  Bressercam_get_Roi(HBressercam h, unsigned* pxOffset, unsigned* pyOffset, unsigned* pxWidth, unsigned* pyHeight);
@@ -1207,9 +1377,17 @@ BRESSERCAM_API(HRESULT)  Bressercam_put_Binning(HBressercam h, const char* pValu
 BRESSERCAM_API(HRESULT)  Bressercam_get_Binning(HBressercam h, const char** ppValue, const char** ppMethod);
 BRESSERCAM_API(HRESULT)  Bressercam_get_BinningNumber(HBressercam h);
 BRESSERCAM_API(HRESULT)  Bressercam_get_BinningValue(HBressercam h, unsigned index, const char** ppValue);
-BRESSERCAM_API(HRESULT)  Bressercam_get_BinningMethod(HBressercam h, unsigned index, const char** ppMethod);
 
-BRESSERCAM_API(HRESULT)  Bressercam_put_XY(HBressercam h, int x, int y);
+/*
+ const char* pStrMethod;
+ unsigned index = 0;
+ do {
+     if (FAILED(Bressercam_get_BinningMethod(h, index, &pStrMethod)))
+         break;
+     ++index;
+ } while (1);
+*/
+BRESSERCAM_API(HRESULT)  Bressercam_get_BinningMethod(HBressercam h, unsigned index, const char** ppMethod);
 
 #define BRESSERCAM_IOCONTROLTYPE_GET_SUPPORTEDMODE            0x01 /* 0x01 => Input, 0x02 => Output, (0x01 | 0x02) => support both Input and Output */
 #define BRESSERCAM_IOCONTROLTYPE_GET_GPIODIR                  0x03 /* 0x00 => Input, 0x01 => Output */
@@ -1240,16 +1418,16 @@ BRESSERCAM_API(HRESULT)  Bressercam_put_XY(HBressercam h, int x, int y);
 #define BRESSERCAM_IOCONTROLTYPE_SET_TRIGGERSOURCE            0x0e
 #define BRESSERCAM_IOCONTROLTYPE_GET_TRIGGERDELAY             0x0f /* Trigger delay time in microseconds, range: [0, 5000000] */
 #define BRESSERCAM_IOCONTROLTYPE_SET_TRIGGERDELAY             0x10
-#define BRESSERCAM_IOCONTROLTYPE_GET_BURSTCOUNTER             0x11 /* Burst Counter, range: [1 ~ 65535] */
+#define BRESSERCAM_IOCONTROLTYPE_GET_BURSTCOUNTER             0x11 /* Burst Counter, range: [1, 65535] */
 #define BRESSERCAM_IOCONTROLTYPE_SET_BURSTCOUNTER             0x12
 #define BRESSERCAM_IOCONTROLTYPE_GET_COUNTERSOURCE            0x13 /* 0x00 => Opto-isolated input, 0x01 => GPIO0, 0x02 => GPIO1 */
 #define BRESSERCAM_IOCONTROLTYPE_SET_COUNTERSOURCE            0x14
-#define BRESSERCAM_IOCONTROLTYPE_GET_COUNTERVALUE             0x15 /* Counter Value, range: [1 ~ 65535] */
+#define BRESSERCAM_IOCONTROLTYPE_GET_COUNTERVALUE             0x15 /* Counter Value, range: [1, 65535] */
 #define BRESSERCAM_IOCONTROLTYPE_SET_COUNTERVALUE             0x16
 #define BRESSERCAM_IOCONTROLTYPE_SET_RESETCOUNTER             0x18
-#define BRESSERCAM_IOCONTROLTYPE_GET_PWM_FREQ                 0x19 /* PWM Frequency */
+#define BRESSERCAM_IOCONTROLTYPE_GET_PWM_FREQ                 0x19 /* PWM Frequency, range: [0, 0xffffffff] */
 #define BRESSERCAM_IOCONTROLTYPE_SET_PWM_FREQ                 0x1a
-#define BRESSERCAM_IOCONTROLTYPE_GET_PWM_DUTYRATIO            0x1b /* PWM Duty Ratio */
+#define BRESSERCAM_IOCONTROLTYPE_GET_PWM_DUTYRATIO            0x1b /* PWM Duty Ratio, default: 50, range: [0, 100] */
 #define BRESSERCAM_IOCONTROLTYPE_SET_PWM_DUTYRATIO            0x1c
 #define BRESSERCAM_IOCONTROLTYPE_GET_PWMSOURCE                0x1d /* PWM Source: 0x00 => Opto-isolated input, 0x01 => GPIO0, 0x02 => GPIO1 */
 #define BRESSERCAM_IOCONTROLTYPE_SET_PWMSOURCE                0x1e
@@ -1282,23 +1460,23 @@ BRESSERCAM_API(HRESULT)  Bressercam_put_XY(HBressercam h, int x, int y);
 #define BRESSERCAM_IOCONTROLTYPE_SET_UART_LINEMODE            0x2e
 #define BRESSERCAM_IOCONTROLTYPE_GET_EXPO_ACTIVE_MODE         0x2f /* exposure time signal: 0 => specified line, 1 => common exposure time */
 #define BRESSERCAM_IOCONTROLTYPE_SET_EXPO_ACTIVE_MODE         0x30
-#define BRESSERCAM_IOCONTROLTYPE_GET_EXPO_START_LINE          0x31 /* exposure start line, default: 0 */
+#define BRESSERCAM_IOCONTROLTYPE_GET_EXPO_START_LINE          0x31 /* exposure start line, default: 0, range: [0, 16384] */
 #define BRESSERCAM_IOCONTROLTYPE_SET_EXPO_START_LINE          0x32
-#define BRESSERCAM_IOCONTROLTYPE_GET_EXPO_END_LINE            0x33 /* exposure end line, default: 0
+#define BRESSERCAM_IOCONTROLTYPE_GET_EXPO_END_LINE            0x33 /* exposure end line, default: 0, range: [0, 16384]
                                                                    end line must be no less than start line
                                                                 */
 #define BRESSERCAM_IOCONTROLTYPE_SET_EXPO_END_LINE            0x34
 #define BRESSERCAM_IOCONTROLTYPE_GET_EXEVT_ACTIVE_MODE        0x35 /* exposure event: 0 => specified line, 1 => common exposure time */
 #define BRESSERCAM_IOCONTROLTYPE_SET_EXEVT_ACTIVE_MODE        0x36
-#define BRESSERCAM_IOCONTROLTYPE_GET_OUTPUTCOUNTERVALUE       0x37 /* Output Counter Value, range: [0 ~ 65535] */
+#define BRESSERCAM_IOCONTROLTYPE_GET_OUTPUTCOUNTERVALUE       0x37 /* Output Counter Value, range: [0, 65535] */
 #define BRESSERCAM_IOCONTROLTYPE_SET_OUTPUTCOUNTERVALUE       0x38
 #define BRESSERCAM_IOCONTROLTYPE_SET_OUTPUT_PAUSE             0x3a /* Output pause: 1 => puase, 0 => unpause */
 #define BRESSERCAM_IOCONTROLTYPE_GET_INPUT_STATE              0x3b /* Input state: 0 (low level) or 1 (high level) */
-#define BRESSERCAM_IOCONTROLTYPE_GET_USER_PULSE_HIGH          0x3d /* User pulse high level time: us */
+#define BRESSERCAM_IOCONTROLTYPE_GET_USER_PULSE_HIGH          0x3d /* User pulse high level time: us, range: [0, 0xffffffff] */
 #define BRESSERCAM_IOCONTROLTYPE_SET_USER_PULSE_HIGH          0x3e
-#define BRESSERCAM_IOCONTROLTYPE_GET_USER_PULSE_LOW           0x3f /* User pulse low level time: us */
+#define BRESSERCAM_IOCONTROLTYPE_GET_USER_PULSE_LOW           0x3f /* User pulse low level time: us, range: [0, 0xffffffff] */
 #define BRESSERCAM_IOCONTROLTYPE_SET_USER_PULSE_LOW           0x40
-#define BRESSERCAM_IOCONTROLTYPE_GET_USER_PULSE_NUMBER        0x41 /* User pulse number: default 0 */
+#define BRESSERCAM_IOCONTROLTYPE_GET_USER_PULSE_NUMBER        0x41 /* User pulse number: default 0, range: [0, 0xffffffff] */
 #define BRESSERCAM_IOCONTROLTYPE_SET_USER_PULSE_NUMBER        0x42
 #define BRESSERCAM_IOCONTROLTYPE_GET_EXTERNAL_TRIGGER_NUMBER  0x43 /* External trigger number */
 #define BRESSERCAM_IOCONTROLTYPE_GET_DEBOUNCER_TRIGGER_NUMBER 0x45 /* Trigger signal number after debounce */
@@ -1329,6 +1507,7 @@ typedef struct {
 BRESSERCAM_API(HRESULT)  Bressercam_put_SelfTrigger(HBressercam h, const BressercamSelfTrigger* pSt);
 BRESSERCAM_API(HRESULT)  Bressercam_get_SelfTrigger(HBressercam h, BressercamSelfTrigger* pSt);
 
+/* flash action */
 #define BRESSERCAM_FLASH_SIZE      0x00    /* query total size */
 #define BRESSERCAM_FLASH_EBLOCK    0x01    /* query erase block size */
 #define BRESSERCAM_FLASH_RWBLOCK   0x02    /* query read/write block size */
@@ -1336,19 +1515,45 @@ BRESSERCAM_API(HRESULT)  Bressercam_get_SelfTrigger(HBressercam h, BressercamSel
 #define BRESSERCAM_FLASH_READ      0x04    /* read */
 #define BRESSERCAM_FLASH_WRITE     0x05    /* write */
 #define BRESSERCAM_FLASH_ERASE     0x06    /* erase */
-/* Flash:
- action = BRESSERCAM_FLASH_XXXX: read, write, erase, query total size, query read/write block size, query erase block size
+/* flash zone */
+#define BRESSERCAM_FLASH_SENSOR    0x00    /* sensor */
+#define BRESSERCAM_FLASH_USER      0x02    /* user */
+/*
+ action = (zone << 24) | BRESSERCAM_FLASH_XXXX: read, write, erase, query total size, query read/write block size, query erase block size
  addr = address
  see democpp
 */
 BRESSERCAM_API(HRESULT)  Bressercam_rwc_Flash(HBressercam h, unsigned action, unsigned addr, unsigned len, void* pData);
 
-BRESSERCAM_API(HRESULT)  Bressercam_write_UART(HBressercam h, const unsigned char* pData, unsigned nDataLen);
-BRESSERCAM_API(HRESULT)  Bressercam_read_UART(HBressercam h, unsigned char* pBuffer, unsigned nBufferLen);
-
 /* Initialize support for GigE cameras. If online/offline notifications are not required, the callback function can be set to NULL */
 typedef void (__stdcall* PBRESSERCAM_HOTPLUG)(void* ctxHotPlug);
 BRESSERCAM_API(HRESULT)  Bressercam_GigeEnable(PBRESSERCAM_HOTPLUG funHotPlug, void* ctxHotPlug);
+
+/* opt: semicolon separated options:
+*        "wifi": Enable WiFi adapter support
+*/
+BRESSERCAM_API(HRESULT)  Bressercam_GigeEnableV2(PBRESSERCAM_HOTPLUG funHotPlug, void* ctxHotPlug, const char* opt);
+
+/* Initialize support for PCIe cameras. If online/offline notifications are not required, the callback function can be set to NULL */
+BRESSERCAM_API(HRESULT)  Bressercam_PciEnable(PBRESSERCAM_HOTPLUG funHotPlug, void* ctxHotPlug);
+
+/* Initialize support for *.cti cameras. If online/offline notifications are not required, the callback function can be set to NULL
+* (1) ctiPath = NULL means all *.cti in GENICAM_GENTL64_PATH/GENICAM_GENTL32_PATH
+* or
+* (2) ctiPath[] = {
+            "/full/path/to/file.cti",
+            ...,
+            NULLL      // Use NULL pointer to indicate the end of the array
+        }
+*/
+#if defined(_WIN32)
+BRESSERCAM_API(HRESULT)  Bressercam_CtiEnable(PBRESSERCAM_HOTPLUG funHotPlug, void* ctxHotPlug, const wchar_t* ctiPath[]);
+#else
+BRESSERCAM_API(HRESULT)  Bressercam_CtiEnable(PBRESSERCAM_HOTPLUG funHotPlug, void* ctxHotPlug, const char* ctiPath[]);
+#endif
+
+BRESSERCAM_API(HRESULT) Bressercam_readPtr(HBressercam h, const char* key, int len, void* pData);
+BRESSERCAM_API(HRESULT) Bressercam_writePtr(HBressercam h, const char* key, int len, const void* pData);
 
 /*
  filePath:
@@ -1373,21 +1578,10 @@ Recommendation: for better rubustness, when notify of device insertion arrives, 
 BRESSERCAM_API(void)   Bressercam_HotPlug(PBRESSERCAM_HOTPLUG funHotPlug, void* ctxHotPlug);
 #endif
 
-BRESSERCAM_API(unsigned) Bressercam_EnumWithName(BressercamDeviceV2 pti[BRESSERCAM_MAX]);
-BRESSERCAM_API(HRESULT)  Bressercam_set_Name(HBressercam h, const char* name);
-BRESSERCAM_API(HRESULT)  Bressercam_query_Name(HBressercam h, char name[64]);
-#if defined(_WIN32)
-BRESSERCAM_API(HRESULT)  Bressercam_put_Name(const wchar_t* camId, const char* name);
-BRESSERCAM_API(HRESULT)  Bressercam_get_Name(const wchar_t* camId, char name[64]);
-#else
-BRESSERCAM_API(HRESULT)  Bressercam_put_Name(const char* camId, const char* name);
-BRESSERCAM_API(HRESULT)  Bressercam_get_Name(const char* camId, char name[64]);
-#endif
-
 typedef struct {
     unsigned short lensID;
     unsigned char  lensType;
-    unsigned char  statusAfmf;      /* LENS_AF = 0x00,  LENS_MF = 0x80 */
+    unsigned char  statusAfmf;      /* LENS_AF = 0x00, LENS_MF = 0x80 */
 
     unsigned short maxFocalLength;
     unsigned short curFocalLength;
@@ -1461,13 +1655,35 @@ BRESSERCAM_API(HRESULT)  Bressercam_put_AFFMPos(HBressercam h, int iFMPos);
 */
 #if defined(_WIN32)
 BRESSERCAM_API(HRESULT) Bressercam_Replug(const wchar_t* camId);
+BRESSERCAM_API(HRESULT) Bressercam_Reset(const wchar_t* camId);
+BRESSERCAM_API(HRESULT) Bressercam_Enable(const wchar_t* camId, int enable); /* 1 => enable, 0 => disable */
 #else
 BRESSERCAM_API(HRESULT) Bressercam_Replug(const char* camId);
+BRESSERCAM_API(HRESULT) Bressercam_Reset(const char* camId);
+BRESSERCAM_API(HRESULT) Bressercam_Enable(const char* camId, int enable); /* 1 => enable, 0 => disable */
 #endif
 
 BRESSERCAM_API(const BressercamModelV2**) Bressercam_all_Model(); /* return all supported USB model array */
 BRESSERCAM_API(const BressercamModelV2*) Bressercam_query_Model(HBressercam h);
 BRESSERCAM_API(const BressercamModelV2*) Bressercam_get_Model(unsigned short idVendor, unsigned short idProduct);
+
+BRESSERCAM_API(HRESULT)  Bressercam_put_XY(HBressercam h, int x, int y);
+
+BRESSERCAM_API(HRESULT)  Bressercam_write_UART(HBressercam h, const unsigned char* pData, unsigned nDataLen);
+BRESSERCAM_API(HRESULT)  Bressercam_read_UART(HBressercam h, unsigned char* pBuffer, unsigned nBufferLen);
+
+BRESSERCAM_API(unsigned) Bressercam_EnumWithName(BressercamDeviceV2 pti[BRESSERCAM_MAX]);
+BRESSERCAM_API(HRESULT)  Bressercam_set_Name(HBressercam h, const char* name);
+BRESSERCAM_API(HRESULT)  Bressercam_query_Name(HBressercam h, char name[64]);
+#if defined(_WIN32)
+BRESSERCAM_API(HRESULT)  Bressercam_put_Name(const wchar_t* camId, const char* name);
+BRESSERCAM_API(HRESULT)  Bressercam_get_Name(const wchar_t* camId, char name[64]);
+BRESSERCAM_API(HRESULT)  Bressercam_query_SerialNumber(const wchar_t* camId, char sn[32]);
+#else
+BRESSERCAM_API(HRESULT)  Bressercam_put_Name(const char* camId, const char* name);
+BRESSERCAM_API(HRESULT)  Bressercam_get_Name(const char* camId, char name[64]);
+BRESSERCAM_API(HRESULT)  Bressercam_query_SerialNumber(const char* camId, char sn[32]);
+#endif
 
 /* firmware update:
     camId: camera ID
@@ -1557,7 +1773,6 @@ BRESSERCAM_API(double)   Bressercam_calc_ClarityFactorV2(const void* pImageData,
 */
 BRESSERCAM_API(void)     Bressercam_deBayerV2(unsigned nFourCC, int nW, int nH, const void* pRaw, void* pRGB, unsigned char nBitDepth, unsigned char nBitCount);
 
-
 #ifndef __BRESSERCAMFOCUSMOTOR_DEFINED__
 #define __BRESSERCAMFOCUSMOTOR_DEFINED__
 typedef struct {
@@ -1634,8 +1849,7 @@ typedef PBRESSERCAM_DATA_CALLBACK_V3 PBRESSERCAM_DATA_CALLBACK_V2;
 BRESSERCAM_DEPRECATED
 BRESSERCAM_API(HRESULT)  Bressercam_StartPushModeV2(HBressercam h, PBRESSERCAM_DATA_CALLBACK_V2 funData, void* ctxData);
 
-#if !defined(_WIN32)
-#ifndef __BITMAPINFOHEADER_DEFINED__
+#if !(defined(_WIN32) || defined(__BITMAPINFOHEADER_DEFINED__))
 #define __BITMAPINFOHEADER_DEFINED__
 typedef struct {
     unsigned        biSize;
@@ -1650,7 +1864,6 @@ typedef struct {
     unsigned        biClrUsed;
     unsigned        biClrImportant;
 } BITMAPINFOHEADER;
-#endif
 #endif
 
 typedef void (__stdcall* PBRESSERCAM_DATA_CALLBACK)(const void* pData, const BITMAPINFOHEADER* pHeader, int bSnap, void* ctxData);
@@ -1716,7 +1929,7 @@ BRESSERCAM_API(HRESULT)  Bressercam_get_VignetAmountInt(HBressercam h, int* nAmo
 BRESSERCAM_API(HRESULT)  Bressercam_put_VignetMidPointInt(HBressercam h, int nMidPoint);
 BRESSERCAM_API(HRESULT)  Bressercam_get_VignetMidPointInt(HBressercam h, int* nMidPoint);
 
-/* obsolete flags */
+/* obsolete pixel format alias */
 #define BRESSERCAM_FLAG_BITDEPTH10    BRESSERCAM_FLAG_RAW10  /* pixel format, RAW 10bits */
 #define BRESSERCAM_FLAG_BITDEPTH12    BRESSERCAM_FLAG_RAW12  /* pixel format, RAW 12bits */
 #define BRESSERCAM_FLAG_BITDEPTH14    BRESSERCAM_FLAG_RAW14  /* pixel format, RAW 14bits */
@@ -1730,6 +1943,16 @@ BRESSERCAM_API(HRESULT)  Bressercam_log_File(const
 #endif
                                        filePath);
 BRESSERCAM_API(HRESULT)  Bressercam_log_Level(unsigned level); /* 0 => none; 1 => error; 2 => debug; 3 => verbose */
+BRESSERCAM_API(void)     Bressercam_log_str(unsigned level, const char* str);
+BRESSERCAM_APIV(void)    Bressercam_log(unsigned level, const char* format, ...);
+
+#if defined(BRESSERCAM_LOG)
+#define BRESSERCAM_LOG_NONE(format, ...)     Bressercam_log(0, format, ##__VA_ARGS__)
+#define BRESSERCAM_LOG_ERROR(format, ...)    Bressercam_log(1, format, ##__VA_ARGS__)
+#define BRESSERCAM_LOG_DEBUG(format, ...)    Bressercam_log(2, format, ##__VA_ARGS__)
+#define BRESSERCAM_LOG_VERBOSE(format, ...)  Bressercam_log(3, format, ##__VA_ARGS__)
+/* for example: BRESSERCAM_LOG_DEBUG("%s: blahblah, x = %d, y = %f", __func__ x, y); */
+#endif
 
 #if defined(_WIN32)
 #pragma pack(pop)

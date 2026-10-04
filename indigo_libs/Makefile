@@ -1,6 +1,6 @@
 #---------------------------------------------------------------------
 #
-# Copyright (c) 2018 CloudMakers, s. r. o.
+# Copyright (c) 2018-2025 CloudMakers, s. r. o.
 # All rights reserved.
 #
 # You can use this software under the terms of 'INDIGO Astronomy
@@ -73,6 +73,7 @@ endif
 	install -d $(INSTALL_INCLUDE)/indigo
 	cp indigo/*.h $(INSTALL_INCLUDE)/indigo
 	@$(MAKE)	-C indigocat install
+	@$(MAKE)	-C indigo_client install
 
 uninstall: status
 	rm -f $(INSTALL_LIB)/libindigo.$(SOEXT)
@@ -82,9 +83,11 @@ ifeq ($(OS_DETECTED),Darwin)
 endif
 	rm -rf $(INSTALL_INCLUDE)/indigo
 	@$(MAKE)	-C indigocat uninstall
+	@$(MAKE)	-C indigo_client uninstall
 
 clean: status
 	@$(MAKE)	-C indigocat clean
+	@$(MAKE)	-C indigo_client clean
 	rm -f *.o *.orig $(BUILD_LIB)/libindigo.* $(BUILD_LIB)/libraw.* $(BUILD_LIB)/libjpeg.* $(BUILD_LIB)/libtiff.* $(BUILD_LIB)/libtiffxx.* $(BUILD_LIB)/libusb-1.0.* $(LIBHIDAPI).* $(BUILD_LIB)/libftd2xx.*
 
 clean-all: status
@@ -100,9 +103,8 @@ indigo_build_c:
 	sh ../tools/make_indigo_build.sh >indigo_build.c
 	$(CC) $(CFLAGS) -c indigo_build.c -o indigo_build.o
 
-indigo/indigo_config.h:	../Makefile.inc
-	cp indigo/indigo_config.h indigo/indigo_config.h.orig
-	sed 's/INDIGO_BUILD ".*"/INDIGO_BUILD "$(INDIGO_BUILD)"/' indigo/indigo_config.h.orig >indigo/indigo_config.h
+# indigo/indigo_config.h is kept in sync with INDIGO_BUILD / INDIGO_VERSION
+# by the top-level Makefile's indigo_version_sync target (idempotent).
 
 #---------------------------------------------------------------------
 #
@@ -110,16 +112,24 @@ indigo/indigo_config.h:	../Makefile.inc
 #
 #---------------------------------------------------------------------
 
-libindigo: indigo_build_c indigo/indigo_config.h libusb libhidapi libjpeg libtiff libftd2xx libraw libindigocat $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libindigo.$(SOEXT)
+libindigo: indigo_build_c libusb libhidapi libjpeg libtiff libftd2xx libraw libindigocat $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libindigo.$(SOEXT) libindigo_client
+
+# The external libraries install the headers libindigo sources include (jpeglib.h,
+# tiffio.h, libraw, hidapi, ftd2xx) into $(BUILD_INCLUDE), so with parallel make the
+# objects must not be compiled before they are installed. indigo_build.o is
+# compiled by indigo_build_c from the generated indigo_build.c.
+$(LIBINDIGO_FILES): | $(LIBUSB) $(LIBHIDAPI).a $(BUILD_LIB)/libjpeg.a $(BUILD_LIB)/libtiff.a $(BUILD_LIB)/libftd2xx.a $(BUILD_LIB)/libraw.a
+
+indigo_build.o: indigo_build_c
 
 $(BUILD_LIB)/libindigo.a: $(LIBINDIGO_FILES)
 	$(AR) $(ARFLAGS) $@ $^
 
 $(BUILD_LIB)/libindigo.$(SOEXT): $(LIBINDIGO_FILES)
 ifeq ($(OS_DETECTED),Darwin)
-	$(CC) -shared -o $@ $^ $(LDFLAGS) $(FORCE_ALL_ON) $(BUILD_LIB)/libjpeg.a $(FORCE_ALL_OFF) $(BUILD_LIB)/libtiff.a $(BUILD_LIB)/libtiffxx.a $(BUILD_LIB)/libraw.a $(FORCE_ALL_ON) $(LIBHIDAPI).a $(FORCE_ALL_OFF) -ldl -lusb-1.0 -lz -lstdc++
+	$(CC) -shared -o $@ $^ $(LDFLAGS) $(FORCE_ALL_ON) $(BUILD_LIB)/libjpeg.a $(FORCE_ALL_OFF) $(BUILD_LIB)/libtiff.a $(BUILD_LIB)/libtiffxx.a $(BUILD_LIB)/libraw.a $(FORCE_ALL_ON) $(LIBHIDAPI).a $(FORCE_ALL_OFF) -ldl -lusb-1.0 -lhidapi -lz -lstdc++
 else
-	$(CC) -shared -o $@ $^ $(LDFLAGS) $(FORCE_ALL_ON) $(BUILD_LIB)/libjpeg.a $(FORCE_ALL_OFF) $(BUILD_LIB)/libtiff.a $(BUILD_LIB)/libtiffxx.a $(BUILD_LIB)/libraw.a $(FORCE_ALL_ON) $(LIBHIDAPI).a $(FORCE_ALL_OFF) -ldl -lusb-1.0 -ldns_sd -lz -lstdc++
+	$(CC) -shared -o $@ $^ $(LDFLAGS) $(FORCE_ALL_ON) $(BUILD_LIB)/libjpeg.a $(FORCE_ALL_OFF) $(BUILD_LIB)/libtiff.a $(BUILD_LIB)/libtiffxx.a $(BUILD_LIB)/libraw.a $(FORCE_ALL_ON) $(LIBHIDAPI).a $(FORCE_ALL_OFF) -ldl -lusb-1.0 -ldns_sd -lavahi-client -lavahi-common -lz -lstdc++
 endif
 
 #---------------------------------------------------------------------
@@ -128,12 +138,12 @@ endif
 #
 #---------------------------------------------------------------------
 
-libindigocat: $(BUILD_LIB)/libindigocat.a $(BUILD_LIB)/libindigocat.$(SOEXT)
-
-$(BUILD_LIB)/libindigocat.a:
+# Always descend, the sub-make knows the sources - a rule without prerequisites here kept a stale
+# library once it existed. The shared library is built after the static one from the same objects,
+# it links -lusb-1.0, which on macOS is the locally built libusb.
+.PHONY: libindigocat
+libindigocat: | $(LIBUSB)
 	@$(MAKE)	-C indigocat $(BUILD_LIB)/libindigocat.a
-
-$(BUILD_LIB)/libindigocat.$(SOEXT):
 	@$(MAKE)	-C indigocat $(BUILD_LIB)/libindigocat.$(SOEXT)
 
 #---------------------------------------------------------------------
@@ -179,8 +189,13 @@ $(BUILD_LIB)/libtiff.a:
 
 libusb: $(LIBUSB)
 
+# pipe2() is weakly linked against the 10.10 deployment target, so the configure
+# link test succeeds on every SDK that declares it while libSystem resolves the
+# symbol to NULL at run time. Without ac_cv_func_pipe2=no libusb calls that null
+# pointer from usbi_create_event() and every libusb based driver crashes in
+# libusb_init().
 $(BUILD_LIB)/libusb-1.0.dylib:
-	export CC=$(CC); export CXX=$(CC); export CFLAGS="$(CFLAGS)"; export CXXFLAGS="$(CXXFLAGS)"; export LDFLAGS="$(LDFLAGS)"; cd externals/libusb; autoreconf -fiv; ./configure --prefix=$(BUILD_ROOT) --libdir=$(BUILD_LIB) --enable-shared=yes --enable-static=no CFLAGS="$(CFLAGS)" --with-pic; make; make install
+	export CC=$(CC); export CXX=$(CC); export CFLAGS="$(CFLAGS)"; export CXXFLAGS="$(CXXFLAGS)"; export LDFLAGS="$(LDFLAGS)"; cd externals/libusb; autoreconf -fiv; ./configure --prefix=$(BUILD_ROOT) --libdir=$(BUILD_LIB) --enable-shared=yes --enable-static=no CFLAGS="$(CFLAGS)" --with-pic ac_cv_func_pipe2=no; make; make install
 
 #---------------------------------------------------------------------
 #
@@ -190,7 +205,7 @@ $(BUILD_LIB)/libusb-1.0.dylib:
 
 libhidapi: $(LIBHIDAPI).a
 
-$(LIBHIDAPI).a:
+$(LIBHIDAPI).a: | $(LIBUSB)
 	export CC=$(CC); export CXX=$(CC); export CFLAGS="$(CFLAGS)"; export CXXFLAGS="$(CXXFLAGS)"; export LDFLAGS="$(LDFLAGS) -lusb-1.0"; cd externals/hidapi; autoreconf -fiv; ./configure --prefix=$(BUILD_ROOT) --libdir=$(BUILD_LIB) --enable-shared=no --enable-static=yes CFLAGS="$(CFLAGS)" --with-pic; make; make install
 
 #---------------------------------------------------------------------
@@ -201,14 +216,31 @@ $(LIBHIDAPI).a:
 
 libftd2xx: $(BUILD_LIB)/libftd2xx.a
 
+# The vendor archive embeds its own libusb build. INDIGO links its own
+# libusb-1.0, so these members are removed to avoid duplicate symbols. The macOS
+# 1.4.35 archive carries libusb 1.0.29, which renamed poll_posix to events_posix
+# and added strerror; the Linux archives are still 1.4.6 and use the old names.
+# The lists differ because macOS ar fails on a member that is not in the archive
+# while GNU ar only warns.
+FTD2XX_LIBUSB_OBJECTS = core.o descriptor.o io.o hotplug.o sync.o darwin_usb.o poll_posix.o threads_posix.o
+FTD2XX_LIBUSB_OBJECTS_MACOS = core.o descriptor.o io.o hotplug.o sync.o strerror.o darwin_usb.o events_posix.o threads_posix.o
+
 $(BUILD_LIB)/libftd2xx.a:
 	install -d $(BUILD_LIB)
 ifeq ($(OS_DETECTED),Darwin)
-	hdiutil attach -noverify -noautoopen $(BIN_EXTERNALS)/D2XX1.4.4.dmg
-	cp /Volumes/release/D2XX/ftd2xx.h /Volumes/release/D2XX/WinTypes.h $(BUILD_INCLUDE)
-	cp /Volumes/release/D2XX/libftd2xx.a $(BUILD_LIB)
-	hdiutil detach /Volumes/release
-	rm -rf /tmp/D2XX1.4.4.dmg
+	rm -rf /tmp/indigo_d2xx
+	hdiutil attach -readonly -noverify -noautoopen $(BIN_EXTERNALS)/D2XX1.4.35.dmg -mountpoint /tmp/indigo_d2xx
+	install -m 0644 /tmp/indigo_d2xx/release/ftd2xx.h /tmp/indigo_d2xx/release/WinTypes.h $(BUILD_INCLUDE)
+	install -m 0644 /tmp/indigo_d2xx/release/build/libftd2xx.a $(BUILD_LIB)
+	hdiutil detach /tmp/indigo_d2xx
+	rm -rf /tmp/indigo_d2xx
+	# The macOS archive is universal, so every slice is stripped separately and
+	# the result is recombined.
+	rm -rf /tmp/indigo_d2xx_thin
+	mkdir -p /tmp/indigo_d2xx_thin
+	for arch in `lipo -archs $(BUILD_LIB)/libftd2xx.a`; do lipo -thin $$arch $(BUILD_LIB)/libftd2xx.a -output /tmp/indigo_d2xx_thin/$$arch.a && ar -d /tmp/indigo_d2xx_thin/$$arch.a $(FTD2XX_LIBUSB_OBJECTS_MACOS) && ranlib /tmp/indigo_d2xx_thin/$$arch.a; done
+	lipo -create /tmp/indigo_d2xx_thin/*.a -output $(BUILD_LIB)/libftd2xx.a
+	rm -rf /tmp/indigo_d2xx_thin
 endif
 ifeq ($(OS_DETECTED),Linux)
 ifeq ($(ARCH_DETECTED),arm)
@@ -235,5 +267,18 @@ ifeq ($(ARCH_DETECTED),x64)
 	cp /tmp/release/build/libftd2xx.a $(BUILD_LIB)
 	rm -rf /tmp/libftd2xx-x86_64-1.4.6.tgz /tmp/release
 endif
+	ar -d $(BUILD_LIB)/libftd2xx.a $(FTD2XX_LIBUSB_OBJECTS)
 endif
-	ar -d $(BUILD_LIB)/libftd2xx.a core.o descriptor.o io.o hotplug.o sync.o darwin_usb.o poll_posix.o threads_posix.o
+
+#---------------------------------------------------------------------
+#
+#	Build libindigo_client
+#
+#---------------------------------------------------------------------
+
+# Always descend, the sub-make knows the sources - a rule without prerequisites here kept a stale
+# library once it existed. The shared library is built after the static one from the same objects.
+.PHONY: libindigo_client
+libindigo_client:
+	@$(MAKE)	-C indigo_client $(BUILD_LIB)/libindigo_client.a
+	@$(MAKE)	-C indigo_client $(BUILD_LIB)/libindigo_client.$(SOEXT)

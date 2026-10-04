@@ -1,10 +1,6 @@
 #ifndef PTP_CAMERA_MODEL_H
 #define PTP_CAMERA_MODEL_H
 
-/* Created by tools/make_dslr_table.py
-
-   WARNING! All changes made in this file will be lost! */
-
 static ptp_camera_model CAMERA[] = {
   { 0x045e, 0x0a00, "Microsoft Lumia", 0, 0, 0, 0 },
   { 0x05ac, 0x12a8, "Apple iPhone", 0, 0, 0, 0 },
@@ -70,10 +66,12 @@ static ptp_camera_model CAMERA[] = {
   { CANON_VID, 0x32f8, "Canon EOS R10", ptp_flag_lv, 6000, 4000, 3.71 },
   { CANON_VID, 0x32f9, "Canon EOS M50 Mark II", ptp_flag_lv, 6000, 4000, 3.71 },
   { CANON_VID, 0x32fc, "Canon EOS R3", ptp_flag_lv, 6000, 4000, 6.0 },
-  { CANON_VID, 0x330b, "Canon EOS R6m2", ptp_flag_lv, 6000, 4000, 6.0 },
+  { CANON_VID, 0x330b, "Canon EOS R6 Mark II", ptp_flag_lv, 6000, 4000, 6.0 },
   { CANON_VID, 0x330c, "Canon EOS R8", ptp_flag_lv, 6000, 4000, 6.0 },
   { CANON_VID, 0x330d, "Canon EOS R50", ptp_flag_lv, 6000, 4000, 3.71 },
   { CANON_VID, 0x3312, "Canon EOS R100", ptp_flag_lv, 6000, 4000, 3.71 },
+  { CANON_VID, 0x3313, "Canon EOS R1", ptp_flag_lv, 6000, 4000, 6.0 },
+  { CANON_VID, 0x3314, "Canon EOS R5 Mark II", ptp_flag_lv, 6000, 4000, 6.0 },
   { CANON_VID, 0xFFFF, "Canon Camera", ptp_flag_lv, 0, 0, 0 },
   { FUJI_VID, 0x02bf, "Fujifilm X-T1", ptp_flag_lv, 4896, 3264, 4.8 },
   { FUJI_VID, 0x02cb, "Fujifilm X-Pro2", ptp_flag_lv, 6000, 4000, 3.9 },
@@ -130,17 +128,19 @@ static ptp_camera_model CAMERA[] = {
   { NIKON_VID, 0x043f, "Nikon D5600", ptp_flag_lv, 6000, 4000, 3.92 },
   { NIKON_VID, 0x0440, "Nikon D7500", ptp_flag_lv, 5568, 3712, 4.22 },
   { NIKON_VID, 0x0441, "Nikon D850", ptp_flag_lv, 8256, 5504, 4.34 },
-  { NIKON_VID, 0x0442, "Nikon Z 7", ptp_flag_lv, 8256, 5504, 4.34 },
-  { NIKON_VID, 0x0443, "Nikon Z 6", ptp_flag_lv, 6048, 4024, 5.9 },
-  { NIKON_VID, 0x0444, "Nikon Z 50", ptp_flag_lv, 5568, 3712, 4.2 },
+  { NIKON_VID, 0x0442, "Nikon Z7", ptp_flag_lv, 8256, 5504, 4.34 },
+  { NIKON_VID, 0x0443, "Nikon Z6", ptp_flag_lv, 6048, 4024, 5.9 },
+  { NIKON_VID, 0x0444, "Nikon Z50", ptp_flag_lv, 5568, 3712, 4.2 },
   { NIKON_VID, 0x0445, "Nikon D3500", ptp_flag_lv, 6000, 4000, 3.92 },
   { NIKON_VID, 0x0446, "Nikon D780", ptp_flag_lv, 6048, 4024, 5.9 },
   { NIKON_VID, 0x0447, "Nikon D6", ptp_flag_lv, 5568, 3712, 6.44 },
-  { NIKON_VID, 0x0448, "Nikon Z 5", ptp_flag_lv, 6016, 4016, 5.9 },
-  { NIKON_VID, 0x044B, "Nikon Z 7II", ptp_flag_lv, 8256, 5504, 4.3 },
-  { NIKON_VID, 0x044C, "Nikon Z 6II", ptp_flag_lv, 6048, 4024, 5.9 },
-  { NIKON_VID, 0x0450, "Nikon Z 9", ptp_flag_lv, 8256, 5504, 4.3 },
-  { NIKON_VID, 0x0451, "Nikon Z 8", ptp_flag_lv, 8256, 5504, 4.3 },
+  { NIKON_VID, 0x0448, "Nikon Z5", ptp_flag_lv, 6016, 4016, 5.9 },
+  { NIKON_VID, 0x044B, "Nikon Z7II", ptp_flag_lv, 8256, 5504, 4.3 },
+  { NIKON_VID, 0x044C, "Nikon Z6II", ptp_flag_lv, 6048, 4024, 5.9 },
+  { NIKON_VID, 0x044F, "Nikon Zfc", ptp_flag_lv, 5568, 3712, 4.22 },
+  { NIKON_VID, 0x0450, "Nikon Z9", ptp_flag_lv, 8256, 5504, 4.3 },
+  { NIKON_VID, 0x0451, "Nikon Z8", ptp_flag_lv, 8256, 5504, 4.3 },
+  { NIKON_VID, 0x0456, "Nikon Z5II", ptp_flag_lv, 6048, 4032, 5.9 },
   { NIKON_VID, 0xFFFF, "Nikon Camera", ptp_flag_lv, 0, 0, 0 },
   { SONY_VID, 0x079b, "Sony Alpha A68", ptp_flag_lv, 6000, 4000, 3.92 },
   { SONY_VID, 0x079c, "Sony Alpha A6300", 0, 6000, 4000, 3.92 },
@@ -169,7 +169,13 @@ static ptp_camera_model CAMERA[] = {
   { SONY_VID, 0x0da7, "Sony Alpha A7IV", ptp_flag_lv, 7008, 4672, 5.12 },
   { SONY_VID, 0x0e0c, "Sony Alpha A7RV", ptp_flag_lv, 9504, 6336, 3.76 },
   { SONY_VID, 0x0e78, "Sony Alpha A6700", ptp_flag_lv, 6192, 4128, 3.76 },
+  { SONY_VID, 0x0d9f, "Sony Alpha A7RIV", ptp_flag_lv, 9504, 6336, 3.76 },
+  { SONY_VID, 0x0d97, "Sony ZV-E10", ptp_flag_lv, 6024, 4024, 3.9 },
   { SONY_VID, 0xFFFF, "Sony Camera", ptp_flag_lv, 0, 0, 0 },
+  { OLYMPUS_VID, 0x0136, "OM System OM-1", ptp_flag_lv, 5184, 3888, 3.35 },
+  { OLYMPUS_VID, 0xFFFF, "Olympus Camera", ptp_flag_lv, 0, 0, 0 },
+  { OM_SYSTEM_VID, 0x0136, "OM System OM-1", ptp_flag_lv, 5184, 3888, 3.35 },
+  { OM_SYSTEM_VID, 0xFFFF, "OM System Camera", ptp_flag_lv, 0, 0, 0 },
   { 0 },
 };
 

@@ -1,6 +1,9 @@
+/* -*- Mode: C; indent-tabs-mode:t ; c-basic-offset:4 -*- */
 /*
  * libusb strerror code
  * Copyright © 2013 Hans de Goede <hdegoede@redhat.com>
+ *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -28,7 +31,7 @@
  * <li> Download the latest \c strerror.c from:<br>
  *      https://raw.github.com/libusb/libusb/master/libusb/strerror.c </li>
  * <li> Open the file in an UTF-8 capable editor </li>
- * <li> Add the 2 letter <a href="http://en.wikipedia.org/wiki/List_of_ISO_639-1_codes">ISO 639-1</a>
+ * <li> Add the 2 letter <a href="https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes">ISO 639-1</a>
  *      code for your locale at the end of \c usbi_locale_supported[]<br>
  *    Eg. for Chinese, you would add "zh" so that:
  *    \code... usbi_locale_supported[] = { "en", "nl", "fr" };\endcode
@@ -160,7 +163,7 @@ static const char * const (*usbi_error_strings)[LIBUSB_ERROR_COUNT] = &usbi_loca
  * If libusb_setlocale() is not called, all messages will be in English.
  *
  * The following functions return translatable strings: libusb_strerror().
- * Note that the libusb log messages controlled through libusb_set_debug()
+ * Note that the libusb log messages controlled through LIBUSB_OPTION_LOG_LEVEL
  * are not translated, they are always in English.
  *
  * For POSIX UTF-8 environments if you want libusb to follow the standard
@@ -169,9 +172,9 @@ static const char * const (*usbi_error_strings)[LIBUSB_ERROR_COUNT] = &usbi_loca
  *
  * \param locale locale-string in the form of lang[_country_region][.codeset]
  * or lang[-region], where lang is a 2 letter ISO 639-1 code
- * \returns LIBUSB_SUCCESS on success
- * \returns LIBUSB_ERROR_INVALID_PARAM if the locale doesn't meet the requirements
- * \returns LIBUSB_ERROR_NOT_FOUND if the requested language is not supported
+ * \returns \ref LIBUSB_SUCCESS on success
+ * \returns \ref LIBUSB_ERROR_INVALID_PARAM if the locale doesn't meet the requirements
+ * \returns \ref LIBUSB_ERROR_NOT_FOUND if the requested language is not supported
  * \returns a LIBUSB_ERROR code on other errors
  */
 

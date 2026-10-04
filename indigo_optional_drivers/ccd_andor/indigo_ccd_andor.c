@@ -1,4 +1,4 @@
- // Copyright (c) 2018 Rumen G. Bogdanovski
+ // Copyright (c) 2018-2025 Rumen G. Bogdanovski
  // All rights reserved.
  //
  // You can use this software under the terms of 'INDIGO Astronomy
@@ -17,13 +17,13 @@
  // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
  // version history
- // 2.0 by Rumen Bogdanovski <rumenastro@gmail.com>
+ // 2.0 by Rumen G. Bogdanovski <rumenastro@gmail.com>
 
  /** INDIGO CCD Andor driver
   \file indigo_ccd_andor.c
   */
 
-#define DRIVER_VERSION 0x000E
+#define DRIVER_VERSION 0x0200000F
 #define DRIVER_NAME	"indigo_ccd_andor"
 
 #include <stdlib.h>
@@ -736,10 +736,11 @@ static void ccd_temperature_callback(indigo_device *device) {
 	if (!PRIVATE_DATA->no_check_temperature && CAP_GET_TEMPERATURE) {
 		long res = GetTemperatureF(&PRIVATE_DATA->current_temperature);
 
-		if (CCD_COOLER_ON_ITEM->sw.value)
+		if (CCD_COOLER_ON_ITEM->sw.value) {
 			CCD_TEMPERATURE_PROPERTY->state = (res != DRV_TEMP_STABILIZED) ? INDIGO_BUSY_STATE : INDIGO_OK_STATE;
-		else
+		} else {
 			CCD_TEMPERATURE_PROPERTY->state = INDIGO_OK_STATE;
+		}
 
 		CCD_TEMPERATURE_ITEM->number.value = round(PRIVATE_DATA->current_temperature * 10) / 10.;
 		indigo_update_property(device, CCD_TEMPERATURE_PROPERTY, NULL);
@@ -764,15 +765,15 @@ static indigo_result ccd_attach(indigo_device *device) {
 
 static indigo_result ccd_enumerate_properties(indigo_device *device, indigo_client *client, indigo_property *property) {
 	if (IS_CONNECTED) {
-		indigo_define_matching_property(VSSPEED_PROPERTY);
-		indigo_define_matching_property(VSAMPLITUDE_PROPERTY);
-		indigo_define_matching_property(HREADOUT_PROPERTY);
-		indigo_define_matching_property(PREAMPGAIN_PROPERTY);
-		indigo_define_matching_property(HIGHCAPACITY_PROPERTY);
-		indigo_define_matching_property(BASELINECLAMP_PROPERTY);
-		indigo_define_matching_property(BASELINEOFFSET_PROPERTY);
-		indigo_define_matching_property(FANCONTROL_PROPERTY);
-		indigo_define_matching_property(COOLERMODE_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(VSSPEED_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(VSAMPLITUDE_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(HREADOUT_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(PREAMPGAIN_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(HIGHCAPACITY_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(BASELINECLAMP_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(BASELINEOFFSET_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(FANCONTROL_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(COOLERMODE_PROPERTY);
 	}
 	return indigo_ccd_enumerate_properties(device, client, property);
 }
@@ -781,19 +782,12 @@ static void ccd_connect_callback(indigo_device *device) {
 	int res;
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		if (!device->is_connected) { /* Do not double open device */
-			if (indigo_try_global_lock(device) != INDIGO_OK) {
-				CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
-				indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_CONNECTED_ITEM, false);
-				indigo_update_property(device, CONNECTION_PROPERTY, "Device is locked");
-				return;
-			}
 
 			pthread_mutex_lock(&driver_mutex);
 			if (use_camera(device) == false) {
 				CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 				indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_CONNECTED_ITEM, false);
 				indigo_update_property(device, CONNECTION_PROPERTY, NULL);
-				indigo_global_unlock(device);
 				pthread_mutex_unlock(&driver_mutex);
 				return;
 			}
@@ -955,7 +949,6 @@ static void ccd_connect_callback(indigo_device *device) {
 	} else {
 		if (device->is_connected) {  /* Do not double close device */
 			indigo_cancel_timer_sync(device, &PRIVATE_DATA->temperature_timer);
-			indigo_global_unlock(device);
 			if (CAP_SET_VREADOUT) {
 				indigo_delete_property(device, VSSPEED_PROPERTY, NULL);
 			}
@@ -1011,8 +1004,9 @@ static indigo_result ccd_change_property(indigo_device *device, indigo_client *c
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(CCD_EXPOSURE_PROPERTY, property)) {
 		// -------------------------------------------------------------------------------- CCD_EXPOSURE
-		if (CCD_EXPOSURE_PROPERTY->state == INDIGO_BUSY_STATE)
+		if (CCD_EXPOSURE_PROPERTY->state == INDIGO_BUSY_STATE) {
 			return INDIGO_OK;
+		}
 		indigo_property_copy_values(CCD_EXPOSURE_PROPERTY, property, false);
 		handle_exposure_property(device, property);
 	} else if (indigo_property_match_changeable(CCD_ABORT_EXPOSURE_PROPERTY, property)) {
@@ -1378,7 +1372,7 @@ static indigo_result ccd_change_property(indigo_device *device, indigo_client *c
 		}
 		pthread_mutex_unlock(&driver_mutex);
 		indigo_update_property(device, COOLERMODE_PROPERTY, NULL);
-	} else if (indigo_property_match_changeable(CONFIG_PROPERTY, property)) {
+	} else if (indigo_property_match(CONFIG_PROPERTY, property)) {
 		// -------------------------------------------------------------------------------- CONFIG
 		if (indigo_switch_match(CONFIG_SAVE_ITEM, property)) {
 			indigo_save_property(device, NULL, VSSPEED_PROPERTY);
@@ -1431,8 +1425,6 @@ static indigo_result ccd_detach(indigo_device *device) {
 		}
 	}
 
-	indigo_global_unlock(device);
-
 	INDIGO_DEVICE_DETACH_LOG(DRIVER_NAME, device->name);
 	return indigo_ccd_detach(device);
 }
@@ -1458,8 +1450,9 @@ indigo_result indigo_ccd_andor(indigo_driver_action action, indigo_driver_info *
 
 	SET_DRIVER_INFO(info, CCD_ANDOR_CAMERA_NAME, __FUNCTION__, DRIVER_VERSION, true, last_action);
 
-	if (action == last_action)
+	if (action == last_action) {
 		return INDIGO_OK;
+	}
 
 	switch(action) {
 		case INDIGO_DRIVER_INIT:
@@ -1475,10 +1468,14 @@ indigo_result indigo_ccd_andor(indigo_driver_action action, indigo_driver_info *
 			INDIGO_DRIVER_LOG(DRIVER_NAME, "Andor SDK v.%s", sdk_version);
 
 			res = GetAvailableCameras(&device_num);
-			if (res!= DRV_SUCCESS) INDIGO_DRIVER_ERROR(DRIVER_NAME, "GetAvailableCameras() error: %d", res);
-			else {
-				if (device_num > 0) INDIGO_DRIVER_LOG(DRIVER_NAME, "Detected %d Andor camera(s). Initializing...", device_num);
-				else INDIGO_DRIVER_LOG(DRIVER_NAME, "No Andor cameras detected");
+			if (res!= DRV_SUCCESS) {
+				INDIGO_DRIVER_ERROR(DRIVER_NAME, "GetAvailableCameras() error: %d", res);
+			} else {
+				if (device_num > 0) {
+					INDIGO_DRIVER_LOG(DRIVER_NAME, "Detected %d Andor camera(s). Initializing...", device_num);
+				} else {
+					INDIGO_DRIVER_LOG(DRIVER_NAME, "No Andor cameras detected");
+				}
 			}
 
 			for (int i = 0; i < device_num; i++) {

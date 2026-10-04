@@ -16,7 +16,7 @@ LU_DEFINE_VERSION_ATOM([LIBUSB_MICRO])
 LU_DEFINE_VERSION_RC_ATOM([LIBUSB_RC])
 
 AC_PREREQ([2.69])
-AC_INIT([libusb-1.0], [LIBUSB_MAJOR[.]LIBUSB_MINOR[.]LIBUSB_MICRO[]LIBUSB_RC], [libusb-devel@lists.sourceforge.net], [libusb-1.0], [http://libusb.info])
+AC_INIT([libusb-1.0], [LIBUSB_MAJOR[.]LIBUSB_MINOR[.]LIBUSB_MICRO[]LIBUSB_RC], [libusb-devel@lists.sourceforge.net], [libusb-1.0], [https://libusb.info])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_SRCDIR([libusb/core.c])
 AC_CONFIG_MACRO_DIR([m4])
@@ -27,13 +27,28 @@ AM_INIT_AUTOMAKE
 LT_INIT
 LT_LANG([Windows Resource])
 
+dnl Source identification: the LIBUSB_DESCRIBE string baked into
+dnl libusb_version::describe is generated at build time by
+dnl build-aux/gen-describe.sh, which is the single source of truth for
+dnl the classification. We invoke its --classify mode here only to fail
+dnl early at configure time (e.g. when .git exists but git is missing)
+dnl and to surface the source kind in the configure log.
+LIBUSB_DESCRIBE_SOURCE=`$SHELL "$srcdir/build-aux/gen-describe.sh" --classify "$srcdir"` || \
+	AC_MSG_ERROR([gen-describe.sh failed to classify source; see error above])
+AC_MSG_CHECKING([source identification for LIBUSB_DESCRIBE])
+AC_MSG_RESULT([$LIBUSB_DESCRIBE_SOURCE])
+AS_IF([test "x$LIBUSB_DESCRIBE_SOURCE" = "xunknown"], [
+	AC_MSG_WARN([source is neither a git checkout nor a release tarball; LIBUSB_DESCRIBE will be marked "Unknown source ..."])
+])
+AC_SUBST([LIBUSB_DESCRIBE_SOURCE])
+
 dnl Library versioning
 dnl These numbers should be tweaked on every release. Read carefully:
 dnl http://www.gnu.org/software/libtool/manual/html_node/Updating-version-info.html
 dnl http://sourceware.org/autobook/autobook/autobook_91.html
-lt_current=3
+lt_current=6
 lt_revision=0
-lt_age=3
+lt_age=6
 LT_LDFLAGS="-version-info ${lt_current}:${lt_revision}:${lt_age} -no-undefined"
 
 m4_ifdef([AM_SILENT_RULES],[AM_SILENT_RULES([yes])])
@@ -83,6 +98,17 @@ case $host in
 	backend=haiku
 	platform=posix
 	;;
+wasm*-emscripten)
+	AC_MSG_RESULT([Emscripten])
+	backend=emscripten
+	platform=posix
+	;;
+wasm*-unknown-none)
+	AC_MSG_ERROR([
+--host=$host_alias is not accepted as it might become ambiguous in the future.
+Please use an explicit --host=$host_cpu-emscripten instead.
+	])
+	;;
 *-linux* | *-uclinux*)
 	dnl on Android Linux, some functions are in different places
 	case $host in
@@ -123,7 +149,7 @@ case $host in
 	backend=windows
 	platform=windows
 	test "x$enable_shared" = xyes && create_import_lib=yes
-	EXTRA_CFLAGS="-mwin32 -fno-omit-frame-pointer"
+	EXTRA_CFLAGS="-fno-omit-frame-pointer"
 	EXTRA_LDFLAGS="-static-libgcc"
 	;;
 *)
@@ -138,7 +164,11 @@ esac
 if test "x$platform" = xposix; then
 	AC_DEFINE([PLATFORM_POSIX], [1], [Define to 1 if compiling for a POSIX platform.])
 	AC_CHECK_TYPES([nfds_t], [], [], [[#include <poll.h>]])
-	AC_CHECK_FUNCS([pipe2])
+	if test "x$backend" != xemscripten; then
+		# pipe2 is detected as present on Emscripten, but it isn't actually ported and always
+		# returns an error. https://github.com/emscripten-core/emscripten/issues/14824
+		AC_CHECK_FUNCS([pipe2])
+	fi
 	dnl Some compilers do not support the '-pthread' option so check for it here
 	saved_CFLAGS="${CFLAGS}"
 	CFLAGS="-Wall -Werror -pthread"
@@ -153,7 +183,21 @@ if test "x$platform" = xposix; then
 	AC_SEARCH_LIBS([pthread_create], [pthread],
 		[test "x$ac_cv_search_pthread_create" != "xnone required" && AC_SUBST(THREAD_LIBS, [-lpthread])],
 		[], [])
-	AC_SEARCH_LIBS([__atomic_fetch_add_4], [atomic])
+	dnl Check for new-style atomic builtins. We first check without linking to -latomic.
+	AC_MSG_CHECKING(whether __atomic_load_n is supported)
+	AC_LINK_IFELSE([AC_LANG_SOURCE([[
+	#include <stdint.h>
+	int main() {
+		struct {
+			uint64_t *v;
+		} x;
+		return (int)__atomic_load_n(x.v, __ATOMIC_ACQUIRE) &
+		       (int)__atomic_add_fetch(x.v, (uint64_t)1, __ATOMIC_ACQ_REL);
+	}]])], GCC_ATOMIC_BUILTINS_SUPPORTED=yes, GCC_ATOMIC_BUILTINS_SUPPORTED=no)
+	AC_MSG_RESULT($GCC_ATOMIC_BUILTINS_SUPPORTED)
+	if test "x$GCC_ATOMIC_BUILTINS_SUPPORTED" != xyes; then
+		AC_SEARCH_LIBS([__atomic_fetch_add_4], [atomic])
+	fi
 elif test "x$platform" = xwindows; then
 	AC_DEFINE([PLATFORM_WINDOWS], [1], [Define to 1 if compiling for a Windows platform.])
 else
@@ -179,6 +223,16 @@ linux)
 		dnl system has udev. use it or fail!
 		AC_CHECK_HEADER([libudev.h], [], [AC_MSG_ERROR([udev support requested but libudev header not installed])])
 		AC_CHECK_LIB([udev], [udev_new], [], [AC_MSG_ERROR([udev support requested but libudev not installed])])
+
+		# We can build umockdev tests (if available)
+		m4_ifdef([PKG_PROG_PKG_CONFIG],[
+			PKG_PROG_PKG_CONFIG
+		   	PKG_CHECK_MODULES([UMOCKDEV], [umockdev-1.0 >= 0.16.0], [ac_have_umockdev=yes], [ac_have_umockdev=no])
+		   	PKG_CHECK_MODULES([UMOCKDEV_HOTPLUG], [umockdev-1.0 >= 0.17.7], [ac_umockdev_hotplug=yes], [ac_umockdev_hotplug=no])
+			if test $ac_umockdev_hotplug = yes; then
+			   AC_DEFINE([UMOCKDEV_HOTPLUG], [1], [UMockdev hotplug code is not racy])
+			fi
+		], [])
 	else
 		AC_CHECK_HEADERS([asm/types.h])
 		AC_CHECK_HEADER([linux/netlink.h], [], [AC_MSG_ERROR([Linux netlink header not found])])
@@ -186,12 +240,29 @@ linux)
 	fi
 	;;
 sunos)
-	LIBS="${LIBS} -ldevinfo"
+	dnl sunos_usb.c calls nvlist_alloc()/nvlist_add_int32()/nvlist_pack()/
+	dnl nvlist_free() from <sys/nvpair.h>, so libnvpair is a real dependency.
+	dnl The Solaris link editor tolerates undefined symbols when building a
+	dnl shared object, which hid this; a static link (as tests/Makefile.am
+	dnl asks for) fails with "symbol referencing errors".
+	LIBS="${LIBS} -ldevinfo -lnvpair"
 	;;
 windows)
 	AC_CHECK_TYPES([struct timespec], [], [], [[#include <time.h>]])
 	AC_DEFINE([_WIN32_WINNT], [_WIN32_WINNT_VISTA], [Define to the oldest supported Windows version.])
-	LT_LDFLAGS="${LT_LDFLAGS} -avoid-version -Wl,--add-stdcall-alias"
+	LT_LDFLAGS="${LT_LDFLAGS} -avoid-version"
+	;;
+emscripten)
+	# Note: LT_LDFLAGS is not enough here because we need link flags for executable.
+	dnl The WebUSB backend (os/emscripten_webusb.cpp) is C++, so libusb-1.0
+	dnl pulls in the C++ runtime. Emscripten 6.0.6 disabled DEFAULT_TO_CXX,
+	dnl making em++ mandatory for C++ links; without it every C program that
+	dnl links libusb (the examples and tests here, and downstream users
+	dnl building with emcc) fails with undefined std:: symbols. Setting it
+	dnl back restores the pre-6.0.6 behaviour and is a no-op on older SDKs.
+	EM_LDFLAGS="--bind -s ASYNCIFY -s DEFAULT_TO_CXX"
+	AM_LDFLAGS="${AM_LDFLAGS} ${EM_LDFLAGS} -s ASSERTIONS -s ALLOW_MEMORY_GROWTH"
+	LIBS="${LIBS} ${EM_LDFLAGS}"
 	;;
 *)
 	dnl no special handling required
@@ -201,29 +272,9 @@ esac
 dnl headers not available on all platforms but required on others
 AC_CHECK_HEADERS([sys/time.h])
 
-if test "x$platform" = xposix; then
-	dnl check availability of clock_gettime()
-	if test "x$backend" = xdarwin; then
-		dnl need to verify that OS X target is 10.12 or later for clock_gettime()
-		AC_MSG_CHECKING([whether OS X target version is 10.12 or later])
-		AC_COMPILE_IFELSE([AC_LANG_PROGRAM([
-				#include <AvailabilityMacros.h>
-				#if MAC_OS_X_VERSION_MIN_REQUIRED < 101200
-				# error "Target OS X version is too old"
-				#endif
-			], [])],
-			[AC_MSG_RESULT([yes])
-			 osx_10_12_or_later=yes],
-			[AC_MSG_RESULT([no])
-			 osx_10_12_or_later=])
-		if test "x$osx_10_12_or_later" = xyes; then
-			AC_CHECK_FUNCS([clock_gettime], [have_clock_gettime=yes], [have_clock_gettime=])
-		else
-			AC_MSG_NOTICE([clock_gettime() is not available on target OS X version])
-		fi
-	else
-		AC_CHECK_FUNCS([clock_gettime], [have_clock_gettime=yes], [AC_MSG_ERROR([clock_gettime() is required on this platform])])
-	fi
+dnl check availability of clock_gettime(), except don't bother on Darwin, because the result is not used.
+if test "x$platform" = xposix && test "x$backend" != xdarwin; then
+	AC_CHECK_FUNCS([clock_gettime], [have_clock_gettime=yes], [AC_MSG_ERROR([clock_gettime() is required on this platform])])
 
 	if test "x$have_clock_gettime" = xyes; then
 		dnl the clock_gettime() function needs certain clock IDs defined
@@ -344,6 +395,30 @@ if test "x$system_log_enabled" != xno; then
 	fi
 fi
 
+dnl Man page generation; also locate doxygen for the HTML docs target
+AC_ARG_ENABLE([man-pages],
+	[AS_HELP_STRING([--enable-man-pages], [generate and install man pages (requires doxygen) [default=auto]])],
+	[build_man_pages=$enableval],
+	[build_man_pages=auto])
+AC_PATH_PROG([DOXYGEN], [doxygen])
+if test "x$build_man_pages" != xno; then
+	if test "x$DOXYGEN" = x; then
+		if test "x$build_man_pages" = xyes; then
+			AC_MSG_ERROR([doxygen is required for man page generation])
+		fi
+		build_man_pages=no
+	else
+		build_man_pages=yes
+	fi
+fi
+if test "x$build_man_pages" = xyes; then
+	AC_SUBST([GENERATE_MAN], [YES])
+	AC_SUBST([MAN_LINKS], [NO])
+else
+	AC_SUBST([GENERATE_MAN], [NO])
+	AC_SUBST([MAN_LINKS], [NO])
+fi
+
 dnl Examples build
 AC_ARG_ENABLE([examples-build],
 	[AS_HELP_STRING([--enable-examples-build], [build example applications [default=no]])],
@@ -356,8 +431,17 @@ AC_ARG_ENABLE([tests-build],
 	[build_tests=$enableval],
 	[build_tests=no])
 
+dnl Long-running testcore stress test
+AC_ARG_ENABLE([testcore],
+	[AS_HELP_STRING([--enable-testcore], [include the testcore stress test in make check [default=no]])],
+	[run_testcore=$enableval],
+	[run_testcore=no])
+
 AM_CONDITIONAL([BUILD_EXAMPLES], [test "x$build_examples" != xno])
 AM_CONDITIONAL([BUILD_TESTS], [test "x$build_tests" != xno])
+AM_CONDITIONAL([RUN_TESTCORE], [test "x$run_testcore" = xyes])
+AM_CONDITIONAL([BUILD_MAN_PAGES], [test "x$build_man_pages" = xyes])
+AM_CONDITIONAL([BUILD_UMOCKDEV_TEST], [test "x$ac_have_umockdev" = xyes -a "x$log_enabled" != xno -a "x$debug_log_enabled" != xyes])
 AM_CONDITIONAL([CREATE_IMPORT_LIB], [test "x$create_import_lib" = xyes])
 AM_CONDITIONAL([OS_DARWIN], [test "x$backend" = xdarwin])
 AM_CONDITIONAL([OS_HAIKU], [test "x$backend" = xhaiku])
@@ -367,18 +451,41 @@ AM_CONDITIONAL([OS_NULL], [test "x$backend" = xnull])
 AM_CONDITIONAL([OS_OPENBSD], [test "x$backend" = xopenbsd])
 AM_CONDITIONAL([OS_SUNOS], [test "x$backend" = xsunos])
 AM_CONDITIONAL([OS_WINDOWS], [test "x$backend" = xwindows])
+AM_CONDITIONAL([OS_EMSCRIPTEN], [test "x$backend" = xemscripten])
 AM_CONDITIONAL([PLATFORM_POSIX], [test "x$platform" = xposix])
 AM_CONDITIONAL([PLATFORM_WINDOWS], [test "x$platform" = xwindows])
 AM_CONDITIONAL([USE_UDEV], [test "x$use_udev" = xyes])
+AM_CONDITIONAL([LIBUSB_WINDOWS_HOTPLUG], [test "x$enable_windows_hotplug" = xyes])
 
 dnl The -Wcast-function-type warning causes a flurry of warnings when compiling
 dnl Windows with GCC 8 or later because of dynamically loaded functions
 if test "x$backend" = xwindows; then
+	AC_ARG_ENABLE([windows-hotplug],
+	AS_HELP_STRING([--enable-windows-hotplug], [Enable Windows hotplug support]),
+	[enable_windows_hotplug="$enableval"],
+	[enable_windows_hotplug=no])
+
+	if test "x$enable_windows_hotplug" = "xyes"; then
+		AC_DEFINE([LIBUSB_WINDOWS_HOTPLUG], [1], [Define to enable Windows hotplug support])
+	fi
+
 	saved_CFLAGS="${CFLAGS}"
 	CFLAGS="-Werror -Wcast-function-type"
 	AC_COMPILE_IFELSE([AC_LANG_PROGRAM([], [])],
 		[EXTRA_CFLAGS="${EXTRA_CFLAGS} -Wno-cast-function-type"],
 		[])
+	CFLAGS="${saved_CFLAGS}"
+fi
+
+dnl Some linkers do not support the '--add-stdcall-alias' option so check for it here
+if test "x$backend" = xwindows; then
+	saved_CFLAGS="${CFLAGS}"
+	CFLAGS="-Wl,--add-stdcall-alias"
+	AC_MSG_CHECKING([if linker supports --add-stdcall-alias])
+	AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])],
+		[AC_MSG_RESULT([yes])
+		 LT_LDFLAGS="${LT_LDFLAGS} -Wl,--add-stdcall-alias"],
+		[AC_MSG_RESULT([no])])
 	CFLAGS="${saved_CFLAGS}"
 fi
 
@@ -394,6 +501,7 @@ AM_CXXFLAGS="-std=${c_dialect}++11 ${EXTRA_CFLAGS} ${SHARED_CFLAGS} -Wmissing-de
 AC_SUBST(AM_CXXFLAGS)
 
 AC_SUBST(LT_LDFLAGS)
+AC_SUBST(AM_LDFLAGS)
 
 AC_SUBST([EXTRA_LDFLAGS])
 

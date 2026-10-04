@@ -1,0 +1,728 @@
+// Copyright (c) 2019-2026 Rumen G. Bogdanovski
+// All rights reserved.
+//
+// You can use this software under the terms of 'INDIGO Astronomy
+// open-source license' (see LICENSE.md).
+//
+// THIS SOFTWARE IS PROVIDED BY THE AUTHORS 'AS IS' AND ANY EXPRESS
+// OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+// WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+// GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+// WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+// NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// USB Dewpoint driver definition
+
+// version history
+// 2.0 by Rumen G. Bogdanovski <rumenastro@gmail.com>
+// 3.0 refactoring by Peter Polakovic <peter.polakovic@cloudmakers.eu>
+
+driver usbdp {
+	label = "USB Dewpoint";
+	author = "Rumen G. Bogdanovski <rumenastro@gmail.com>";
+	copyright = "Copyright (c) 2019-2026 Rumen G. Bogdanovski";
+	version = 14;
+	serial;
+	define {
+		#define AUX_GROUP "Auxiliary"
+		#define SETTINGS_GROUP "Settings"
+		#define UDP_CMD_LEN 6
+
+		#define UDP_STATUS_CMD "SGETAL"
+		#define UDP1_STATUS_RESPONSE "Tloc=%f-Tamb=%f-RH=%f-DP=%f-TH=%d-C=%d"
+		#define UDP2_STATUS_RESPONSE "##%f/%f/%f/%f/%f/%u/%u/%u/%u/%u/%u/%u/%u/%u/%u/%u**"
+
+		#define UDP_IDENTIFY_CMD "SWHOIS"
+		#define UDP1_IDENTIFY_RESPONSE "UDP"
+		#define UDP2_IDENTIFY_RESPONSE "UDP2(%u)" // Firmware version? Like "UDP2(1446)"
+
+		#define UDP_RESET_CMD "SEERAZ"
+		#define UDP_RESET_RESPONSE "EEPROM RESET"
+
+		#define UDP2_OUTPUT_CMD "S%1uO%03u"         // channel 1-3, power 0-100
+		#define UDP2_THRESHOLD_CMD "STHR%1u%1u"     // channel 1-2, value 0-9
+		#define UDP2_CALIBRATION_CMD "SCA%1u%1u%1u" // channel 1-2-Amb, value 0-9
+		#define UDP2_LINK_CMD "SLINK%1u"            // 0 or 1 to link channels 2 and 3
+		#define UDP2_AUTO_CMD "SAUTO%1u"            // 0 or 1 to enable auto mode
+		#define UDP2_AGGRESSIVITY_CMD "SAGGR%1u"    // 1-4 (1, 2, 5, 10)
+		#define UDP_DONE_RESPONSE  "DONE"
+	}
+	data {
+		int version;
+		int outputs[3];
+		int calibration[3];
+		int thresholds[2];
+		bool automatic;
+		bool linked;
+		uint8_t aggressivity;
+		char response[128];
+	}
+	code {
+		static bool usbdp_command(indigo_device *device, char *command, ...) {
+			indigo_usleep(20000);
+			long result = indigo_uni_discard(PRIVATE_DATA->handle);
+			if (result >= 0) {
+				va_list args;
+				va_start(args, command);
+				result = indigo_uni_vprintf(PRIVATE_DATA->handle, command, args);
+				va_end(args);
+				if (result > 0) {
+					result = indigo_uni_read_section(PRIVATE_DATA->handle, PRIVATE_DATA->response, sizeof(PRIVATE_DATA->response) - 1, "\n", "\r\n", INDIGO_DELAY(1));
+				}
+			}
+			return result > 0;
+		}
+
+		// A change request accepted while the status frame was in flight has already copied the
+		// client's values and published BUSY, so the frame must not overwrite them. The check sits at each
+		// assignment, after the reply has been read; a request copied after it is still sent, because the
+		// handlers send the targets, which the poll never writes.
+		static bool usbdp_adopt(indigo_property *property) {
+			return property->state != INDIGO_BUSY_STATE;
+		}
+
+		static indigo_item *usbdp_aggressivity_item(indigo_device *device, int aggressivity) {
+			switch (aggressivity) {
+				case 1:
+					return AUX_HEATER_AGGRESSIVITY_1_ITEM;
+				case 2:
+					return AUX_HEATER_AGGRESSIVITY_2_ITEM;
+				case 3:
+					return AUX_HEATER_AGGRESSIVITY_5_ITEM;
+				case 4:
+					return AUX_HEATER_AGGRESSIVITY_10_ITEM;
+			}
+			return NULL;
+		}
+
+		static bool usbdp_open(indigo_device *device) {
+			PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 19200, INDIGO_LOG_DEBUG);
+			if (PRIVATE_DATA->handle != NULL) {
+				if (usbdp_command(device, UDP_IDENTIFY_CMD)) {
+					if (!strcmp(PRIVATE_DATA->response, UDP1_IDENTIFY_RESPONSE)) {
+						PRIVATE_DATA->version = 1;
+						INDIGO_COPY_VALUE(INFO_DEVICE_MODEL_ITEM->text.value, "USB_Dewpoint v1");
+						indigo_update_property(device, INFO_PROPERTY, NULL);
+						// for V1 we need one name only
+						// indigo_delete_property(device, AUX_OUTLET_NAMES_PROPERTY, NULL);
+						// AUX_OUTLET_NAMES_PROPERTY->count = 1;
+						// indigo_define_property(device, AUX_OUTLET_NAMES_PROPERTY, NULL);
+						AUX_HEATER_OUTLET_PROPERTY->hidden = true;
+						AUX_HEATER_OUTLET_STATE_PROPERTY->hidden = true;
+						AUX_DEW_CONTROL_PROPERTY->hidden = true;
+						AUX_HEATER_AGGRESSIVITY_PROPERTY->hidden = true;
+						AUX_LINK_CH_2AND3_PROPERTY->hidden = true;
+						AUX_TEMPERATURE_SENSORS_PROPERTY->count = 1;
+						AUX_DEW_WARNING_PROPERTY->count = 1;
+						return true;
+					} else if (!strncmp(PRIVATE_DATA->response, UDP2_IDENTIFY_RESPONSE, 4)) {
+						PRIVATE_DATA->version = 2;
+						INDIGO_COPY_VALUE(INFO_DEVICE_MODEL_ITEM->text.value, "USB_Dewpoint v2");
+						sprintf(INFO_DEVICE_INTERFACE_ITEM->text.value, "%d", INDIGO_INTERFACE_AUX_WEATHER | INDIGO_INTERFACE_AUX_POWERBOX);
+						indigo_update_property(device, INFO_PROPERTY, NULL);
+						// Until the first status frame a failed request shows the settings the driver shows now.
+						for (int i = 0; i < 3; i++) {
+							PRIVATE_DATA->outputs[i] = (int)AUX_HEATER_OUTLET_PROPERTY->items[i].number.value;
+							PRIVATE_DATA->calibration[i] = (int)AUX_CALLIBRATION_PROPERTY->items[i].number.value;
+						}
+						for (int i = 0; i < 2; i++) {
+							PRIVATE_DATA->thresholds[i] = (int)AUX_DEW_THRESHOLD_PROPERTY->items[i].number.value;
+						}
+						PRIVATE_DATA->automatic = AUX_DEW_CONTROL_AUTOMATIC_ITEM->sw.value;
+						PRIVATE_DATA->linked = AUX_LINK_CH_2AND3_LINKED_ITEM->sw.value;
+						PRIVATE_DATA->aggressivity = 1;
+						for (int i = 1; i <= 4; i++) {
+							if (usbdp_aggressivity_item(device, i)->sw.value) {
+								PRIVATE_DATA->aggressivity = i;
+							}
+						}
+						return true;
+					}
+					indigo_uni_close(&PRIVATE_DATA->handle);
+				}
+			}
+			return false;
+		}
+
+		static void usbdp_close(indigo_device *device) {
+			if (PRIVATE_DATA->handle != NULL) {
+				indigo_uni_close(&PRIVATE_DATA->handle);
+			}
+		}
+	}
+	aux {
+		name = "USB Dewpoint";
+		interface = INDIGO_INTERFACE_AUX_WEATHER;
+		additional_instances = true;
+		on_timer {
+			bool updateHeaterOutlet = false;
+			bool updateHeaterOutletState = false;
+			bool updateWeather = false;
+			bool updateSensors = false;
+			bool updateAutoHeater = false;
+			bool updateCallibration = false;
+			bool updateThreshold = false;
+			bool updateAggressivity = false;
+			bool updateLinked = false;
+			int channel_1_state, channel_2_state, channel_3_state, dew_warning_1, dew_warning_2;
+			if (usbdp_command(device, UDP_STATUS_CMD)) {
+				if (PRIVATE_DATA->version == 1) {
+					float temp_loc, temp_amb, rh, dewpoint;
+					int threshold, c;
+					int parsed = sscanf(PRIVATE_DATA->response, UDP1_STATUS_RESPONSE, &temp_loc, &temp_amb, &rh, &dewpoint, &threshold, &c);
+					if (parsed == 6) {
+						if ((fabs(((double)temp_amb - AUX_WEATHER_TEMPERATURE_ITEM->number.value)*100) >= 1) || (fabs(((double)rh - AUX_WEATHER_HUMIDITY_ITEM->number.value)*100) >= 1) || (fabs(((double)dewpoint - AUX_WEATHER_DEWPOINT_ITEM->number.value)*100) >= 1)) {
+							AUX_WEATHER_TEMPERATURE_ITEM->number.value = temp_amb;
+							AUX_WEATHER_HUMIDITY_ITEM->number.value = rh;
+							AUX_WEATHER_DEWPOINT_ITEM->number.value = dewpoint;
+							updateWeather = true;
+						}
+						if (fabs(((double)temp_loc - AUX_TEMPERATURE_SENSOR_1_ITEM->number.value)*100) >= 1) {
+							AUX_TEMPERATURE_SENSOR_1_ITEM->number.value = temp_loc;
+							updateSensors = true;
+						}
+					} else {
+						INDIGO_DRIVER_ERROR(DRIVER_NAME,"Error: parsed %d of 6 values in response \"%s\"", parsed, PRIVATE_DATA->response);
+					}
+				} else if (PRIVATE_DATA->version == 2) {
+					float temp_ch1, temp_ch2, temp_amb, rh, dewpoint;
+					int output_ch1, output_ch2, output_ch3, cal_ch1, cal_ch2, cal_amb, threshold_ch1, threshold_ch2, auto_mode, ch2_3_linked, aggressivity;
+					int parsed = sscanf(PRIVATE_DATA->response, UDP2_STATUS_RESPONSE, &temp_ch1, &temp_ch2, &temp_amb, &rh, &dewpoint, &output_ch1, &output_ch2, &output_ch3, &cal_ch1, &cal_ch2, &cal_amb, &threshold_ch1, &threshold_ch2, &auto_mode, &ch2_3_linked, &aggressivity);
+					if (parsed == 16) {
+						if ((fabs(((double)temp_amb - AUX_WEATHER_TEMPERATURE_ITEM->number.value)*100) >= 1) || (fabs(((double)rh - AUX_WEATHER_HUMIDITY_ITEM->number.value)*100) >= 1) ||  (fabs(((double)dewpoint - AUX_WEATHER_DEWPOINT_ITEM->number.value)*100) >= 1)) {
+							AUX_WEATHER_TEMPERATURE_ITEM->number.value = temp_amb;
+							AUX_WEATHER_HUMIDITY_ITEM->number.value = rh;
+							AUX_WEATHER_DEWPOINT_ITEM->number.value = dewpoint;
+							updateWeather = true;
+						}
+						if ((fabs(((double)temp_ch1 - AUX_TEMPERATURE_SENSOR_1_ITEM->number.value)*100) >= 1) || (fabs(((double)temp_ch2 - AUX_TEMPERATURE_SENSOR_2_ITEM->number.value)*100) >= 1)) {
+							AUX_TEMPERATURE_SENSOR_1_ITEM->number.value = temp_ch1;
+							AUX_TEMPERATURE_SENSOR_2_ITEM->number.value = temp_ch2;
+							updateSensors = true;
+						}
+						// The settings the controller reports are always recorded, a failed request shows them; a pending
+						// request owns the values of its property and its handler sends the targets.
+						PRIVATE_DATA->outputs[0] = output_ch1;
+						PRIVATE_DATA->outputs[1] = output_ch2;
+						PRIVATE_DATA->outputs[2] = output_ch3;
+						PRIVATE_DATA->calibration[0] = cal_ch1;
+						PRIVATE_DATA->calibration[1] = cal_ch2;
+						PRIVATE_DATA->calibration[2] = cal_amb;
+						PRIVATE_DATA->thresholds[0] = threshold_ch1;
+						PRIVATE_DATA->thresholds[1] = threshold_ch2;
+						PRIVATE_DATA->automatic = auto_mode;
+						PRIVATE_DATA->linked = ch2_3_linked;
+						PRIVATE_DATA->aggressivity = aggressivity;
+						if (usbdp_adopt(AUX_DEW_CONTROL_PROPERTY) && AUX_DEW_CONTROL_AUTOMATIC_ITEM->sw.value != auto_mode) {
+							if (auto_mode) {
+								indigo_set_switch(AUX_DEW_CONTROL_PROPERTY, AUX_DEW_CONTROL_AUTOMATIC_ITEM, true);
+							} else {
+								indigo_set_switch(AUX_DEW_CONTROL_PROPERTY, AUX_DEW_CONTROL_MANUAL_ITEM, true);
+							}
+							updateAutoHeater = true;
+						}
+						if (usbdp_adopt(AUX_HEATER_OUTLET_PROPERTY) && (((int)(AUX_HEATER_OUTLET_1_ITEM->number.value) != output_ch1) || ((int)(AUX_HEATER_OUTLET_2_ITEM->number.value) != output_ch2) || ((int)(AUX_HEATER_OUTLET_3_ITEM->number.value) != output_ch3))) {
+							AUX_HEATER_OUTLET_1_ITEM->number.value = output_ch1;
+							AUX_HEATER_OUTLET_2_ITEM->number.value = output_ch2;
+							AUX_HEATER_OUTLET_3_ITEM->number.value = output_ch3;
+							updateHeaterOutlet = true;
+						}
+						if ((bool)output_ch1 && auto_mode) {
+							channel_1_state = INDIGO_BUSY_STATE;
+						} else if ((bool)output_ch1) {
+							channel_1_state = INDIGO_OK_STATE;
+						} else {
+							channel_1_state = INDIGO_IDLE_STATE;
+						}
+						if ((bool)output_ch2 && auto_mode) {
+							channel_2_state = INDIGO_BUSY_STATE;
+						} else if ((bool)output_ch2) {
+							channel_2_state = INDIGO_OK_STATE;
+						} else {
+							channel_2_state = INDIGO_IDLE_STATE;
+						}
+						if ((bool)output_ch3 && auto_mode && ch2_3_linked) {
+							channel_3_state = INDIGO_BUSY_STATE;
+						} else if ((bool)output_ch3) {
+							channel_3_state = INDIGO_OK_STATE;
+						} else {
+							channel_3_state = INDIGO_IDLE_STATE;
+						}
+						if ((AUX_HEATER_OUTLET_STATE_1_ITEM->light.value != channel_1_state) || (AUX_HEATER_OUTLET_STATE_2_ITEM->light.value != channel_2_state) || (AUX_HEATER_OUTLET_STATE_3_ITEM->light.value != channel_3_state)) {
+							AUX_HEATER_OUTLET_STATE_1_ITEM->light.value = channel_1_state;
+							AUX_HEATER_OUTLET_STATE_2_ITEM->light.value = channel_2_state;
+							AUX_HEATER_OUTLET_STATE_3_ITEM->light.value = channel_3_state;
+							updateHeaterOutletState = true;
+						}
+						if (usbdp_adopt(AUX_CALLIBRATION_PROPERTY) && (((int)(AUX_CALLIBRATION_SENSOR_1_ITEM->number.value) != cal_ch1) || ((int)(AUX_CALLIBRATION_SENSOR_2_ITEM->number.value) != cal_ch2) || ((int)(AUX_CALLIBRATION_SENSOR_3_ITEM->number.value) != cal_amb))) {
+							AUX_CALLIBRATION_SENSOR_1_ITEM->number.value = cal_ch1;
+							AUX_CALLIBRATION_SENSOR_2_ITEM->number.value = cal_ch2;
+							AUX_CALLIBRATION_SENSOR_3_ITEM->number.value = cal_amb;
+							updateCallibration = true;
+						}
+						if (usbdp_adopt(AUX_DEW_THRESHOLD_PROPERTY) && (((int)(AUX_DEW_THRESHOLD_SENSOR_1_ITEM->number.value) != threshold_ch1) || ((int)(AUX_DEW_THRESHOLD_SENSOR_2_ITEM->number.value) != threshold_ch2))) {
+							AUX_DEW_THRESHOLD_SENSOR_1_ITEM->number.value = threshold_ch1;
+							AUX_DEW_THRESHOLD_SENSOR_2_ITEM->number.value = threshold_ch2;
+							updateThreshold = true;
+						}
+						indigo_item *aggressivity_item = usbdp_aggressivity_item(device, aggressivity);
+						if (usbdp_adopt(AUX_HEATER_AGGRESSIVITY_PROPERTY) && aggressivity_item != NULL && !aggressivity_item->sw.value) {
+							indigo_set_switch(AUX_HEATER_AGGRESSIVITY_PROPERTY, aggressivity_item, true);
+							updateAggressivity = true;
+						}
+						if (usbdp_adopt(AUX_LINK_CH_2AND3_PROPERTY) && AUX_LINK_CH_2AND3_LINKED_ITEM->sw.value != ch2_3_linked) {
+							if (ch2_3_linked) {
+								indigo_set_switch(AUX_LINK_CH_2AND3_PROPERTY, AUX_LINK_CH_2AND3_LINKED_ITEM, true);
+							} else {
+								indigo_set_switch(AUX_LINK_CH_2AND3_PROPERTY, AUX_LINK_CH_2AND3_NOT_LINKED_ITEM, true);
+							}
+							updateLinked = true;
+						}			} else {
+						INDIGO_DRIVER_ERROR(DRIVER_NAME,"Error: parsed %d of 16 values in response \"%s\"", parsed, PRIVATE_DATA->response);
+					}
+				}
+			}
+			/* Dew warning is issued when:
+				"Temp1 + Calibration1 <= Dewpoint + Threshold1"
+				"Temp2 + Calibration2 <= Dewpoint + Threshold2"
+			 */
+			if ((AUX_TEMPERATURE_SENSOR_1_ITEM->number.value + AUX_CALLIBRATION_SENSOR_1_ITEM->number.value) <= (AUX_WEATHER_DEWPOINT_ITEM->number.value + AUX_DEW_THRESHOLD_SENSOR_1_ITEM->number.value)) {
+				dew_warning_1 = INDIGO_ALERT_STATE;
+			} else {
+				dew_warning_1 = INDIGO_OK_STATE;
+			}
+			if ((AUX_TEMPERATURE_SENSOR_2_ITEM->number.value + AUX_CALLIBRATION_SENSOR_2_ITEM->number.value) <= (AUX_WEATHER_DEWPOINT_ITEM->number.value + AUX_DEW_THRESHOLD_SENSOR_2_ITEM->number.value)) {
+				dew_warning_2 = INDIGO_ALERT_STATE;
+			} else {
+				dew_warning_2 = INDIGO_OK_STATE;
+			}
+			if ((AUX_DEW_WARNING_SENSOR_1_ITEM->light.value != dew_warning_1) || (AUX_DEW_WARNING_SENSOR_2_ITEM->light.value != dew_warning_2)) {
+				AUX_DEW_WARNING_SENSOR_1_ITEM->light.value = dew_warning_1;
+				AUX_DEW_WARNING_SENSOR_2_ITEM->light.value = dew_warning_2;
+				indigo_update_property(device, AUX_DEW_WARNING_PROPERTY, NULL);
+			}
+			// A request copied after the checks above owns the state of its property, its handler publishes the result.
+			if (updateCallibration && usbdp_adopt(AUX_CALLIBRATION_PROPERTY)) {
+				INDIGO_UPDATE_PROPERTY_STATE(AUX_CALLIBRATION_PROPERTY, INDIGO_OK_STATE, NULL);
+			}
+			if (updateThreshold && usbdp_adopt(AUX_DEW_THRESHOLD_PROPERTY)) {
+				INDIGO_UPDATE_PROPERTY_STATE(AUX_DEW_THRESHOLD_PROPERTY, INDIGO_OK_STATE, NULL);
+			}
+			if (updateAggressivity && usbdp_adopt(AUX_HEATER_AGGRESSIVITY_PROPERTY)) {
+				INDIGO_UPDATE_PROPERTY_STATE(AUX_HEATER_AGGRESSIVITY_PROPERTY, INDIGO_OK_STATE, NULL);
+			}
+			if (updateLinked && usbdp_adopt(AUX_LINK_CH_2AND3_PROPERTY)) {
+				INDIGO_UPDATE_PROPERTY_STATE(AUX_LINK_CH_2AND3_PROPERTY, INDIGO_OK_STATE, NULL);
+			}
+			if (updateHeaterOutlet && usbdp_adopt(AUX_HEATER_OUTLET_PROPERTY)) {
+				INDIGO_UPDATE_PROPERTY_STATE(AUX_HEATER_OUTLET_PROPERTY, INDIGO_OK_STATE, NULL);
+			}
+			if (updateHeaterOutletState) {
+				INDIGO_UPDATE_PROPERTY_STATE(AUX_HEATER_OUTLET_STATE_PROPERTY, INDIGO_OK_STATE, NULL);
+			}
+			if (updateAutoHeater && usbdp_adopt(AUX_DEW_CONTROL_PROPERTY)) {
+				INDIGO_UPDATE_PROPERTY_STATE(AUX_DEW_CONTROL_PROPERTY, INDIGO_OK_STATE, NULL);
+			}
+			if (updateWeather) {
+				INDIGO_UPDATE_PROPERTY_STATE(AUX_WEATHER_PROPERTY, INDIGO_OK_STATE, NULL);
+			}
+			if (updateSensors) {
+				INDIGO_UPDATE_PROPERTY_STATE(AUX_TEMPERATURE_SENSORS_PROPERTY, INDIGO_OK_STATE, NULL);
+			}
+			indigo_execute_handler_in(device, 2, aux_timer_callback);
+		}
+		on_disconnect {
+			if (PRIVATE_DATA->version == 2) {
+				INDIGO_DRIVER_LOG(DRIVER_NAME, "Stopping heaters...");
+				usbdp_command(device, UDP2_OUTPUT_CMD, 1, 0);
+				usbdp_command(device, UDP2_OUTPUT_CMD, 2, 0);
+				usbdp_command(device, UDP2_OUTPUT_CMD, 3, 0);
+			}
+		}
+		on_attach {
+			INFO_PROPERTY->count = 5;
+			INDIGO_COPY_VALUE(INFO_DEVICE_MODEL_ITEM->text.value, "Unknown");
+		}
+		text AUX_OUTLET_NAMES {
+			name = AUX_OUTLET_NAMES_PROPERTY_NAME;
+			group = SETTINGS_GROUP;
+			label = "Outlet/Sensor names";
+			persistent = true;
+			always_defined = true;
+			on_change {
+				snprintf(AUX_HEATER_OUTLET_1_ITEM->label, INDIGO_NAME_SIZE, "%s [%%]", AUX_HEATER_OUTLET_NAME_1_ITEM->text.value);
+				snprintf(AUX_HEATER_OUTLET_2_ITEM->label, INDIGO_NAME_SIZE, "%s [%%]", AUX_HEATER_OUTLET_NAME_2_ITEM->text.value);
+				snprintf(AUX_HEATER_OUTLET_3_ITEM->label, INDIGO_NAME_SIZE, "%s [%%]", AUX_HEATER_OUTLET_NAME_3_ITEM->text.value);
+				snprintf(AUX_HEATER_OUTLET_STATE_1_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_HEATER_OUTLET_NAME_1_ITEM->text.value);
+				snprintf(AUX_HEATER_OUTLET_STATE_2_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_HEATER_OUTLET_NAME_2_ITEM->text.value);
+				snprintf(AUX_HEATER_OUTLET_STATE_3_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_HEATER_OUTLET_NAME_3_ITEM->text.value);
+				snprintf(AUX_TEMPERATURE_SENSOR_1_ITEM->label, INDIGO_NAME_SIZE, "%s (°C)", AUX_HEATER_OUTLET_NAME_1_ITEM->text.value);
+				snprintf(AUX_TEMPERATURE_SENSOR_2_ITEM->label, INDIGO_NAME_SIZE, "%s (°C)", AUX_HEATER_OUTLET_NAME_2_ITEM->text.value);
+				snprintf(AUX_CALLIBRATION_SENSOR_1_ITEM->label, INDIGO_NAME_SIZE, "%s (°C)", AUX_HEATER_OUTLET_NAME_1_ITEM->text.value);
+				snprintf(AUX_CALLIBRATION_SENSOR_2_ITEM->label, INDIGO_NAME_SIZE, "%s (°C)", AUX_HEATER_OUTLET_NAME_2_ITEM->text.value);
+				snprintf(AUX_DEW_THRESHOLD_SENSOR_1_ITEM->label, INDIGO_NAME_SIZE, "%s (°C)", AUX_HEATER_OUTLET_NAME_1_ITEM->text.value);
+				snprintf(AUX_DEW_THRESHOLD_SENSOR_2_ITEM->label, INDIGO_NAME_SIZE, "%s (°C)", AUX_HEATER_OUTLET_NAME_2_ITEM->text.value);
+				snprintf(AUX_DEW_WARNING_SENSOR_1_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_HEATER_OUTLET_NAME_1_ITEM->text.value);
+				snprintf(AUX_DEW_WARNING_SENSOR_2_ITEM->label, INDIGO_NAME_SIZE, "%s", AUX_HEATER_OUTLET_NAME_2_ITEM->text.value);
+				if (IS_CONNECTED) {
+					indigo_delete_property(device, AUX_HEATER_OUTLET_PROPERTY, NULL);
+					indigo_delete_property(device, AUX_HEATER_OUTLET_STATE_PROPERTY, NULL);
+					indigo_delete_property(device, AUX_TEMPERATURE_SENSORS_PROPERTY, NULL);
+					indigo_delete_property(device, AUX_CALLIBRATION_PROPERTY, NULL);
+					indigo_delete_property(device, AUX_DEW_THRESHOLD_PROPERTY, NULL);
+					indigo_delete_property(device, AUX_DEW_WARNING_PROPERTY, NULL);
+					indigo_define_property(device, AUX_HEATER_OUTLET_PROPERTY, NULL);
+					indigo_define_property(device, AUX_HEATER_OUTLET_STATE_PROPERTY, NULL);
+					indigo_define_property(device, AUX_TEMPERATURE_SENSORS_PROPERTY, NULL);
+					indigo_define_property(device, AUX_CALLIBRATION_PROPERTY, NULL);
+					indigo_define_property(device, AUX_DEW_THRESHOLD_PROPERTY, NULL);
+					indigo_define_property(device, AUX_DEW_WARNING_PROPERTY, NULL);
+					indigo_update_property(device, AUX_OUTLET_NAMES_PROPERTY, NULL);
+				}
+			}
+			item AUX_HEATER_OUTLET_NAME_1 {
+				name = AUX_HEATER_OUTLET_NAME_1_ITEM_NAME;
+				label = "Heater/Sensor #1";
+				value = "Heater/Sensor #1";
+			}
+			item AUX_HEATER_OUTLET_NAME_2 {
+				name = AUX_HEATER_OUTLET_NAME_2_ITEM_NAME;
+				label = "Heater/Sensor #2";
+				value = "Heater/Sensor #2";
+			}
+			item AUX_HEATER_OUTLET_NAME_3 {
+				name = AUX_HEATER_OUTLET_NAME_3_ITEM_NAME;
+				label = "Heater #3";
+				value = "Heater #3";
+			}
+		}
+		number AUX_HEATER_OUTLET {
+			name = AUX_HEATER_OUTLET_PROPERTY_NAME;
+			group = AUX_GROUP;
+			label = "Heater outlets";
+			on_change_request {
+				// The poll writes the settings the controller reports into the values only and the handler sends the
+				// targets, so the items a request does not carry must keep the reported setting in their targets as well.
+				// A BUSY property is left alone, the framework drops the request and its handler reads the targets.
+				if (AUX_HEATER_OUTLET_PROPERTY->state != INDIGO_BUSY_STATE) {
+					for (int i = 0; i < AUX_HEATER_OUTLET_PROPERTY->count; i++) {
+						AUX_HEATER_OUTLET_PROPERTY->items[i].number.target = AUX_HEATER_OUTLET_PROPERTY->items[i].number.value;
+					}
+				}
+			}
+			on_change {
+				// The poll may overwrite the values between the copy of the request and this handler, the targets keep the
+				// request. An outlet the controller did not answer for shows the power it last reported.
+				for (int i = 0; i < 3; i++) {
+					indigo_item *item = AUX_HEATER_OUTLET_PROPERTY->items + i;
+					int power = (int)item->number.target;
+					if (usbdp_command(device, UDP2_OUTPUT_CMD, i + 1, power)) {
+						item->number.value = PRIVATE_DATA->outputs[i] = power;
+					} else {
+						item->number.value = item->number.target = PRIVATE_DATA->outputs[i];
+						AUX_HEATER_OUTLET_PROPERTY->state = INDIGO_ALERT_STATE;
+					}
+				}
+			}
+			item AUX_HEATER_OUTLET_1 {
+				name = AUX_HEATER_OUTLET_1_ITEM_NAME;
+				label = "Heater #1 [%]";
+				value = 0;
+				min = 0;
+				max = 100;
+				step = 5;
+			}
+			item AUX_HEATER_OUTLET_2 {
+				name = AUX_HEATER_OUTLET_2_ITEM_NAME;
+				label = "Heater #2 [%]";
+				value = 0;
+				min = 0;
+				max = 100;
+				step = 5;
+			}
+			item AUX_HEATER_OUTLET_3 {
+				name = AUX_HEATER_OUTLET_3_ITEM_NAME;
+				label = "Heater #3 [%]";
+				value = 0;
+				min = 0;
+				max = 100;
+				step = 5;
+			}
+		}
+		light AUX_HEATER_OUTLET_STATE {
+			name = AUX_HEATER_OUTLET_STATE_PROPERTY_NAME;
+			group = AUX_GROUP;
+			label = "Heater outlets state";
+			item AUX_HEATER_OUTLET_STATE_1 {
+				name = AUX_HEATER_OUTLET_STATE_1_ITEM_NAME;
+				label = "Heater #1";
+				value = INDIGO_IDLE_STATE;
+			}
+			item AUX_HEATER_OUTLET_STATE_2 {
+				name = AUX_HEATER_OUTLET_STATE_2_ITEM_NAME;
+				label = "Heater #2";
+				value = INDIGO_IDLE_STATE;
+			}
+			item AUX_HEATER_OUTLET_STATE_3 {
+				name = AUX_HEATER_OUTLET_STATE_3_ITEM_NAME;
+				label = "Heater #3";
+				value = INDIGO_IDLE_STATE;
+			}
+		}
+		switch AUX_DEW_CONTROL {
+			name = AUX_DEW_CONTROL_PROPERTY_NAME;
+			group = AUX_GROUP;
+			label = "Dew control";
+			on_change {
+				// The poll may overwrite the values between the copy of the request and this handler, the targets keep the
+				// request. On failure the switch shows the mode the controller last reported.
+				bool automatic = indigo_get_switch_target(AUX_DEW_CONTROL_PROPERTY, AUX_DEW_CONTROL_AUTOMATIC_ITEM_NAME);
+				if (usbdp_command(device, UDP2_AUTO_CMD, automatic ? 1 : 0)) {
+					PRIVATE_DATA->automatic = automatic;
+					indigo_apply_switch_targets(AUX_DEW_CONTROL_PROPERTY);
+				} else {
+					indigo_set_switch(AUX_DEW_CONTROL_PROPERTY, PRIVATE_DATA->automatic ? AUX_DEW_CONTROL_AUTOMATIC_ITEM : AUX_DEW_CONTROL_MANUAL_ITEM, true);
+					AUX_DEW_CONTROL_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+			}
+			item AUX_DEW_CONTROL_MANUAL {
+				name = AUX_DEW_CONTROL_MANUAL_ITEM_NAME;
+				label = "Manual";
+				value = true;
+			}
+			item AUX_DEW_CONTROL_AUTOMATIC {
+				name = AUX_DEW_CONTROL_AUTOMATIC_ITEM_NAME;
+				label = "Automatic";
+				value = false;
+			}
+		}
+		number AUX_WEATHER {
+			name = AUX_WEATHER_PROPERTY_NAME;
+			group = AUX_GROUP;
+			label = "Weather info";
+			perm = INDIGO_RO_PERM;
+			item AUX_WEATHER_TEMPERATURE {
+				name = AUX_WEATHER_TEMPERATURE_ITEM_NAME;
+				label = "Ambient Temperature (°C)";
+			}
+			item AUX_WEATHER_HUMIDITY {
+				name = AUX_WEATHER_HUMIDITY_ITEM_NAME;
+				label = "Humidity [%]";
+			}
+			item AUX_WEATHER_DEWPOINT {
+				name = AUX_WEATHER_DEWPOINT_ITEM_NAME;
+				label = "Dewpoint (°C)";
+			}
+		}
+		number AUX_TEMPERATURE_SENSORS {
+			name = AUX_TEMPERATURE_SENSORS_PROPERTY_NAME;
+			group = AUX_GROUP;
+			label = "Temperature Sensors";
+			perm = INDIGO_RO_PERM;
+			item AUX_TEMPERATURE_SENSOR_1 {
+				name = AUX_TEMPERATURE_SENSORS_SENSOR_1_ITEM_NAME;
+				label = "Sensor #1 (°C)";
+			}
+			item AUX_TEMPERATURE_SENSOR_2 {
+				name = AUX_TEMPERATURE_SENSORS_SENSOR_2_ITEM_NAME;
+				label = "Sensor #2 (°C)";
+			}
+		}
+		number AUX_CALLIBRATION {
+			name = "AUX_TEMPERATURE_CALLIBRATION";
+			group = SETTINGS_GROUP;
+			label = "Temperature Sensors Callibration";
+			persistent = true;
+			on_change_request {
+				// The poll writes the settings the controller reports into the values only and the handler sends the
+				// targets, so the items a request does not carry must keep the reported setting in their targets as well.
+				// A BUSY property is left alone, the framework drops the request and its handler reads the targets.
+				if (AUX_CALLIBRATION_PROPERTY->state != INDIGO_BUSY_STATE) {
+					for (int i = 0; i < AUX_CALLIBRATION_PROPERTY->count; i++) {
+						AUX_CALLIBRATION_PROPERTY->items[i].number.target = AUX_CALLIBRATION_PROPERTY->items[i].number.value;
+					}
+				}
+			}
+			on_change {
+				// The poll may overwrite the values between the copy of the request and this handler, the targets keep the
+				// request. On failure the offsets show what the controller last reported.
+				if (usbdp_command(device, UDP2_CALIBRATION_CMD, (int)(AUX_CALLIBRATION_SENSOR_1_ITEM->number.target), (int)(AUX_CALLIBRATION_SENSOR_2_ITEM->number.target), (int)(AUX_CALLIBRATION_SENSOR_3_ITEM->number.target))) {
+					for (int i = 0; i < 3; i++) {
+						AUX_CALLIBRATION_PROPERTY->items[i].number.value = PRIVATE_DATA->calibration[i] = (int)AUX_CALLIBRATION_PROPERTY->items[i].number.target;
+					}
+				} else {
+					for (int i = 0; i < 3; i++) {
+						AUX_CALLIBRATION_PROPERTY->items[i].number.value = AUX_CALLIBRATION_PROPERTY->items[i].number.target = PRIVATE_DATA->calibration[i];
+					}
+					AUX_CALLIBRATION_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+			}
+			item AUX_CALLIBRATION_SENSOR_1 {
+				name = "SENSOR_1";
+				label = "Sensor #1 (°C)";
+				value = 0;
+				min = 0;
+				max = 9;
+				step = 1;
+			}
+			item AUX_CALLIBRATION_SENSOR_2 {
+				name = "SENSOR_2";
+				label = "Sensor #2 (°C)";
+				value = 0;
+				min = 0;
+				max = 9;
+				step = 1;
+			}
+			item AUX_CALLIBRATION_SENSOR_3 {
+				name = "SENSOR_3";
+				label = "Ambient sensor (°C)";
+				value = 0;
+				min = 0;
+				max = 9;
+				step = 1;
+			}
+		}
+		number AUX_DEW_THRESHOLD {
+			name = AUX_DEW_THRESHOLD_PROPERTY_NAME;
+			group = SETTINGS_GROUP;
+			label = "Dew Thresholds";
+			persistent = true;
+			on_change_request {
+				// The poll writes the settings the controller reports into the values only and the handler sends the
+				// targets, so the items a request does not carry must keep the reported setting in their targets as well.
+				// A BUSY property is left alone, the framework drops the request and its handler reads the targets.
+				if (AUX_DEW_THRESHOLD_PROPERTY->state != INDIGO_BUSY_STATE) {
+					for (int i = 0; i < AUX_DEW_THRESHOLD_PROPERTY->count; i++) {
+						AUX_DEW_THRESHOLD_PROPERTY->items[i].number.target = AUX_DEW_THRESHOLD_PROPERTY->items[i].number.value;
+					}
+				}
+			}
+			on_change {
+				// The poll may overwrite the values between the copy of the request and this handler, the targets keep the
+				// request. On failure the thresholds show what the controller last reported.
+				if (usbdp_command(device, UDP2_THRESHOLD_CMD, (int)(AUX_DEW_THRESHOLD_SENSOR_1_ITEM->number.target), (int)(AUX_DEW_THRESHOLD_SENSOR_2_ITEM->number.target))) {
+					for (int i = 0; i < 2; i++) {
+						AUX_DEW_THRESHOLD_PROPERTY->items[i].number.value = PRIVATE_DATA->thresholds[i] = (int)AUX_DEW_THRESHOLD_PROPERTY->items[i].number.target;
+					}
+				} else {
+					for (int i = 0; i < 2; i++) {
+						AUX_DEW_THRESHOLD_PROPERTY->items[i].number.value = AUX_DEW_THRESHOLD_PROPERTY->items[i].number.target = PRIVATE_DATA->thresholds[i];
+					}
+					AUX_DEW_THRESHOLD_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+			}
+			item AUX_DEW_THRESHOLD_SENSOR_1 {
+				name = AUX_DEW_THRESHOLD_SENSOR_1_ITEM_NAME;
+				label = "Sensor #1 (°C)";
+				value = 0;
+				min = 0;
+				max = 9;
+				step = 1;
+			}
+			item AUX_DEW_THRESHOLD_SENSOR_2 {
+				name = AUX_DEW_THRESHOLD_SENSOR_2_ITEM_NAME;
+				label = "Sensor #2 (°C)";
+				value = 0;
+				min = 0;
+				max = 9;
+				step = 1;
+			}
+		}
+		switch AUX_LINK_CH_2AND3 {
+			name = "AUX_LINK_CHANNELS_2AND3";
+			group = SETTINGS_GROUP;
+			label = "Link chanels 2 and 3";
+			on_change {
+				// The poll may overwrite the values between the copy of the request and this handler, the targets keep the
+				// request. On failure the switch shows the link the controller last reported.
+				bool linked = indigo_get_switch_target(AUX_LINK_CH_2AND3_PROPERTY, AUX_LINK_CH_2AND3_LINKED_ITEM_NAME);
+				if (usbdp_command(device, UDP2_LINK_CMD, linked ? 1 : 0)) {
+					PRIVATE_DATA->linked = linked;
+					indigo_apply_switch_targets(AUX_LINK_CH_2AND3_PROPERTY);
+				} else {
+					indigo_set_switch(AUX_LINK_CH_2AND3_PROPERTY, PRIVATE_DATA->linked ? AUX_LINK_CH_2AND3_LINKED_ITEM : AUX_LINK_CH_2AND3_NOT_LINKED_ITEM, true);
+					AUX_LINK_CH_2AND3_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+			}
+			item AUX_LINK_CH_2AND3_LINKED {
+				name = "LINKED";
+				label = "Linked";
+				value = false;
+			}
+			item AUX_LINK_CH_2AND3_NOT_LINKED {
+				name = "NOT_LINKED";
+				label = "Not Linked";
+				value = true;
+			}
+		}
+		switch AUX_HEATER_AGGRESSIVITY {
+			name = "AUX_HEATER_AGGRESSIVITY";
+			group = SETTINGS_GROUP;
+			label = "Auto mode heater aggressivity";
+			on_change {
+				// The poll may overwrite the values between the copy of the request and this handler, the targets keep the
+				// request. On failure the switch shows the level the controller last reported.
+				int aggressivity = PRIVATE_DATA->aggressivity;
+				if (indigo_get_switch_target(AUX_HEATER_AGGRESSIVITY_PROPERTY, AUX_HEATER_AGGRESSIVITY_1_ITEM_NAME)) {
+					aggressivity = 1;
+				} else if (indigo_get_switch_target(AUX_HEATER_AGGRESSIVITY_PROPERTY, AUX_HEATER_AGGRESSIVITY_2_ITEM_NAME)) {
+					aggressivity = 2;
+				} else if (indigo_get_switch_target(AUX_HEATER_AGGRESSIVITY_PROPERTY, AUX_HEATER_AGGRESSIVITY_5_ITEM_NAME)) {
+					aggressivity = 3;
+				} else if (indigo_get_switch_target(AUX_HEATER_AGGRESSIVITY_PROPERTY, AUX_HEATER_AGGRESSIVITY_10_ITEM_NAME)) {
+					aggressivity = 4;
+				}
+				if (usbdp_command(device, UDP2_AGGRESSIVITY_CMD, aggressivity)) {
+					PRIVATE_DATA->aggressivity = aggressivity;
+					indigo_apply_switch_targets(AUX_HEATER_AGGRESSIVITY_PROPERTY);
+				} else {
+					indigo_item *item = usbdp_aggressivity_item(device, PRIVATE_DATA->aggressivity);
+					if (item != NULL) {
+						indigo_set_switch(AUX_HEATER_AGGRESSIVITY_PROPERTY, item, true);
+					}
+					AUX_HEATER_AGGRESSIVITY_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+			}
+			item AUX_HEATER_AGGRESSIVITY_1 {
+				name = "AGGRESSIVITY_1";
+				label = "Aggressivity 1%";
+				value = true;
+			}
+			item AUX_HEATER_AGGRESSIVITY_2 {
+				name = "AGGRESSIVITY_2";
+				label = "Aggressivity 2%";
+				value = false;
+			}
+			item AUX_HEATER_AGGRESSIVITY_5 {
+				name = "AGGRESSIVITY_5";
+				label = "Aggressivity 5%";
+				value = false;
+			}
+			item AUX_HEATER_AGGRESSIVITY_10 {
+				name = "AGGRESSIVITY_10";
+				label = "Aggressivity 10%";
+				value = false;
+			}
+		}
+		light AUX_DEW_WARNING {
+			name = AUX_DEW_WARNING_PROPERTY_NAME;
+			group = AUX_GROUP;
+			label = "Dew warning";
+			item AUX_DEW_WARNING_SENSOR_1 {
+				name = AUX_DEW_WARNING_SENSOR_1_ITEM_NAME;
+				label = "Sensor #1";
+				value = INDIGO_OK_STATE;
+			}
+			item AUX_DEW_WARNING_SENSOR_2 {
+				name = AUX_DEW_WARNING_SENSOR_2_ITEM_NAME;
+				label = "Sesnor #2";
+				value = INDIGO_OK_STATE;
+			}
+		}
+	}
+}

@@ -1,4 +1,4 @@
-// Copyright (c) 2019 CloudMakers, s. r. o.
+// Copyright (c) 2019-2025 CloudMakers, s. r. o.
 // All rights reserved.
 //
 // You can use this software under the terms of 'INDIGO Astronomy
@@ -23,7 +23,6 @@
  \file indigo_cat_data.c
  */
 
-
 #include <stdio.h>
 #include <stdbool.h>
 #include <time.h>
@@ -32,9 +31,13 @@
 #include <indigo/indigocat/indigocat_solar_system.h>
 #include <indigo/indigocat/indigocat_ss.h>
 
-#define DELTA_UTC_UT1	( -0.477677 / 86400.0)
-#define UT2JD(t) 			((t) / 86400.0 + 2440587.5 + DELTA_UTC_UT1)
+#define DELTA_UT1_UTC (0.0299836 / 86400.0) /* For 2025-05-22 */
+#define UT2JD(t) 			((t) / 86400.0 + 2440587.5 + DELTA_UT1_UTC)
 #define JDNOW 				UT2JD(time(NULL))
+
+#if defined(INDIGO_WINDOWS)
+#pragma warning(disable:4305)
+#endif
 
 static indigocat_ss_entry indigo_ss_data[] = {
 	{ MERCURY, 0.0, 0.0, -1, "Mercury", 0.0, 0.0 },

@@ -1,4 +1,4 @@
-// Copyright (c) 2023 CloudMakers, s. r. o.
+// Copyright (c) 2023-2025 CloudMakers, s. r. o.
 // All rights reserved.
 //
 // You can use this software under the terms of 'INDIGO Astronomy
@@ -35,6 +35,7 @@
 @property dispatch_semaphore_t openSemafor;
 @property dispatch_semaphore_t closeSemafor;
 @property dispatch_semaphore_t ptpSemafor;
+@property uint32_t ptpTransactionID;
 @property NSString *error;
 @property bool removed;
 @property NSData *ptpResponse;

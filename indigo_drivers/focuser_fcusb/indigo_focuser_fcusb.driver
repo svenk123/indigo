@@ -1,0 +1,132 @@
+// Copyright (c) 2016-2026 CloudMakers, s. r. o.
+// All rights reserved.
+//
+// You can use this software under the terms of 'INDIGO Astronomy
+// open-source license' (see LICENSE.md).
+//
+// THIS SOFTWARE IS PROVIDED BY THE AUTHORS 'AS IS' AND ANY EXPRESS
+// OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+// WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+// GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+// WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+// NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// Shoestring FCUSB focuser driver definition
+
+// version history
+// 2.0 by Peter Polakovic <peter.polakovic@cloudmakers.eu>
+// 3.0 refactoring by Peter Polakovic <peter.polakovic@cloudmakers.eu>
+
+driver fcusb {
+	label = "Shoestring FCUSB focuser";
+	author = "Peter Polakovic <peter.polakovic@cloudmakers.eu>";
+	copyright = "Copyright (c) 2016-2026 CloudMakers, s. r. o.";
+	version = 10;
+	multi_device_support = true;
+	libusb {
+		hotplug = true;
+		vid = FCUSB_VID;
+	}
+	include {
+		#include <libfcusb.h>
+	}
+	data {
+		libfcusb_device_context *device_context;
+	}
+	code {
+		static void focuser_steps_handler(indigo_device *device);
+
+		static bool fcusb_match(libusb_device *dev, const char **name) {
+			return libfcusb_focuser(dev, name);
+		}
+
+		static bool fcusb_open(indigo_device *device) {
+			return libfcusb_open(PRIVATE_DATA->usbdev, &PRIVATE_DATA->device_context);
+		}
+
+		static void fcusb_close(indigo_device *device) {
+			libfcusb_stop(PRIVATE_DATA->device_context);
+			libfcusb_close(PRIVATE_DATA->device_context);
+		}
+
+		static void fcusb_debug(const char *message) {
+			INDIGO_DRIVER_DEBUG(DRIVER_NAME, "libfcusb: %s\n", message);
+		}
+	}
+	on_init {
+		libfcusb_debug = &fcusb_debug;
+	}
+	focuser {
+		name = "%s";
+		code {
+			static void focuser_motion_finalizer(indigo_device *device) {
+				bool ok = libfcusb_stop(PRIVATE_DATA->device_context);
+				FOCUSER_STEPS_ITEM->number.value = 0;
+				INDIGO_UPDATE_PROPERTY_STATE(FOCUSER_STEPS_PROPERTY, ok ? INDIGO_OK_STATE : INDIGO_ALERT_STATE, NULL);
+			}
+		}
+		on_attach {
+			FOCUSER_POSITION_PROPERTY->hidden = true;
+			FOCUSER_SPEED_ITEM->number.value = FOCUSER_SPEED_ITEM->number.max = 255;
+			INDIGO_COPY_VALUE(FOCUSER_SPEED_ITEM->label, "Power (0-255)");
+			INDIGO_COPY_VALUE(FOCUSER_SPEED_PROPERTY->label, "Power");
+		}
+		inherited FOCUSER_ABORT_MOTION {
+			on_change {
+				indigo_cancel_pending_handler(device, focuser_steps_handler);
+				indigo_cancel_pending_handler(device, focuser_motion_finalizer);
+				if (!libfcusb_stop(PRIVATE_DATA->device_context)) {
+					FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
+				} else {
+					FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
+				}
+				FOCUSER_ABORT_MOTION_ITEM->sw.value = false;
+				INDIGO_UPDATE_PROPERTY_STATE(FOCUSER_STEPS_PROPERTY, INDIGO_ALERT_STATE, NULL);
+				indigo_update_property(device, FOCUSER_ABORT_MOTION_PROPERTY, NULL);
+			}
+		}
+		inherited FOCUSER_STEPS {
+			on_change {
+				int frequency = X_FOCUSER_FREQUENCY_16_ITEM->sw.value ? 16 : (X_FOCUSER_FREQUENCY_4_ITEM->sw.value ? 4 : 1);
+				bool ok = FOCUSER_STEPS_ITEM->number.value > 0 && libfcusb_set_power(PRIVATE_DATA->device_context, FOCUSER_SPEED_ITEM->number.value) && libfcusb_set_frequency(PRIVATE_DATA->device_context, frequency);
+				if (ok) {
+					ok = FOCUSER_DIRECTION_MOVE_INWARD_ITEM->sw.value ? libfcusb_move_in(PRIVATE_DATA->device_context) : libfcusb_move_out(PRIVATE_DATA->device_context);
+				}
+				if (ok) {
+					FOCUSER_STEPS_PROPERTY->state = INDIGO_BUSY_STATE;
+					indigo_execute_priority_handler_in(device, INDIGO_TASK_PRIORITY_TIME, FOCUSER_STEPS_ITEM->number.value / 1000.0, focuser_motion_finalizer);
+				} else {
+					FOCUSER_STEPS_PROPERTY->state = INDIGO_ALERT_STATE;
+				}
+				indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+			}
+		}
+		switch X_FOCUSER_FREQUENCY {
+			on_change { }
+			name = "X_FOCUSER_FREQUENCY";
+			group = FOCUSER_MAIN_GROUP;
+			label = "Frequency";
+			persistent = true;
+			item X_FOCUSER_FREQUENCY_1 {
+				name = "FREQUENCY_1";
+				label = "1.6 kHz (1x)";
+				value = true;
+			}
+			item X_FOCUSER_FREQUENCY_4 {
+				name = "FREQUENCY_4";
+				label = "6 kHz (4x)";
+				value = false;
+			}
+			item X_FOCUSER_FREQUENCY_16 {
+				name = "FREQUENCY_16";
+				label = "25 kHz (16x)";
+				value = false;
+			}
+		}
+	}
+}

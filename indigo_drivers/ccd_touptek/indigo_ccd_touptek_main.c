@@ -1,4 +1,4 @@
-// Copyright (c) 2018 CloudMakers, s. r. o.
+// Copyright (c) 2018-2026 CloudMakers, s. r. o.
 // All rights reserved.
 //
 // You can use this software under the terms of 'INDIGO Astronomy
@@ -18,10 +18,8 @@
 
 // version history
 // 2.0 by Peter Polakovic <peter.polakovic@cloudmakers.eu>
-
-/** INDIGO ToupTek CCD & filter wheel driver main
- \file indigo_ccd_touptek_main.c
- */
+// 2.0 refactoring by Rumen G. Bogdanovski <rumenastro@gmail.com>
+// 3.0 refactoring by Peter Polakovic <peter.polakovic@cloudmakers.eu>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,7 +33,7 @@ int main(int argc, const char * argv[]) {
 	indigo_main_argv = argv;
 	/* Executable drivers use pipes - no HTTP */
 	indigo_use_blob_urls = false;
-	indigo_client *protocol_adapter = indigo_xml_device_adapter(0, 1);
+	indigo_client *protocol_adapter = indigo_xml_device_adapter(indigo_stdin_handle, indigo_stdout_handle);
 	indigo_enable_blob_mode_record *record = (indigo_enable_blob_mode_record *)malloc(sizeof(indigo_enable_blob_mode_record));
 	memset(record, 0, sizeof(indigo_enable_blob_mode_record));
 	record->mode = INDIGO_ENABLE_BLOB_ALSO;

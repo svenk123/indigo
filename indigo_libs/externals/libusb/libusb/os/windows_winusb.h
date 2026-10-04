@@ -1,9 +1,12 @@
+/* -*- Mode: C; indent-tabs-mode:t ; c-basic-offset:4 -*- */
 /*
  * Windows backend for libusb 1.0
  * Copyright © 2009-2012 Pete Batard <pete@akeo.ie>
  * With contributions from Michael Plante, Orin Eman et al.
  * Parts of this code adapted from libusb-win32-v1 by Stephan Meyer
  * Major code testing contribution by Xiaofan Chen
+ *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -24,7 +27,8 @@
 #define LIBUSB_WINDOWS_WINUSB_H
 
 #include <devioctl.h>
-#include <guiddef.h>
+#include <initguid.h>
+#include <usbiodef.h>
 
 #include "windows_common.h"
 
@@ -32,7 +36,7 @@
 #define MAX_USB_STRING_LENGTH	128
 #define MAX_HID_REPORT_SIZE	1024
 #define MAX_HID_DESCRIPTOR_SIZE	256
-#define MAX_GUID_STRING_LENGTH	40
+#define MAX_GUID_STRING_LENGTH	39
 #define MAX_PATH_LENGTH		256
 #define MAX_KEY_LENGTH		256
 #define LIST_SEPARATOR		';'
@@ -42,13 +46,8 @@
 // Additional return code for HID operations that completed synchronously
 #define LIBUSB_COMPLETED	(LIBUSB_SUCCESS + 1)
 
-// http://msdn.microsoft.com/en-us/library/ff545978.aspx
-// http://msdn.microsoft.com/en-us/library/ff545972.aspx
-// http://msdn.microsoft.com/en-us/library/ff545982.aspx
-static const GUID GUID_DEVINTERFACE_USB_HOST_CONTROLLER = {0x3ABF6F2D, 0x71C4, 0x462A, {0x8A, 0x92, 0x1E, 0x68, 0x61, 0xE6, 0xAF, 0x27}};
-static const GUID GUID_DEVINTERFACE_USB_HUB = {0xF18A0E88, 0xC30C, 0x11D0, {0x88, 0x15, 0x00, 0xA0, 0xC9, 0x06, 0xBE, 0xD8}};
-static const GUID GUID_DEVINTERFACE_USB_DEVICE = {0xA5DCBF10, 0x6530, 0x11D2, {0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED}};
-static const GUID GUID_DEVINTERFACE_LIBUSB0_FILTER = {0xF9F3FF14, 0xAE21, 0x48A0, {0x8A, 0x25, 0x80, 0x11, 0xA7, 0xA9, 0x31, 0xD9}};
+// libusb0 Filter Device Interface GUID
+DEFINE_GUID(GUID_DEVINTERFACE_LIBUSB0_FILTER, 0xF9F3FF14, 0xAE21, 0x48A0, 0x8A, 0x25, 0x80, 0x11, 0xA7, 0xA9, 0x31, 0xD9);
 
 // The following define MUST be == sizeof(USB_DESCRIPTOR_REQUEST)
 #define USB_DESCRIPTOR_REQUEST_SIZE	12U
@@ -91,6 +90,9 @@ struct windows_usb_api_backend {
 	int (*submit_control_transfer)(int sub_api, struct usbi_transfer *itransfer);
 	int (*cancel_transfer)(int sub_api, struct usbi_transfer *itransfer);
 	enum libusb_transfer_status (*copy_transfer_data)(int sub_api, struct usbi_transfer *itransfer, DWORD length);
+	int (*endpoint_supports_raw_io)(int sub_api, struct libusb_device_handle *dev_handle, uint8_t endpoint);
+	int (*endpoint_set_raw_io)(int sub_api, struct libusb_device_handle *dev_handle, uint8_t endpoint, int enable);
+	int (*get_max_raw_io_transfer_size)(int sub_api, struct libusb_device_handle *dev_handle, uint8_t endpoint);
 };
 
 extern const struct windows_usb_api_backend usb_api_backend[USB_API_MAX];
@@ -177,9 +179,10 @@ struct hid_device_priv {
 
 static inline struct winusb_device_priv *winusb_device_priv_init(struct libusb_device *dev)
 {
-	struct winusb_device_priv *priv = usbi_get_device_priv(dev);
+	struct winusb_device_priv *priv = (struct winusb_device_priv *)usbi_get_device_priv(dev);
 	int i;
 
+	usbi_mutex_init(&priv->interface_lock);
 	priv->apib = &usb_api_backend[USB_API_UNSUPPORTED];
 	priv->sub_api = SUB_API_NOTSET;
 	for (i = 0; i < USB_MAXINTERFACES; i++) {
@@ -192,7 +195,7 @@ static inline struct winusb_device_priv *winusb_device_priv_init(struct libusb_d
 
 static inline void winusb_device_priv_release(struct libusb_device *dev)
 {
-	struct winusb_device_priv *priv = usbi_get_device_priv(dev);
+	struct winusb_device_priv *priv = (struct winusb_device_priv *)usbi_get_device_priv(dev);
 	int i;
 
 	free(priv->dev_id);
@@ -210,6 +213,7 @@ static inline void winusb_device_priv_release(struct libusb_device *dev)
 		free(priv->usb_interface[i].path);
 		free(priv->usb_interface[i].endpoint);
 	}
+	usbi_mutex_destroy(&priv->interface_lock);
 }
 
 // used to match a device driver (including filter drivers) against a supported API
@@ -311,7 +315,7 @@ typedef enum _USB_HUB_NODE {
 #endif
 
 // Most of the structures below need to be packed
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef struct _USB_HUB_DESCRIPTOR {
 	UCHAR bDescriptorLength;
@@ -405,7 +409,7 @@ typedef struct _USB_NODE_CONNECTION_INFORMATION_EX_V2 {
 	USB_NODE_CONNECTION_INFORMATION_EX_V2_FLAGS Flags;
 } USB_NODE_CONNECTION_INFORMATION_EX_V2, *PUSB_NODE_CONNECTION_INFORMATION_EX_V2;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #if defined(_MSC_VER)
 // Restore original warnings
@@ -447,7 +451,7 @@ typedef struct {
 	ULONG MaximumBytesPerInterval;
 } WINUSB_PIPE_INFORMATION_EX, *PWINUSB_PIPE_INFORMATION_EX;
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef struct _WINUSB_SETUP_PACKET {
 	UCHAR RequestType;
@@ -457,7 +461,7 @@ typedef struct _WINUSB_SETUP_PACKET {
 	USHORT Length;
 } WINUSB_SETUP_PACKET, *PWINUSB_SETUP_PACKET;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef PVOID WINUSB_INTERFACE_HANDLE, *PWINUSB_INTERFACE_HANDLE;
 typedef PVOID WINUSB_ISOCH_BUFFER_HANDLE, *PWINUSB_ISOCH_BUFFER_HANDLE;
@@ -497,7 +501,7 @@ typedef BOOL (WINAPI *WinUsb_QueryPipeEx_t)(
 	PWINUSB_PIPE_INFORMATION_EX PipeInformationEx
 );
 typedef BOOL (WINAPI *WinUsb_ReadIsochPipeAsap_t)(
-	PWINUSB_ISOCH_BUFFER_HANDLE BufferHandle,
+	WINUSB_ISOCH_BUFFER_HANDLE BufferHandle,
 	ULONG Offset,
 	ULONG Length,
 	BOOL ContinueStream,
@@ -533,6 +537,13 @@ typedef BOOL (WINAPI *WinUsb_SetPipePolicy_t)(
 	UCHAR PipeID,
 	ULONG PolicyType,
 	ULONG ValueLength,
+	PVOID Value
+);
+typedef BOOL (WINAPI *WinUsb_GetPipePolicy_t)(
+	WINUSB_INTERFACE_HANDLE InterfaceHandle,
+	UCHAR PipeID,
+	ULONG PolicyType,
+	PULONG ValueLength,
 	PVOID Value
 );
 typedef BOOL (WINAPI *WinUsb_UnregisterIsochBuffer_t)(
@@ -666,6 +677,7 @@ struct winusb_interface {
 	WinUsb_ResetPipe_t ResetPipe;
 	WinUsb_SetCurrentAlternateSetting_t SetCurrentAlternateSetting;
 	WinUsb_SetPipePolicy_t SetPipePolicy;
+	WinUsb_GetPipePolicy_t GetPipePolicy;
 	WinUsb_WritePipe_t WritePipe;
 	union {
 		struct {
@@ -691,7 +703,7 @@ struct winusb_interface {
 #define HIDP_STATUS_SUCCESS	0x110000
 typedef void * PHIDP_PREPARSED_DATA;
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef struct _HIDD_ATTIRBUTES {
 	ULONG Size;
@@ -700,7 +712,7 @@ typedef struct _HIDD_ATTIRBUTES {
 	USHORT VersionNumber;
 } HIDD_ATTRIBUTES, *PHIDD_ATTRIBUTES;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef USHORT USAGE;
 typedef struct _HIDP_CAPS {

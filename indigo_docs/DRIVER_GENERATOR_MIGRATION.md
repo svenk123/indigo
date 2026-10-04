@@ -1,0 +1,552 @@
+# INDIGO Driver Generator — Migration Guide
+
+Revision: 03.04.2026 (draft)
+
+Author: **Rumen G. Bogdanovski**
+
+e-mail: *rumenastro@gmail.com*
+
+## Overview
+
+The INDIGO driver generator (`indigo_generator`) is a two-way code tool that eliminates hand-written boilerplate from driver development. Instead of writing the repetitive scaffolding that every driver needs — property allocation, change dispatching, connect/disconnect handling, detach cleanup — you describe the driver in a compact `.driver` definition file and the generator produces the complete `.c`, `.h`, and `_main.c` sources.
+
+The tool works in two directions:
+
+* **`.driver` → `.c`** (default mode) — reads the definition file and generates all C sources.
+* **`.c` → `.driver`** (`-c` / `--create` mode) — reads an existing C source file and extracts a skeleton definition file from it.
+
+The `-c` direction is the **migration path** for drivers that were written before the generator existed.
+
+## The Definition File Format at a Glance
+
+A `.driver` file has this overall shape:
+
+```c
+driver <name> {
+    label = "Human-readable label";
+    author = "Author Name <email>";
+    copyright = "Copyright notice";
+    version = <integer>;
+	multi_device_support = true; // optional; default false
+	max_devices = 16;            // optional; default 5, hot-plug drivers only
+    serial;          // or libusb { ... }, hid { ... }, or sdk { ... }
+
+    define { /* #define constants */ }
+    include { /* extra #include lines */ }
+    data { /* extra fields added to the private_data struct */ }
+    code { /* shared helper functions */ }
+
+    <device_type> {
+        name = "Device Name";
+		id = logical_device_id; // optional unique C identifier for repeated device classes
+        interface = INDIGO_INTERFACE_XYZ;
+        additional_instances = true;
+
+        on_attach { /* runs during aux_attach */ }
+        on_timer {
+            /* Main polling loop — reads device state and updates related properties.
+             * The callback is named <dev>_timer_callback (e.g. aux_timer_callback).
+             * The user MUST reschedule it at the end:
+             *   indigo_execute_handler_in(device, 1, <dev>_timer_callback);
+             */
+        }
+        on_connect { /* body of the connected branch in the connection handler */ }
+        on_disconnect { /* body of the disconnected branch */ }
+        on_detach { /* extra cleanup before aux_detach */ }
+
+        <type> <PROPERTY_HANDLE> {
+            name = PROPERTY_NAME_PROPERTY_NAME;
+            group = GROUP_CONSTANT;
+            label = "Property label";
+            perm = INDIGO_RO_PERM;        // optional, default RW
+            rule = INDIGO_ANY_OF_MANY_RULE; // switches only
+            persistent = true;             // optional
+            always_defined = true;         // optional
+            pass_through_change = true;    // optional, continue to type handler after matching this property
+            on_change { /* handler code */ }
+
+            item <ITEM_HANDLE> {
+                name = ITEM_NAME_ITEM_NAME;
+                label = "Item label";
+                value = <default>;
+                min = ...; max = ...; step = ...; format = "..."; // numbers
+            }
+        }
+    }
+}
+```
+
+For SDK-based USB devices where the vendor SDK has its own enumeration ids, use an `sdk` block instead of preserving hand-written hot-plug scaffolding:
+
+```c
+sdk {
+    hotplug = true;
+    vid = 0x1234;
+    pid = 0x5678;
+    plug {
+        /* Runs after generated USB descriptor/vid/pid filtering with
+         * libusb_device *dev, struct libusb_device_descriptor descriptor,
+         * <driver>_private_data *private_data, char name[INDIGO_NAME_SIZE],
+         * and bool plug_result.
+         * Fill private_data and name, or set plug_result = false to reject.
+         */
+    }
+    unplug {
+        /* Runs with indigo_device *device, <driver>_private_data *private_data,
+         * and libusb_device *dev before generated detach/free.
+         */
+    }
+}
+```
+
+Generated hot-plug drivers create one driver-wide handler queue in addition to
+the usual per-device queues. The libusb callback enqueues arrival/removal work on
+that driver queue, and generated `CONNECTION` handling for hot-plug devices uses
+the same queue. This serializes SDK enumeration, attach/detach and open/close
+operations across all instances of one generated driver.
+
+For SDKs whose enumeration order is independent of libusb arrival order, an
+optional `sdk.unplug_match` block selects removal by SDK identity. It runs for
+each attached logical device on a removal event with `device`, `private_data`,
+`dev` (the event's USB pointer) and `bool unplug_result`. The initial result is
+USB-pointer equality; assign it from a checked SDK presence query instead:
+
+```c
+unplug_match {
+    unplug_result = vendor_device_is_absent(private_data->sdk_id);
+}
+```
+
+The block must only determine presence, without detaching/freeing devices or
+releasing USB references. Treat failed/incomplete enumeration as inconclusive,
+not proof that a device is absent. Existing `unplug` cleanup runs after a match.
+Multiple matched physical devices are allowed; generated cleanup frees each
+shared private-data allocation and its retained USB reference exactly once.
+The event reference is released separately. For drivers opting into this block,
+shutdown uses the existing `last_action` to bypass SDK presence checks and
+releases each device's stored USB reference. This option does not change
+queue scheduling or shutdown synchronization. Drivers without this block retain their existing generated output.
+
+The `<device_type>` keyword matches the device's INDIGO class (`aux`, `wheel`, `focuser`, `ccd`, `mount`, `guider`, `rotator`, `dome`, `gps`, etc.).
+
+When a driver exposes the same class more than once, give each repeated block a unique `id` before any properties or code blocks:
+
+```c
+ccd {
+	id = imager_ccd;
+	name = "Imager";
+}
+
+ccd {
+	id = guider_ccd;
+	name = "Guider camera";
+}
+```
+
+The device type continues to select the base header and `indigo_ccd_*` lifecycle API. The `id` is used only for generated C symbols, code-block namespaces, templates and logical-device pointers. Omitting it retains the historical type-based names. Device ids must be unique within a driver and must precede properties and code blocks. Reverse extraction preserves explicit ids.
+
+Drivers that intentionally support more than one logical or physical device can opt into the corresponding `indigo_driver_info` metadata flag with `multi_device_support = true` at driver scope. The default is `false`, so omitting the attribute preserves historical generated output. The setting affects both the normal entry point and an unsupported-architecture metadata fallback, and reverse extraction preserves an enabled setting.
+
+A hot-plug driver - one with a `libusb`, `hid` or `sdk` block - keeps its logical devices in an array of `MAX_DEVICES` entries, which the generator emits as 5 by default. Every logical device takes one entry, so a camera that also publishes a guider and a filter wheel uses three, and five entries are exhausted by two such cameras: the third Atik camera of a three-camera setup was refused for exactly that reason. Raise the capacity for such a driver with `max_devices = <n>` at driver scope. Reverse extraction emits the attribute only when the generated capacity differs from the default, so an unchanged driver keeps its historical output.
+
+Running the generator with a `.driver` file produces:
+
+| Generated file | Contents |
+|----------------|----------|
+| `indigo_<type>_<name>.h` | Public header with the entry point declaration |
+| `indigo_<type>_<name>.c` (or `.cpp` with `cpp = true`) | Full driver implementation |
+| `indigo_<type>_<name>_main.c` | Standalone executable wrapper |
+
+The generated `.c` is marked `// This file generated from …driver` at the top and **must not be edited by hand** — all changes belong in the `.driver` file. After editing the `.driver`, re-run the generator to refresh the `.c`.
+
+The generator recognizes a GNU Lesser General Public License notice in the `.driver` source and emits the LGPL 2.1-or-later notice in the generated `.c`, `.h`, and `_main.c` files. Definitions without that notice continue to use the standard INDIGO Astronomy open-source license header. Reverse extraction preserves the recognized LGPL license family in the resulting `.driver` file.
+
+The build system picks this up automatically: `Makefile.drv` runs `indigo_generator` as a dependency of the object file whenever the `.driver` file is newer than the `.c` source.
+
+---
+
+## Optional architecture restriction
+
+By default a driver has no architecture restriction; omitting this attribute leaves generated output unchanged. A driver can opt into a C preprocessor expression:
+
+```c
+supported_architecture = "!defined(__i386__)";
+```
+
+The expression guards the complete implementation, including SDK headers. On an unsupported target, the generated public entry point still provides INFO metadata and returns `INDIGO_UNSUPPORTED_ARCH` for INIT and SHUTDOWN. The public header and standalone wrapper keep their usual form. Reverse extraction preserves the expression.
+
+Use platform macros `INDIGO_LINUX`, `INDIGO_MACOS` and `INDIGO_WINDOWS` for platform conditions. For example, to restrict only the macOS build while leaving other platforms unchanged:
+
+```c
+// macOS Intel only:
+supported_architecture = "!defined(INDIGO_MACOS) || defined(__x86_64__)";
+// macOS Apple Silicon only:
+supported_architecture = "!defined(INDIGO_MACOS) || defined(__aarch64__)";
+```
+
+These are alternative examples, not two attributes to place in the same driver. Astroasis supports both macOS architectures and therefore only excludes i386. The build must provide its normal INDIGO platform macro when evaluating platform-specific expressions.
+
+---
+
+## Approach 1: Write the `.driver` File from Scratch
+
+This is the cleanest path when you are comfortable reading the existing `.c` thoroughly before writing the definition.
+
+### Step-by-step
+
+**1. Study the existing driver**
+
+Read the `.c` file and note:
+
+* What preprocessor `#define` constants it uses.
+* What extra `#include` files it needs beyond the standard set.
+* What extra fields are stored in the private data struct.
+* Which helper functions are shared (`code`) vs. device-specific (`<device>.code`).
+* The `on_attach` initialisation, including `INFO_PROPERTY->count` and default values.
+* The connection / disconnection sequence (`on_connect` / `on_disconnect`).
+* The timer callback body (`on_timer`).
+* Every property: type (`switch`, `number`, `text`, `light`), name constant, group, label, permission, rule, items with their defaults, ranges, formats, and any `on_change` handler code.
+
+**2. Write the `.driver` file**
+
+Follow the format above. For the `serial` connection type, write `serial;`. If the device is identified by port pattern (vendor, product, or vid/pid) you can add a `serial { pattern { ... } }` block. For direct USB handles use `libusb` or `hid`; for SDK-based hot-plug with SDK ids/model records use `sdk { hotplug = true; plug { ... } unplug { ... } }`. Refer to existing `.driver` files in `indigo_drivers/` for examples.
+
+Name the open/close helper functions `<driver_name>_open` and `<driver_name>_close`. The generator looks for functions with exactly these names in the `code` block and wires them into the connection handler automatically. For example, for driver `svbpowerbox`, name them `svbpowerbox_open` and `svbpowerbox_close`.
+
+Virtual devices normally connect unconditionally. A virtual `on_connect` block that can fail may assign the generator-provided `connection_result` variable. Referencing that variable opts the block into fallible connection handling: true defines the connected properties and reports OK, while false restores the disconnected switch and reports ALERT. Virtual blocks that do not reference `connection_result` retain the unconditional connection path.
+
+**3. Run the generator**
+
+```sh
+cd indigo_drivers/<driver_dir>
+../../build/bin/indigo_generator indigo_<type>_<name>.driver
+```
+
+This overwrites (or creates) the `.c`, `.h`, and `_main.c` files in the same directory.
+
+**4. Compile and test**
+
+```sh
+make -f ../../Makefile.drv
+```
+
+Check for compilation errors. Warnings about `snprintf` output truncation into 128-byte label fields are pre-existing and expected; no errors should appear.
+
+**5. Clean up the directory**
+
+Once the `.driver` file is in place and the generator runs cleanly, the old hand-written `.c` is replaced by the generated one. Keep only:
+
+* The `.driver` file (the new source of truth).
+* The generated `.c`, `.h`, `_main.c` (built artefacts, but committed).
+* Any supporting files (`PROTOCOL.md`, simulator, etc.).
+
+**Example driver**: `indigo_drivers/aux_wbplusv3/indigo_aux_wbplusv3.driver`
+
+---
+
+## Approach 2: Annotate the Existing `.c` and Extract with `-c`
+
+This is the faster path when you do not want to write the full `.driver` by hand. You annotate the existing C source with structured comments that mark the code blocks the generator needs, then ask the generator to extract them into a skeleton `.driver` file.
+
+### Annotation Comment Syntax
+
+Annotations have the form:
+
+```c
+//+ <section_id>
+... code to be extracted ...
+//- <section_id>
+```
+
+The `//+` comment opens a section and `//-` closes it. The generator uses the `<section_id>` to decide where the code block goes in the `.driver` file.
+
+### Available Section IDs
+
+| Section ID | Where it goes in `.driver` | Typical location in `.c` |
+|------------|---------------------------|--------------------------|
+| `define` | `define { }` block | Near the top, after constant `#define`s |
+| `include` | `include { }` block | Extra `#include` lines |
+| `data` | `data { }` block | Inside the private_data `typedef struct` |
+| `code` | Top-level `code { }` block | Shared helper functions |
+| `<dev>.code` | `code { }` inside the device block | Device-specific helpers |
+| `<dev>.on_attach` | `on_attach { }` in the device block | Body of `aux_attach` |
+| `<dev>.on_timer` | `on_timer { }` in the device block | Body of the periodic timer callback (`<dev>_timer_callback`). This is the main polling loop that reads device state and updates properties. **The user must reschedule it at the end** with `indigo_execute_handler_in(device, 1, <dev>_timer_callback)`. |
+| `<dev>.on_connect` | `on_connect { }` in the device block | Connected branch of the connection handler |
+| `<dev>.on_disconnect` | `on_disconnect { }` in the device block | Disconnected branch |
+| `<dev>.on_detach` | `on_detach { }` in the device block | Body of `aux_detach` |
+| `<dev>.<PROP>.on_change` | `on_change { }` inside the matching property block | Inside the matching `*_handler` function |
+| `<dev>.<PROP>.on_attach` | `on_attach { }` inside the matching property block | Property-specific attach initialisation |
+
+`<dev>` is the lowercase device class (`aux`, `wheel`, `focuser`, …).
+`<PROP>` is the property handle **without** the `_PROPERTY` suffix (e.g. `AUX_OUTLET_NAMES`, `WHEEL_SLOT`).
+
+### Minimal Annotation Example
+
+Below is a fragment of a hand-written driver with annotations added for migration:
+
+```c
+/* in the private_data typedef struct: */
+typedef struct {
+    indigo_uni_handle *handle;
+    //+ data
+    int slot_count;
+    int current_slot;
+    //- data
+} mywheel_private_data;
+
+/* shared low-level helpers: */
+//+ code
+static bool mywheel_command(indigo_device *device, const char *cmd, char *response) {
+    ...
+}
+//- code
+
+/* device-level code (device-specific helpers): */
+//+ wheel.code
+static bool mywheel_get_slot(indigo_device *device) {
+    ...
+}
+//- wheel.code
+
+/* in aux_attach, the custom on_attach part: */
+static indigo_result aux_attach(indigo_device *device) {
+    if (indigo_wheel_attach(...) == INDIGO_OK) {
+        //+ wheel.on_attach
+        WHEEL_SLOT_PROPERTY->count = 8;
+        //- wheel.on_attach
+        ...
+    }
+}
+
+/* in the connection handler, connected branch: */
+//+ wheel.on_connect
+PRIVATE_DATA->handle = mywheel_open(DEVICE_PORT_ITEM->text.value);
+if (PRIVATE_DATA->handle) {
+    mywheel_get_slot(device);
+    ...
+}
+//- wheel.on_connect
+
+/* in the connection handler, disconnected branch: */
+//+ wheel.on_disconnect
+mywheel_close(device);
+//- wheel.on_disconnect
+
+/* in the timer callback body — the generated function is named wheel_timer_callback: */
+    //+ wheel.on_timer
+    if (mywheel_get_slot(device)) {
+        WHEEL_SLOT_ITEM->number.value = PRIVATE_DATA->current_slot;
+        indigo_update_property(device, WHEEL_SLOT_PROPERTY, NULL);
+    }
+    // Reschedule the timer — this line is REQUIRED at the end of on_timer:
+    indigo_execute_handler_in(device, 1, wheel_timer_callback);
+    //- wheel.on_timer
+
+/* in the WHEEL_SLOT change handler: */
+    //+ wheel.WHEEL_SLOT.on_change
+    mywheel_set_slot(device, (int)WHEEL_SLOT_ITEM->number.target);
+    //- wheel.WHEEL_SLOT.on_change
+```
+
+### Step-by-step
+
+**1. Add annotations to the existing `.c` file**
+
+Place `//+` / `//-` pairs around every code region that belongs to a named section.
+You do not need to annotate everything at once — the generator uses what it finds and leaves the rest as placeholders in the output.
+
+**2. Run the generator with `-c`**
+
+```sh
+cd indigo_drivers/<driver_dir>
+../../build/bin/indigo_generator -c indigo_<type>_<name>.driver
+```
+
+The generator reads `indigo_<type>_<name>.c` (the `.driver` extension is swapped to `.c` to find the source), extracts all annotated sections, scans `indigo_init_*_property` and `indigo_init_*_item` calls for property skeletons, and writes the `.driver` file.
+
+**3. Review and complete the `.driver` file**
+
+The extracted `.driver` will be mostly correct but may need manual completion:
+
+* Property `perm`, `rule`, `persistent`, `always_defined` flags — set them if the defaults are wrong.
+* Item `value`, `min`, `max`, `step`, `format` — the generator extracts what it can from init calls, but complex expressions may be left as `0`.
+* The `name`, `interface`, `additional_instances` fields on the device block need to be verified.
+* Connection type (`serial;`, `libusb { }`, etc.) needs to be added if it was not detected.
+
+**4. Regenerate the C sources**
+
+```sh
+../../build/bin/indigo_generator indigo_<type>_<name>.driver
+```
+
+From this point forward the `.driver` file is the source of truth and the `.c` is generated. Do not edit the `.c` by hand — make all changes in the `.driver` file and regenerate.
+
+**5. Compile and verify**
+
+```sh
+make -f ../../Makefile.drv
+```
+
+---
+
+## Choosing an Approach
+
+| Situation | Recommended approach |
+|-----------|----------------------|
+| New driver being written from scratch | **Approach 1** (write `.driver` directly) |
+| Large, complex existing driver with intricate connection logic | **Approach 1** (read and rewrite fully) |
+| Simple existing driver with clear separation of concerns | **Approach 2** (annotate and extract) |
+| Quick first pass, intending to clean up later | **Approach 2** (annotate and extract), then review and tighten |
+
+In practice, **Approach 2** is a good way to get started quickly. After extraction you may still want to restructure or clean up the resulting `.driver`, but the annotation pass guarantees that no code is lost and the first generated `.c` is functionally equivalent to the original.
+
+---
+
+## What the Generator Does and Does Not Do
+
+### What it handles automatically
+
+* All property allocation, registration, deletion, and release.
+* The `aux_attach` / `aux_detach` / `aux_enumerate_properties` / `aux_change_property` scaffolding.
+* The `indigo_execute_handler` dispatch for every non-empty `on_change` block.
+* The connection handler structure including the `svbpowerbox_open` / `svbpowerbox_close` calls (functions with the `<driver_name>_open` / `<driver_name>_close` naming convention are wired in automatically).
+* The `indigo_execute_handler_in(device, 1, aux_timer_callback)` loop.
+* `DRIVER_VERSION`, `DRIVER_NAME`, `DRIVER_LABEL`, and the `indigo_<type>_<name>()` entry point.
+* `indigo_safe_malloc`, `indigo_attach_device`, `INDIGO_DRIVER_INIT/SHUTDOWN/INFO` lifecycle.
+* `_main.c` for standalone driver executables.
+
+### What you still write
+
+* All actual device communication (open/close/read/write, protocol framing, checksums).
+* The body of `on_timer`, `on_connect`, `on_disconnect`, `on_attach`.
+* The body of every `on_change` handler that needs driver-specific behavior.
+* Any extra helper functions in `code` or `<dev>.code`.
+* Extra fields in `data`.
+* Extra `#define` constants in `define`.
+
+### Special handling
+
+An empty `on_change { }` block has special copy-only semantics. When a writable
+property only needs to accept new values, leave the block empty; the generator
+emits a direct change branch that copies the incoming values or targets, sets
+the property state to `INDIGO_OK_STATE`, calls `indigo_update_property()`, and
+returns `INDIGO_OK` without scheduling a handler. This applies to both
+driver-defined properties and inherited properties. For inherited properties,
+omitting `on_change` entirely means that no generated change branch is emitted,
+which is the right choice for read-only or pass-through properties.
+
+By default, every generated property change branch finishes with `return INDIGO_OK`, so a property handled by the driver-specific callback is not passed to the base type handler. Set `pass_through_change = true` on a property when the generated branch should still run but then continue to the final `indigo_<type>_change_property(device, client, property)` call.
+
+Four mount-specific properties receive special treatment: MOUNT_EQUATORIAL_COORDINATES, MOUNT_MOTION_RA, MOUNT_MOTION_DEC, and MOUNT_TRACKING.
+For each of these the generator emits a park-state guard in two places, and both are needed.
+
+The first is an admission check in the `change_property` branch, before the requested values are copied into the property and before any user-supplied on_change_request code runs.
+It checks whether MOUNT_PARK_PROPERTY is active and the mount is in the parked state; if so, it marks every item for update, sets the property state to INDIGO_ALERT_STATE, publishes the property with the message "Mount is parked!", and returns INDIGO_OK without scheduling the handler.
+Because it runs before the copy, a request refused this way leaves the property holding the driver's own state instead of the refused values, so a parked mount cannot report itself as tracking or moving, and no intermediate INDIGO_BUSY_STATE is published.
+
+The second is the same check at the top of the generated handler, before any user-supplied on_change code runs.
+It covers the request that was admitted while the mount was still unparked but only reaches the hardware after a park request has been accepted.
+The park switch flips as soon as the park request is copied in its own change branch, which happens before the park slew starts, so re-reading it in the handler keeps the axes still in that window.
+This ensures that slewing, tracking, or motion commands are rejected while the mount is parked, without requiring the driver author to replicate either check manually.
+
+MOUNT_EQUATORIAL_COORDINATES has an additional distinction in how the handler is finalised.
+For every other property the generator appends a call to indigo_update_property() at the end of the handler (unless a custom _finalizer is detected in the on_change block).
+For MOUNT_EQUATORIAL_COORDINATES this call is replaced by indigo_update_coordinates(), which performs the standard INDIGO coordinate update and notification sequence appropriate for equatorial position reporting.
+This means a driver author does not need to call indigo_update_coordinates() explicitly inside on_change — the generator guarantees it is always the final step of the coordinates handler.
+
+If a device block contains an on_timer block, the generator produces a *_timer_callback() function whose body is the user-supplied code, guarded by an IS_CONNECTED check at the top — the callback silently returns if the device is no longer connected.
+The first invocation of this callback is triggered automatically via indigo_execute_handler(), which runs it once as an immediate asynchronous one-shot call.
+It is queued as the very last step of the connection handler, after indigo_<class>_change_property(device, NULL, CONNECTION_PROPERTY) has published the connection and defined the class properties, and only when IS_CONNECTED holds.
+That placement is required rather than cosmetic: in a hot-plug driver the connection handler runs on the per-driver queue while the callback runs on the device queue, so a callback queued any earlier could run before CONNECTION left INDIGO_BUSY_STATE, hit its own IS_CONNECTED guard and return. Because nothing else queues it, the single dropped call took a self-rescheduling poll with it for the whole session.
+There is no implicit periodic rescheduling: if the callback is meant to repeat on a timer, the on_timer code must reschedule it explicitly (typically with indigo_reschedule_timer() or equivalent).
+On disconnection the generated handler calls indigo_cancel_pending_handlers() before tearing down properties, which cancels any timer the user code may have armed, so no special cleanup is needed in on_disconnect for this purpose.
+Cancelling also drops change handlers that were queued but had not run yet, and their properties would otherwise stay BUSY: the BUSY guard of `INDIGO_COPY_*_PROCESS_CHANGE` would then silently refuse every later change to them. After on_disconnect, the generated handler therefore returns every declared property still in INDIGO_BUSY_STATE to INDIGO_OK_STATE, so the next session starts in a clean state. An `always_defined` property is republished at once, because clients still see it while the device is disconnected. The others take the clean state into their definition on the next connect. CONNECTION and CONFIG are left alone, because the framework owns their state. Code in on_disconnect still sees the real BUSY states, for example to abort an exposure that was running.
+
+---
+
+## Tips and Caveats
+
+* **Do not edit generated `.c` files.** The next `make` will overwrite them. All changes go in the `.driver` file.
+* **Naming convention for open/close.** Name the functions `<driver_name>_open(device)` → `bool` and `<driver_name>_close(device)` → `void`. This is the convention the generator recognises and wires into the connection handler.
+* **One device block per device class.** If the driver exposes both a focuser and a rotator (like `indigo_focuser_primaluce`), there are two device blocks in the `.driver` file, each with its own `on_connect`, `on_timer`, properties, etc.
+* **Property handle vs. property name.** In `//+` markers, use the C handle **without** `_PROPERTY` (e.g. `WHEEL_SLOT`, not `WHEEL_SLOT_PROPERTY`).
+* **Re-running `-c` overwrites the `.driver` file.** Keep it under version control before running with `-c` again.
+* **Build integration.** The `Makefile.drv` already runs `indigo_generator` automatically when the `.driver` file is newer than the `.c` file. No extra make target is needed.
+
+---
+
+## See Also
+
+* [INDIGO Driver Development Basics](DRIVER_DEVELOPMENT_BASICS.md) — overview of the INDIGO driver model.
+* `indigo_tools/indigo_generator.c` — the generator source.
+* `indigo_drivers/aux_wbplusv3/` — reference driver fully managed by the generator.
+* `indigo_drivers/wheel_trutek/` — example of annotation markers (`//+` / `//-`) in a converted driver.
+* `indigo_drivers/focuser_primaluce/` — multi-device driver with both `focuser` and `rotator` blocks and `on_connect` / `on_disconnect` annotations.
+
+---
+
+Clear skies!
+
+## Optional SDK logical devices and names
+
+Within a device block of an `sdk` hot-plug driver, `attach_if = <C expression>;` conditionally emits that logical device's allocation/attach. The expression runs in the generated plug handler with `private_data`, `name` and previously attached logical-device variables in scope. For an optional guider use `attach_if = ccd_attached && private_data->property.isHasST4Port;` so a failed master attachment cannot leave an orphan slave. Reserve sufficient free logical slots in `sdk.plug` before accepting a multi-device camera.
+
+`name_value = <C string expression>;` copies an SDK-derived logical-device name with a literal `%s` format. Use it for exact suffix placement, e.g. `private_data->guider_name`; it does not interpret user-supplied `%` characters as a format string. The ordinary `name` remains the static template/format fallback. Both attributes currently apply only to SDK hot-plug attachment; omitting them preserves existing generated output.
+
+## Completion callback naming and request guards
+
+Name a delayed callback that completes a property operation `<operation>_finalizer`, for example `guider_ra_finalizer` and `guider_dec_finalizer`. Use that name consistently in declarations, scheduling and cancellation. The generator detects `_finalizer` in `on_change` and suppresses both its default OK assignment and final property update. The initiating block must therefore explicitly set and publish BUSY (or immediate OK/ALERT); the finalizer publishes completion. Do not hide this asynchronous lifecycle behind `*_timer_callback*` names. Periodic polling callbacks remain ordinary callbacks.
+
+An optional property `reject_change { condition = <C expression>; message = "<text>"; }` declares a guard that rejects an incoming change before any value is copied. The generator emits the condition test at the top of the matched bus change branch, ahead of `on_change_request`, and on a match it marks every item for update, sets the property to `INDIGO_ALERT_STATE`, publishes the property with the message and returns. Marking the items is what forces the actual driver-side values back to the client; without it the protocol adapter omits unchanged items and the rejected value stays visible in the client. Repeat the block to declare several conditions with their own messages; they are tested in declaration order. Prefer it over a hand-written guard in `on_change_request`, which cannot express the rejection without duplicating that boilerplate.
+
+An optional property `on_change_request { ... }` runs in the matched bus change branch before copying requested values or dispatching the handler. Keep it short and free of SDK calls or waits. Use it for request-scoped bookkeeping that `reject_change` cannot express. It has no generated state/update epilogue; an early return must publish any required rejection itself. SDK multi-device hot-plug connection changes are serialized on the generated per-driver queue, including secondary logical connections and disconnects, so SDK lifetime and the generated shared count have a single owner.
+
+## Bounded SDK discovery retries
+
+`sdk { discovery_retries = 6; ... }` opts into up to six additional discovery attempts at 0.5-second intervals after a USB arrival cannot attach a device. The value is a nonnegative integer C expression; omission disables retry scaffolding. It is intended for SDK enumeration that becomes ready after libusb reports arrival. Successful attachment and duplicate arrivals do not reset the retry budget. The generated driver queue owns retained USB references and retry records; removal cancels that device's retry, and accepted shutdown prevents new retries, stops the queue and releases remaining records. No sleeping loop or detached timer is needed in `sdk.plug`. Other SDK drivers are unchanged until they opt in.
+
+## Abort handler priority
+
+Generated asynchronous handlers for `CCD_ABORT_EXPOSURE`, `FOCUSER_ABORT_MOTION`, `ROTATOR_ABORT_MOTION`, `MOUNT_ABORT_MOTION`, `DOME_ABORT_MOTION` and `POLARALIGN_ABORT_MOTION` use `INDIGO_COPY_VALUES_PROCESS_URGENT_CHANGE`, which queues them at `INDIGO_TASK_PRIORITY_URGENT`. The normal value-copy, BUSY guard and immediate BUSY publication are retained. Explicit synchronous handlers (`asynchronous_change = false`) remain synchronous; empty acceptance-only handlers are unchanged. Guiding retains its existing TIME dispatch and ordinary handlers retain NORMAL dispatch. Priority orders ready queued work; it cannot interrupt a running handler or SDK call.
+
+An urgent abort can overtake a queued start whose property is already BUSY. Abort implementations cancel the associated pending start handlers as well as their delayed completion callbacks and settle the affected properties even when the hardware start has not run. This cancellation belongs to the driver because the generator does not know which operations a particular abort stops.
+
+## Generating a C++ implementation
+
+Set `cpp = true;` at driver scope to emit `indigo_<type>_<name>.cpp` directly.
+The default is `false`: omitted or explicit `cpp = false;` emits the same `.c`
+as before. The public `.h` and standalone `_main.c` filenames and C linkage
+remain unchanged. For example:
+
+```c
+driver qhy {
+    cpp = true;
+    // SDK includes, properties and device blocks...
+}
+```
+
+Reverse extraction with `indigo_generator -c <target>.driver` detects a `.cpp`
+source when no same-basename `.c` exists and writes `cpp = true;` into the
+extracted definition. As before, a `.c` takes precedence when both files exist.
+Changing the flag does not delete the previous output file: remove obsolete
+source references deliberately when migrating, so automatic source discovery
+does not compile both same-basename implementations. Generate once before
+building a new definition, and keep generated outputs checked in.
+
+Generated allocations and SDK retry callback data use explicit pointer casts;
+USB event masks use `libusb_hotplug_event`, and INIT/SHUTDOWN have separate case
+blocks. These constructs also compile as C11 and do not change allocation or
+queue ownership. Reverse extraction accepts USB registrations with and without
+the event-mask cast. Handwritten `.driver` blocks must themselves be valid for
+the selected compiler; the flag is an output-language selector, not a translator
+of arbitrary C code into portable C++.
+
+### SDK discovery without hot-plug
+
+`sdk { hotplug = false; ... }` queues one initial USB inventory pass and invokes
+the existing `plug` block with descriptor filtering for each initial device.
+It registers no USB arrival/removal callback and ignores `discovery_retries`.
+Connect hardware before INIT; new devices require SHUTDOWN/INIT. The shared
+queue still serializes discovery and connection handling, and SHUTDOWN drains
+that queue before generated detach/free and the driver's `on_shutdown` block.
+The default `hotplug = true` behavior is unchanged.

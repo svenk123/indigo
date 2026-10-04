@@ -1,9 +1,9 @@
-// Copyright (c) 2024 Moravian Instruments
+// Copyright (c) 2024-2026 Moravian Instruments
 // All rights reserved.
-//
-// You can use this software under the terms of 'INDIGO Astronomy
+
+// You may use this software under the terms of 'INDIGO Astronomy
 // open-source license' (see LICENSE.md).
-//
+
 // THIS SOFTWARE IS PROVIDED BY THE AUTHORS 'AS IS' AND ANY EXPRESS
 // OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 // WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -16,26 +16,31 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// version history
-// 2.0 by Jakub Smutny <info@gxccd.com>
-
-/** INDIGO Moravian Instruments SFW driver
- \file indigo_wheel_mi.h
- */
+// This file generated from indigo_wheel_mi.driver
 
 #ifndef wheel_mi_h
 #define wheel_mi_h
 
 #include <indigo/indigo_driver.h>
 
+#if defined(INDIGO_WINDOWS)
+#if defined(INDIGO_WINDOWS_DLL)
+#define INDIGO_EXTERN __declspec(dllexport)
+#else
+#define INDIGO_EXTERN __declspec(dllimport)
+#endif
+#else
+#define INDIGO_EXTERN extern
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-extern indigo_result indigo_wheel_mi(indigo_driver_action action, indigo_driver_info *info);
+INDIGO_EXTERN indigo_result indigo_wheel_mi(indigo_driver_action action, indigo_driver_info *info);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* wheel_mi_h */
+#endif

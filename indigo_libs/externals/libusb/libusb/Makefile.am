@@ -2,6 +2,11 @@ AUTOMAKE_OPTIONS = subdir-objects
 
 AM_CFLAGS += -fvisibility=hidden $(THREAD_CFLAGS)
 AM_CXXFLAGS += -fvisibility=hidden $(THREAD_CFLAGS)
+# version_describe.h is generated into $(builddir)/libusb. libusb-1.0.rc
+# does `#include "version_describe.h"`, so the windres preprocessor must
+# search the build directory for it (out-of-tree builds otherwise fail
+# because the file lives outside the .rc's source dir).
+AM_RCFLAGS = --include-dir=$(top_builddir)/libusb
 
 lib_LTLIBRARIES = libusb-1.0.la
 
@@ -20,6 +25,7 @@ OS_DARWIN_SRC = os/darwin_usb.h os/darwin_usb.c
 OS_HAIKU_SRC = os/haiku_usb.h os/haiku_usb_backend.cpp \
 	       os/haiku_pollfs.cpp os/haiku_usb_raw.h os/haiku_usb_raw.cpp
 OS_LINUX_SRC = os/linux_usbfs.h os/linux_usbfs.c
+OS_EMSCRIPTEN_SRC = os/emscripten_webusb.cpp
 OS_NETBSD_SRC = os/netbsd_usb.c
 OS_NULL_SRC = os/null_usb.c
 OS_OPENBSD_SRC = os/openbsd_usb.c
@@ -29,12 +35,18 @@ OS_WINDOWS_SRC = libusb-1.0.def libusb-1.0.rc \
 		 os/windows_usbdk.h os/windows_usbdk.c \
 		 os/windows_winusb.h os/windows_winusb.c
 
+if LIBUSB_WINDOWS_HOTPLUG
+OS_WINDOWS_SRC += os/windows_hotplug.h os/windows_hotplug.c
+endif
+
 if OS_DARWIN
 OS_SRC = $(OS_DARWIN_SRC)
 endif
 
+noinst_LTLIBRARIES =
+
 if OS_HAIKU
-noinst_LTLIBRARIES = libusb_haiku.la
+noinst_LTLIBRARIES += libusb_haiku.la
 libusb_haiku_la_SOURCES = $(OS_HAIKU_SRC)
 libusb_1_0_la_LIBADD = libusb_haiku.la
 endif
@@ -46,6 +58,13 @@ OS_SRC += os/linux_udev.c
 else
 OS_SRC += os/linux_netlink.c
 endif
+endif
+
+if OS_EMSCRIPTEN
+noinst_LTLIBRARIES += libusb_emscripten.la
+libusb_emscripten_la_SOURCES = $(OS_EMSCRIPTEN_SRC)
+AM_CXXFLAGS += -std=c++20
+libusb_1_0_la_LIBADD = libusb_emscripten.la
 endif
 
 if OS_NETBSD
@@ -84,5 +103,21 @@ libusb_1_0_la_LDFLAGS = $(LT_LDFLAGS) $(EXTRA_LDFLAGS)
 libusb_1_0_la_SOURCES = libusbi.h version.h version_nano.h \
 	core.c descriptor.c hotplug.c io.c strerror.c sync.c \
 	$(PLATFORM_SRC) $(OS_SRC)
+
+# version_describe.h is regenerated on every build by build-aux/gen-describe.sh.
+# It only rewrites the file when its content changed, so unchanged builds
+# stay incremental. core.c and libusb-1.0.rc include it to populate the
+# `describe` field of struct libusb_version (and the Windows resource
+# version string respectively).
+BUILT_SOURCES = version_describe.h
+CLEANFILES = version_describe.h
+nodist_libusb_1_0_la_SOURCES = version_describe.h
+
+.PHONY: regen-version-describe
+regen-version-describe:
+	$(AM_V_GEN)$(SHELL) $(top_srcdir)/build-aux/gen-describe.sh \
+		$(top_srcdir) $(builddir)/version_describe.h
+
+version_describe.h: regen-version-describe
 
 pkginclude_HEADERS = libusb.h

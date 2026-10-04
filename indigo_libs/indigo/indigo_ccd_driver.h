@@ -1,4 +1,4 @@
-// Copyright (c) 2016 CloudMakers, s. r. o.
+// Copyright (c) 2016-2025 CloudMakers, s. r. o.
 // All rights reserved.
 //
 // You can use this software under the terms of 'INDIGO Astronomy
@@ -25,7 +25,6 @@
 
 #ifndef indigo_ccd_h
 #define indigo_ccd_h
-
 #include <indigo/indigo_bus.h>
 #include <indigo/indigo_driver.h>
 #include <indigo/indigo_fits.h>
@@ -44,11 +43,21 @@ typedef struct {
 } ccd_jpeg_stretch_params_t;
 
 static const ccd_jpeg_stretch_params_t ccd_jpeg_stretch_params_lut[] ={
-	{0.05, -2.8},
-	{0.15, -2.8},
-	{0.25, -2.8},
-	{0.40, -2.5}
+	{ 0.05f, -2.8f },
+	{ 0.15f, -2.8f },
+	{ 0.25f, -2.8f },
+	{ 0.40f, -2.5f }
 };
+
+#if defined(INDIGO_WINDOWS)
+#if defined(INDIGO_WINDOWS_DLL)
+#define INDIGO_EXTERN __declspec(dllexport)
+#else
+#define INDIGO_EXTERN __declspec(dllimport)
+#endif
+#else
+#define INDIGO_EXTERN extern
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -124,6 +133,11 @@ extern "C" {
 
 #define CCD_LENS_FOCAL_LENGTH_ITEM      			(CCD_LENS_PROPERTY->items+1)
 
+/** CCD_LENS.PHYSICAL_LENGTH property item pointer.
+ */
+
+#define CCD_LENS_PHYSICAL_LENGTH_ITEM      			(CCD_LENS_PROPERTY->items+2)
+
 /** CCD_UPLOAD_MODE property pointer, property is mandatory, property change request is fully handled by indigo_ccd_change_property().
  */
 #define CCD_UPLOAD_MODE_PROPERTY          (CCD_CONTEXT->ccd_upload_mode_property)
@@ -195,6 +209,22 @@ extern "C" {
 /** CCD_STREAMING.COUNT property item pointer.
  */
 #define CCD_STREAMING_COUNT_ITEM          (CCD_STREAMING_PROPERTY->items+1)
+
+/** CCD_STREAMING_SETTINGS property pointer, property is optional.
+ */
+#define CCD_STREAMING_SETTINGS_PROPERTY   (CCD_CONTEXT->ccd_streaming_settings_property)
+
+/** CCD_STREAMING_SETTINGS.UPDATE_LIMIT property item pointer.
+ */
+#define CCD_STREAMING_SETTINGS_UPDATE_LIMIT_ITEM   (CCD_STREAMING_SETTINGS_PROPERTY->items+0)
+
+/** CCD_FPS property pointer, property is optional.
+ */
+#define CCD_FPS_PROPERTY   (CCD_CONTEXT->ccd_fps_property)
+
+/** CCD_FPS.FPS property item pointer.
+ */
+#define CCD_FPS_ITEM   (CCD_FPS_PROPERTY->items+0)
 
 /** CCD_ABORT property pointer, property is mandatory, property change request handler should set property items and state and call indigo_ccd_change_property().
  */
@@ -470,6 +500,10 @@ extern "C" {
  */
 #define CCD_JPEG_SETTINGS_CLIPPING_POINT_ITEM     (CCD_JPEG_SETTINGS_PROPERTY->items+2)
 
+/** CCD_JPEG_SETTINGS.REFERENCE_CHANNEL property item pointer.
+ */
+#define CCD_JPEG_SETTINGS_REF_CHANNEL_ITEM     (CCD_JPEG_SETTINGS_PROPERTY->items+3)
+
 /** CCD_JPEG_STRETCH_PRESETS property pointer, property is mandatory, read-write property, property change request is fully handled by indigo_ccd_change_property().
  */
 #define CCD_JPEG_STRETCH_PRESETS_PROPERTY         (CCD_CONTEXT->ccd_jpeg_stretch_presets)
@@ -521,12 +555,13 @@ typedef struct {
 	bool countdown_canceled;									///< countdown canceled
 	bool countdown_enabled;									///< countdown enabled
 	double countdown_endtime;									///< countdown end time
-	indigo_timer *countdown_timer;								///< countdown timer
 	void *preview_image;													///< preview image buffer
 	unsigned long preview_image_size;							///< preview image buffer size
 	void *preview_histogram;											///< preview histogram buffer
 	unsigned long preview_histogram_size;					///< preview histogram buffer size
 	void *video_stream;														///< video stream control structure
+	double last_frame;														///< timestamp of last captured frame
+	double last_report;													///< timestamp of last reported frame
 	indigo_property *ccd_info_property;           ///< CCD_INFO property pointer
 	indigo_property *ccd_lens_property;						///< CCD_LENS property pointer
 	indigo_property *ccd_upload_mode_property;    ///< CCD_UPLOAD_MODE property pointer
@@ -536,6 +571,8 @@ typedef struct {
 	indigo_property *ccd_read_mode_property;	  	///< CCD_READ_MODE property pointer
 	indigo_property *ccd_exposure_property;       ///< CCD_EXPOSURE property pointer
 	indigo_property *ccd_streaming_property;      ///< CCD_STREAMING property pointer
+	indigo_property *ccd_streaming_settings_property; ///< CCD_STREAMING_SETTINGS property pointer
+	indigo_property *ccd_fps_property;						///< CCD_FPS property pointer
 	indigo_property *ccd_abort_exposure_property; ///< CCD_ABORT_EXPOSURE property pointer
 	indigo_property *ccd_frame_property;          ///< CCD_FRAME property pointer
 	indigo_property *ccd_bin_property;            ///< CCD_BIN property pointer
@@ -563,70 +600,77 @@ typedef struct {
 
 /** Suspend countdown.
  */
-extern void indigo_ccd_suspend_countdown(indigo_device *device);
+INDIGO_EXTERN void indigo_ccd_suspend_countdown(indigo_device *device);
 
 /** Resume countdown.
  */
-extern void indigo_ccd_resume_countdown(indigo_device *device);
+INDIGO_EXTERN void indigo_ccd_resume_countdown(indigo_device *device);
 
 /** Set shortest exposure in case of a bias frame, otherwise does nothing.
     The intended use is in exposure propery handling.
  */
-extern void indigo_use_shortest_exposure_if_bias(indigo_device *device);
+INDIGO_EXTERN void indigo_use_shortest_exposure_if_bias(indigo_device *device);
 
 /** Attach callback function.
  */
-extern indigo_result indigo_ccd_attach(indigo_device *device, const char* driver_name, unsigned version);
+INDIGO_EXTERN indigo_result indigo_ccd_attach(indigo_device *device, const char* driver_name, unsigned version);
 /** Enumerate properties callback function.
  */
-extern indigo_result indigo_ccd_enumerate_properties(indigo_device *device, indigo_client *client, indigo_property *property);
+INDIGO_EXTERN indigo_result indigo_ccd_enumerate_properties(indigo_device *device, indigo_client *client, indigo_property *property);
 /** Change property callback function.
  */
-extern indigo_result indigo_ccd_change_property(indigo_device *device, indigo_client *client, indigo_property *property);
+INDIGO_EXTERN indigo_result indigo_ccd_change_property(indigo_device *device, indigo_client *client, indigo_property *property);
 /** Detach callback function.
  */
-extern indigo_result indigo_ccd_detach(indigo_device *device);
+INDIGO_EXTERN indigo_result indigo_ccd_detach(indigo_device *device);
 
 /** Convert RAW data to JPEG
  */
-extern void indigo_raw_to_jpeg(indigo_device *device, void *data_in, int frame_width, int frame_height, int bpp, const char *bayerpat, void **data_out, unsigned long *size_out, void **histogram_data, unsigned long *histogram_size, double B, double C);
+INDIGO_EXTERN void indigo_raw_to_jpeg(indigo_device *device, void *data_in, int frame_width, int frame_height, int bpp, const char *bayerpat, void **data_out, unsigned long *size_out, void **histogram_data, unsigned long *histogram_size, double B, double C, int reference_channel);
+
+/** Convert RAW data to JPEG with conversion quality
+ */
+INDIGO_EXTERN void indigo_raw_to_jpeg_with_quality(indigo_device *device, void *data_in, int frame_width, int frame_height, int bpp, const char *bayerpat, void **data_out, unsigned long *size_out, void **histogram_data, unsigned long *histogram_size, double B, double C, int reference_channel, int quality);
 
 /** Process raw image in image buffer (starting on data + FITS_HEADER_SIZE offset).
  */
-extern void indigo_process_image(indigo_device *device, void *data, int frame_width, int frame_height, int bpp, bool little_endian, bool byte_order_rgb, indigo_fits_keyword *keywords, bool streaming);
+INDIGO_EXTERN void indigo_process_image(indigo_device *device, void *data, int frame_width, int frame_height, int bpp, bool little_endian, bool byte_order_rgb, indigo_fits_keyword *keywords, bool streaming);
 
 /** Process DSLR image in image buffer (starting on data).
  */
-extern void indigo_process_dslr_image(indigo_device *device, void *data, int blobsize, const char *suffix, bool streaming);
+INDIGO_EXTERN void indigo_process_dslr_image(indigo_device *device, void *data, unsigned long blobsize, const char *suffix, bool streaming);
 
 /** Process DSLR preview image in image buffer (starting on data).
  */
-extern void indigo_process_dslr_preview_image(indigo_device *device, void *data, int blobsize);
+INDIGO_EXTERN void indigo_process_dslr_preview_image(indigo_device *device, void *data, unsigned long blobsize);
 
 /** Finalize video stream.
  */
-extern void indigo_finalize_video_stream(indigo_device *device);
+INDIGO_EXTERN void indigo_finalize_video_stream(indigo_device *device);
 
 /** Finalize DSLR video stream.
  */
-extern void indigo_finalize_dslr_video_stream(indigo_device *device);
+INDIGO_EXTERN void indigo_finalize_dslr_video_stream(indigo_device *device);
+
+/** Pre exposure setup..
+ */
+INDIGO_EXTERN indigo_result indigo_ccd_exposure_setup(indigo_device *device);
 
 /** Set alert state on dependent properties.
  */
-extern indigo_result indigo_ccd_failure_cleanup(indigo_device *device);
+INDIGO_EXTERN indigo_result indigo_ccd_failure_cleanup(indigo_device *device);
 
 /** Set corect states to related proeprties upon aborting exposure.
  */
-indigo_result indigo_ccd_abort_exposure_cleanup(indigo_device *device);
+INDIGO_EXTERN indigo_result indigo_ccd_abort_exposure_cleanup(indigo_device *device);
 
 /** Set FITS header
  */
-extern indigo_result indigo_set_fits_header(indigo_client *client, char *device, char *name, char *format, ...);
+INDIGO_EXTERN indigo_result indigo_set_fits_header(indigo_client *client, char *device, char *name, char *format, ...);
 
 /** Remove FITS header
  */
-extern indigo_result indigo_remove_fits_header(indigo_client *client, char *device, char *name);
-
+INDIGO_EXTERN indigo_result indigo_remove_fits_header(indigo_client *client, char *device, char *name);
 
 
 #ifdef __cplusplus

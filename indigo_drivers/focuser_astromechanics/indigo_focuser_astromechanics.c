@@ -1,9 +1,9 @@
-// Copyright (c) 2021 CloudMakers, s. r. o.
+// Copyright (c) 2021-2026 CloudMakers, s. r. o.
 // All rights reserved.
-//
-// You can use this software under the terms of 'INDIGO Astronomy
+
+// You may use this software under the terms of 'INDIGO Astronomy
 // open-source license' (see LICENSE.md).
-//
+
 // THIS SOFTWARE IS PROVIDED BY THE AUTHORS 'AS IS' AND ANY EXPRESS
 // OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 // WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
@@ -16,123 +16,234 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// version history
-// 2.0 by Peter Polakovic <peter.polakovic@cloudmakers.eu>
+// This file generated from indigo_focuser_astromechanics.driver
 
-/** INDIGO ASTROMECHANICS focuser driver
- \file indigo_focuser_astromechanics.c
- */
-
-
-#define DRIVER_VERSION 0x0002
-#define DRIVER_NAME "indigo_focuser_astromechanics"
+#pragma mark - Includes
 
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <math.h>
 #include <assert.h>
-#include <errno.h>
-#include <pthread.h>
-#include <stdarg.h>
-
-#include <sys/time.h>
-
 #include <indigo/indigo_driver_xml.h>
-#include <indigo/indigo_io.h>
+#include <indigo/indigo_focuser_driver.h>
+#include <indigo/indigo_uni_io.h>
 
 #include "indigo_focuser_astromechanics.h"
 
-#define PRIVATE_DATA													((astromechanics_private_data *)device->private_data)
+#pragma mark - Common definitions
 
-#define X_FOCUSER_APERTURE_PROPERTY						(PRIVATE_DATA->aperture_property)
-#define X_FOCUSER_APERTURE_ITEM								(X_FOCUSER_APERTURE_PROPERTY->items+0)
+#define DRIVER_VERSION       0x03000007
+#define DRIVER_NAME          "indigo_focuser_astromechanics"
+#define DRIVER_LABEL         "ASTROMECHANICS Focuser"
+#define FOCUSER_DEVICE_NAME  "ASTROMECHANICS Focuser"
+#define PRIVATE_DATA         ((astromechanics_private_data *)device->private_data)
+
+#pragma mark - Property definitions
+
+#define X_FOCUSER_APERTURE_PROPERTY      (PRIVATE_DATA->x_focuser_aperture_property)
+#define X_FOCUSER_APERTURE_ITEM          (X_FOCUSER_APERTURE_PROPERTY->items + 0)
+
+#define X_FOCUSER_APERTURE_PROPERTY_NAME "X_FOCUSER_APERTURE"
+#define X_FOCUSER_APERTURE_ITEM_NAME     "APERURE"
+
+#pragma mark - Private data definition
 
 typedef struct {
-	int handle;
-	indigo_timer *timer;
-	indigo_property *aperture_property;
-	pthread_mutex_t mutex;
+	indigo_uni_handle *handle;
+	indigo_property *x_focuser_aperture_property;
+	//+ data
+	char response[16];
+	int motion_polls;
+	//- data
 } astromechanics_private_data;
 
-// -------------------------------------------------------------------------------- Low level communication routines
+#pragma mark - Low level code
 
-static bool astromechanics_command(indigo_device *device, char *command, char *response) {
-	char c;
-	struct timeval tv;
-	if (command != NULL) {
-		if (!indigo_write(PRIVATE_DATA->handle, command, strlen(command)))
-			return false;
-	}
-	if (response != NULL) {
-		int index = 0;
-		while (index < 10) {
-			fd_set readout;
-			tv.tv_sec = 1;
-			tv.tv_usec = 0;
-			FD_ZERO(&readout);
-			FD_SET(PRIVATE_DATA->handle, &readout);
-			long result = select(PRIVATE_DATA->handle+1, &readout, NULL, NULL, &tv);
-			if (result <= 0) {
-				break;
-			}
-			result = read(PRIVATE_DATA->handle, &c, 1);
-			if (result < 1) {
-				INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to read from %s -> %s (%d)", DEVICE_PORT_ITEM->text.value, strerror(errno), errno);
-				return false;
-			}
-			if (c <= ' ') {
-				continue;
-			}
-			if (c < 0 || c == '#') {
-				break;
-			}
-			response[index++] = c;
+//+ code
+
+static bool astromechanics_command(indigo_device *device, char *command, int response, ...) {
+	long result = indigo_uni_discard(PRIVATE_DATA->handle);
+	if (result >= 0) {
+		va_list args;
+		va_start(args, response);
+		result = indigo_uni_vprintf(PRIVATE_DATA->handle, command, args);
+		va_end(args);
+		if (result > 0 && response > 0) {
+			result = indigo_uni_read_section(PRIVATE_DATA->handle, PRIVATE_DATA->response, sizeof(PRIVATE_DATA->response) - 1, "\n#", "\n#", INDIGO_DELAY(1));
 		}
-		response[index] = 0;
 	}
-	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Command '%s' -> '%s'", command, response != NULL ? response : "NULL");
-	return true;
+	return result > 0;
 }
 
-// -------------------------------------------------------------------------------- INDIGO focuser device implementation
+static bool astromechanics_open(indigo_device *device) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 38400, INDIGO_LOG_DEBUG);
+	return PRIVATE_DATA->handle != NULL;
+}
+
+static void astromechanics_close(indigo_device *device) {
+	indigo_uni_close(&PRIVATE_DATA->handle);
+}
+
+//- code
+
+//+ focuser.code
+
+static bool astromechanics_position(indigo_device *device, int *position) {
+	if (!astromechanics_command(device, "P#", 16)) {
+		return false;
+	}
+	char tail;
+	return sscanf(PRIVATE_DATA->response, "%d%c", position, &tail) == 1 && *position >= 0 && *position <= 9999;
+}
+
+static void focuser_motion_finalizer(indigo_device *device) {
+	int position;
+	if (!astromechanics_position(device, &position)) {
+		FOCUSER_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else {
+		FOCUSER_POSITION_ITEM->number.value = position;
+		if (position == (int)FOCUSER_POSITION_ITEM->number.target) {
+			FOCUSER_POSITION_PROPERTY->state = INDIGO_OK_STATE;
+		} else if (--PRIVATE_DATA->motion_polls <= 0) {
+			FOCUSER_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
+		} else {
+			FOCUSER_POSITION_PROPERTY->state = INDIGO_BUSY_STATE;
+			indigo_execute_handler_in(device, 0.1, focuser_motion_finalizer);
+		}
+	}
+	FOCUSER_STEPS_PROPERTY->state = FOCUSER_POSITION_PROPERTY->state;
+	indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+	indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+}
+
+static void astromechanics_start_motion(indigo_device *device, int position) {
+	indigo_cancel_pending_handler(device, focuser_motion_finalizer);
+	FOCUSER_POSITION_ITEM->number.target = position;
+	if (astromechanics_command(device, "M%04d#", 0, position)) {
+		PRIVATE_DATA->motion_polls = 100;
+		FOCUSER_POSITION_PROPERTY->state = INDIGO_BUSY_STATE;
+	} else {
+		FOCUSER_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
+	}
+	FOCUSER_STEPS_PROPERTY->state = FOCUSER_POSITION_PROPERTY->state;
+	indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+	indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+}
+
+//- focuser.code
+
+#pragma mark - High level code (focuser)
+
+static void focuser_connection_handler(indigo_device *device) {
+	if (CONNECTION_CONNECTED_ITEM->sw.value) {
+		bool connection_result = true;
+		connection_result = astromechanics_open(device);
+		if (connection_result) {
+			//+ focuser.on_connect
+			int position;
+			connection_result = astromechanics_position(device, &position);
+			if (connection_result) {
+				FOCUSER_POSITION_ITEM->number.value = FOCUSER_POSITION_ITEM->number.target = position;
+			}
+			//- focuser.on_connect
+		}
+		if (connection_result) {
+			indigo_define_property(device, X_FOCUSER_APERTURE_PROPERTY, NULL);
+			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
+			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+		} else {
+			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
+			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
+		}
+	} else {
+		indigo_cancel_pending_handlers(device);
+		// Cancelled change handlers must not leave properties BUSY: a new session starts in a clean state.
+		indigo_property *cancelled_properties[] = {
+			X_FOCUSER_APERTURE_PROPERTY,
+			FOCUSER_STEPS_PROPERTY,
+			FOCUSER_POSITION_PROPERTY,
+		};
+		for (unsigned i = 0; i < sizeof(cancelled_properties) / sizeof(cancelled_properties[0]); i++) {
+			if (cancelled_properties[i] != NULL && cancelled_properties[i]->state == INDIGO_BUSY_STATE) {
+				cancelled_properties[i]->state = INDIGO_OK_STATE;
+			}
+		}
+		indigo_delete_property(device, X_FOCUSER_APERTURE_PROPERTY, NULL);
+		astromechanics_close(device);
+		indigo_send_message(device, OK_PROPERTY, "Disconnected from %s", device->name);
+		CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
+	}
+	indigo_focuser_change_property(device, NULL, CONNECTION_PROPERTY);
+}
+
+static void focuser_x_focuser_aperture_handler(indigo_device *device) {
+	X_FOCUSER_APERTURE_PROPERTY->state = INDIGO_OK_STATE;
+	//+ focuser.X_FOCUSER_APERTURE.on_change
+	if (!astromechanics_command(device, "A%02d#", 0, (int)X_FOCUSER_APERTURE_ITEM->number.value)) {
+		X_FOCUSER_APERTURE_PROPERTY->state = INDIGO_ALERT_STATE;
+	}
+	//- focuser.X_FOCUSER_APERTURE.on_change
+	indigo_update_property(device, X_FOCUSER_APERTURE_PROPERTY, NULL);
+}
+
+static void focuser_steps_handler(indigo_device *device) {
+	//+ focuser.FOCUSER_STEPS.on_change
+	int direction = FOCUSER_DIRECTION_MOVE_INWARD_ITEM->sw.value ? -1 : 1;
+	int position = (int)FOCUSER_POSITION_ITEM->number.value + direction * (int)FOCUSER_STEPS_ITEM->number.value;
+	if (position < 0) {
+		position = 0;
+	} else if (position > 9999) {
+		position = 9999;
+	}
+	astromechanics_start_motion(device, position);
+	if (FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE) {
+		indigo_execute_handler_in(device, 0.1, focuser_motion_finalizer);
+	}
+	//- focuser.FOCUSER_STEPS.on_change
+}
+
+static void focuser_position_handler(indigo_device *device) {
+	//+ focuser.FOCUSER_POSITION.on_change
+	int position = (int)FOCUSER_POSITION_ITEM->number.target;
+	astromechanics_start_motion(device, position);
+	if (FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE) {
+		indigo_execute_handler_in(device, 0.1, focuser_motion_finalizer);
+	}
+	//- focuser.FOCUSER_POSITION.on_change
+}
+
+#pragma mark - Device API (focuser)
 
 static indigo_result focuser_enumerate_properties(indigo_device *device, indigo_client *client, indigo_property *property);
 
 static indigo_result focuser_attach(indigo_device *device) {
-	assert(device != NULL);
-	assert(PRIVATE_DATA != NULL);
 	if (indigo_focuser_attach(device, DRIVER_NAME, DRIVER_VERSION) == INDIGO_OK) {
-		X_FOCUSER_APERTURE_PROPERTY = indigo_init_number_property(NULL, device->name, "X_FOCUSER_APERTURE", FOCUSER_ADVANCED_GROUP, "Aperture", INDIGO_OK_STATE, INDIGO_RW_PERM, 1);
-		if (X_FOCUSER_APERTURE_PROPERTY == NULL)
-			return INDIGO_FAILED;
-		indigo_init_number_item(X_FOCUSER_APERTURE_ITEM, "APERURE", "Aperture", 0, 50, 1, 0);
-		// -------------------------------------------------------------------------------- DEVICE_PORT, DEVICE_PORTS
+		ADDITIONAL_INSTANCES_PROPERTY->hidden = device->base_device != NULL;
 		DEVICE_PORT_PROPERTY->hidden = false;
 		DEVICE_PORTS_PROPERTY->hidden = false;
-#ifdef INDIGO_LINUX
-		if (DEVICE_PORTS_PROPERTY->count > 1) {
-			/* 0 is refresh button */
-			indigo_copy_value(DEVICE_PORT_ITEM->text.value, DEVICE_PORTS_PROPERTY->items[1].name);
-		} else {
-			strcpy(DEVICE_PORT_ITEM->text.value, "/dev/ttyUSB0");
-		}
-#endif
-		// -------------------------------------------------------------------------------- INFO
-		strcpy(INFO_DEVICE_MODEL_ITEM->text.value, "ASTROMECHANICS Focuser");
-		// -------------------------------------------------------------------------------- FOCUSER_SPEED
+		indigo_enumerate_serial_ports(device, DEVICE_PORTS_PROPERTY);
+		//+ focuser.on_attach
 		FOCUSER_SPEED_PROPERTY->hidden = true;
-		// -------------------------------------------------------------------------------- FOCUSER_STEPS
+		FOCUSER_ABORT_MOTION_PROPERTY->hidden = true;
+		//- focuser.on_attach
+		X_FOCUSER_APERTURE_PROPERTY = indigo_init_number_property(NULL, device->name, X_FOCUSER_APERTURE_PROPERTY_NAME, FOCUSER_ADVANCED_GROUP, "Aperture", INDIGO_OK_STATE, INDIGO_RW_PERM, 1);
+		if (X_FOCUSER_APERTURE_PROPERTY == NULL) {
+			return INDIGO_FAILED;
+		}
+		indigo_init_number_item(X_FOCUSER_APERTURE_ITEM, X_FOCUSER_APERTURE_ITEM_NAME, "Aperture", 0, 50, 1, 0);
+		FOCUSER_STEPS_PROPERTY->hidden = false;
+		//+ focuser.FOCUSER_STEPS.on_attach
 		FOCUSER_STEPS_ITEM->number.min = 0;
 		FOCUSER_STEPS_ITEM->number.max = 9999;
 		FOCUSER_STEPS_ITEM->number.step = 1;
-		// -------------------------------------------------------------------------------- FOCUSER_POSITION
+		//- focuser.FOCUSER_STEPS.on_attach
+		FOCUSER_POSITION_PROPERTY->hidden = false;
+		//+ focuser.FOCUSER_POSITION.on_attach
 		FOCUSER_POSITION_ITEM->number.min = 0;
 		FOCUSER_POSITION_ITEM->number.max = 9999;
 		FOCUSER_POSITION_ITEM->number.step = 1;
-		// --------------------------------------------------------------------------------
-		ADDITIONAL_INSTANCES_PROPERTY->hidden = DEVICE_CONTEXT->base_device != NULL;
-		pthread_mutex_init(&PRIVATE_DATA->mutex, NULL);
+		//- focuser.FOCUSER_POSITION.on_attach
 		INDIGO_DEVICE_ATTACH_LOG(DRIVER_NAME, device->name);
 		return focuser_enumerate_properties(device, NULL, NULL);
 	}
@@ -141,248 +252,82 @@ static indigo_result focuser_attach(indigo_device *device) {
 
 static indigo_result focuser_enumerate_properties(indigo_device *device, indigo_client *client, indigo_property *property) {
 	if (IS_CONNECTED) {
-		indigo_define_matching_property(X_FOCUSER_APERTURE_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(X_FOCUSER_APERTURE_PROPERTY);
 	}
-	return indigo_focuser_enumerate_properties(device, NULL, NULL);
+	return indigo_focuser_enumerate_properties(device, client, property);
 }
-
-static void focuser_connection_handler(indigo_device *device) {
-	pthread_mutex_lock(&PRIVATE_DATA->mutex);
-	char response[16];
-	if (CONNECTION_CONNECTED_ITEM->sw.value) {
-		PRIVATE_DATA->handle = indigo_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 38400);
-		if (PRIVATE_DATA->handle > 0) {
-			if (astromechanics_command(device, "P#", response)) {
-				FOCUSER_POSITION_ITEM->number.value = FOCUSER_POSITION_ITEM->number.target = atoi(response);
-				INDIGO_DRIVER_LOG(DRIVER_NAME, "ASTROMECHANICS focuser detected");
-			} else {
-				INDIGO_DRIVER_ERROR(DRIVER_NAME, "ASTROMECHANICS focuser not detected");
-				close(PRIVATE_DATA->handle);
-				PRIVATE_DATA->handle = 0;
-			}
-		}
-		if (PRIVATE_DATA->handle > 0) {
-			indigo_define_property(device, X_FOCUSER_APERTURE_PROPERTY, NULL);
-			INDIGO_DRIVER_LOG(DRIVER_NAME, "Connected to %s", DEVICE_PORT_ITEM->text.value);
-			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
-		} else {
-			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to connect to %s", DEVICE_PORT_ITEM->text.value);
-			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
-			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
-		}
-	} else {
-		if (PRIVATE_DATA->handle > 0) {
-			indigo_delete_property(device, X_FOCUSER_APERTURE_PROPERTY, NULL);
-			INDIGO_DRIVER_LOG(DRIVER_NAME, "Disconnected");
-			close(PRIVATE_DATA->handle);
-			PRIVATE_DATA->handle = 0;
-		}
-		CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
-	}
-	indigo_focuser_change_property(device, NULL, CONNECTION_PROPERTY);
-	pthread_mutex_unlock(&PRIVATE_DATA->mutex);
-}
-
-static void focuser_steps_handler(indigo_device *device) {
-	pthread_mutex_lock(&PRIVATE_DATA->mutex);
-	char command[16], response[16];
-	int position;
-	if (FOCUSER_DIRECTION_MOVE_INWARD_ITEM->sw.value) {
-		position = FOCUSER_POSITION_ITEM->number.value - FOCUSER_STEPS_ITEM->number.value;
-		if (position < 0)
-			position = 0;
-		sprintf(command, "M%04d#", position);
-	} else {
-		position = FOCUSER_POSITION_ITEM->number.value + FOCUSER_STEPS_ITEM->number.value;
-		if (position > 9999)
-			position = 9999;
-		sprintf(command, "M%04d#", position);
-	}
-	if (astromechanics_command(device, command, NULL)) {
-		FOCUSER_POSITION_PROPERTY->state = INDIGO_BUSY_STATE;
-		indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
-		for (int i = 0; i < 50 && FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE; i++) {
-			if (astromechanics_command(device, "P#", response)) {
-				position = atoi(response);
-				if (FOCUSER_POSITION_ITEM->number.value == position) {
-					FOCUSER_STEPS_PROPERTY->state = INDIGO_OK_STATE;
-					FOCUSER_POSITION_PROPERTY->state = INDIGO_OK_STATE;
-					break;
-				} else {
-					FOCUSER_POSITION_ITEM->number.value = position;
-					indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
-				}
-			} else {
-				FOCUSER_STEPS_PROPERTY->state = INDIGO_ALERT_STATE;
-				FOCUSER_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
-				break;
-			}
-			indigo_usleep(100000);
-		}
-	} else {
-		FOCUSER_STEPS_PROPERTY->state = INDIGO_ALERT_STATE;
-		FOCUSER_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
-	}
-	indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
-	indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
-	pthread_mutex_unlock(&PRIVATE_DATA->mutex);
-}
-
-static void focuser_position_handler(indigo_device *device) {
-	pthread_mutex_lock(&PRIVATE_DATA->mutex);
-	char command[16], response[16];
-	int position;
-	position = FOCUSER_POSITION_ITEM->number.target;
-	if (position < 0)
-		position = 0;
-	else if (position > 9999)
-		position = 9999;
-	FOCUSER_POSITION_ITEM->number.target = position;
-	sprintf(command, "M%04d#", position);
-	if (astromechanics_command(device, command, NULL)) {
-		for (int i = 0; i < 50 && FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE; i++) {
-			if (astromechanics_command(device, "P#", response)) {
-				position = atoi(response);
-				if (FOCUSER_POSITION_ITEM->number.value == position) {
-					FOCUSER_POSITION_PROPERTY->state = INDIGO_OK_STATE;
-					break;
-				} else {
-					FOCUSER_POSITION_ITEM->number.value = position;
-					indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
-				}
-			} else {
-				FOCUSER_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
-				break;
-			}
-			indigo_usleep(100000);
-		}
-	} else {
-		FOCUSER_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
-	}
-	indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
-	pthread_mutex_unlock(&PRIVATE_DATA->mutex);
-}
-
-static void focuser_aperture_handler(indigo_device *device) {
-	pthread_mutex_lock(&PRIVATE_DATA->mutex);
-	char command[16];
-	sprintf(command, "A%02d#", (int)X_FOCUSER_APERTURE_ITEM->number.value);
-	if (astromechanics_command(device, command, NULL)) {
-		X_FOCUSER_APERTURE_PROPERTY->state = INDIGO_OK_STATE;
-	} else {
-		X_FOCUSER_APERTURE_PROPERTY->state = INDIGO_ALERT_STATE;
-	}
-	indigo_update_property(device, X_FOCUSER_APERTURE_PROPERTY, NULL);
-	pthread_mutex_unlock(&PRIVATE_DATA->mutex);
-}
-
 
 static indigo_result focuser_change_property(indigo_device *device, indigo_client *client, indigo_property *property) {
-	assert(device != NULL);
-	assert(DEVICE_CONTEXT != NULL);
-	assert(property != NULL);
 	if (indigo_property_match_changeable(CONNECTION_PROPERTY, property)) {
-		// -------------------------------------------------------------------------------- CONNECTION
-		if (indigo_ignore_connection_change(device, property))
-			return INDIGO_OK;
-		indigo_property_copy_values(CONNECTION_PROPERTY, property, false);
-		CONNECTION_PROPERTY->state = INDIGO_BUSY_STATE;
-		indigo_update_property(device, CONNECTION_PROPERTY, NULL);
-		indigo_set_timer(device, 0, focuser_connection_handler, NULL);
-		return INDIGO_OK;
-	} else if (indigo_property_match_changeable(FOCUSER_STEPS_PROPERTY, property)) {
-		// -------------------------------------------------------------------------------- FOCUSER_STEPS
-		indigo_property_copy_values(FOCUSER_STEPS_PROPERTY, property, false);
-		FOCUSER_STEPS_PROPERTY->state = INDIGO_BUSY_STATE;
-		indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
-		indigo_set_timer(device, 0, focuser_steps_handler, NULL);
-		return INDIGO_OK;
-	} else if (indigo_property_match_changeable(FOCUSER_POSITION_PROPERTY, property)) {
-		// -------------------------------------------------------------------------------- FOCUSER_POSITION
-		long position = FOCUSER_POSITION_ITEM->number.value;
-		indigo_property_copy_values(FOCUSER_POSITION_PROPERTY, property, false);
-		FOCUSER_POSITION_ITEM->number.value = position;
-		FOCUSER_POSITION_PROPERTY->state = INDIGO_BUSY_STATE;
-		indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
-		indigo_set_timer(device, 0, focuser_position_handler, NULL);
-		return INDIGO_OK;
-	} else if (indigo_property_match_changeable(FOCUSER_ABORT_MOTION_PROPERTY, property)) {
-		// -------------------------------------------------------------------------------- FOCUSER_ABORT_MOTION
-		indigo_property_copy_values(FOCUSER_ABORT_MOTION_PROPERTY, property, false);
-		if (FOCUSER_ABORT_MOTION_ITEM->sw.value &&  FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE) {
-			FOCUSER_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
-			FOCUSER_ABORT_MOTION_ITEM->sw.value = false;
-		}
-		FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
-		indigo_update_property(device, FOCUSER_ABORT_MOTION_PROPERTY, NULL);
+		INDIGO_PROCESS_CONNECT(focuser_connection_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(X_FOCUSER_APERTURE_PROPERTY, property)) {
-		// -------------------------------------------------------------------------------- X_FOCUSER_APERTURE
-		indigo_property_copy_values(X_FOCUSER_APERTURE_PROPERTY, property, false);
-		X_FOCUSER_APERTURE_PROPERTY->state = INDIGO_BUSY_STATE;
-		indigo_update_property(device, X_FOCUSER_APERTURE_PROPERTY, NULL);
-		indigo_set_timer(device, 0, focuser_aperture_handler, NULL);
+		INDIGO_COPY_VALUES_PROCESS_CHANGE(X_FOCUSER_APERTURE_PROPERTY, focuser_x_focuser_aperture_handler);
+		return INDIGO_OK;
+	} else if (indigo_property_match_changeable(FOCUSER_STEPS_PROPERTY, property)) {
+		INDIGO_REJECT_CHANGE_IF(FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE, FOCUSER_STEPS_PROPERTY, "Another motion operation is pending");
+		INDIGO_COPY_VALUES_PROCESS_CHANGE(FOCUSER_STEPS_PROPERTY, focuser_steps_handler);
+		return INDIGO_OK;
+	} else if (indigo_property_match_changeable(FOCUSER_POSITION_PROPERTY, property)) {
+		INDIGO_REJECT_CHANGE_IF(FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE, FOCUSER_POSITION_PROPERTY, "Another motion operation is pending");
+		INDIGO_COPY_VALUES_PROCESS_CHANGE(FOCUSER_POSITION_PROPERTY, focuser_position_handler);
 		return INDIGO_OK;
 	}
 	return indigo_focuser_change_property(device, client, property);
 }
 
 static indigo_result focuser_detach(indigo_device *device) {
-	assert(device != NULL);
 	if (IS_CONNECTED) {
 		indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		focuser_connection_handler(device);
 	}
 	indigo_release_property(X_FOCUSER_APERTURE_PROPERTY);
-	pthread_mutex_destroy(&PRIVATE_DATA->mutex);
 	INDIGO_DEVICE_DETACH_LOG(DRIVER_NAME, device->name);
 	return indigo_focuser_detach(device);
 }
 
-// -------------------------------------------------------------------------------- INDIGO driver implementation
+#pragma mark - Device templates
+
+static indigo_device focuser_template = INDIGO_DEVICE_INITIALIZER(FOCUSER_DEVICE_NAME, focuser_attach, focuser_enumerate_properties, focuser_change_property, NULL, focuser_detach);
+
+#pragma mark - Main code
 
 indigo_result indigo_focuser_astromechanics(indigo_driver_action action, indigo_driver_info *info) {
 	static indigo_driver_action last_action = INDIGO_DRIVER_SHUTDOWN;
 	static astromechanics_private_data *private_data = NULL;
 	static indigo_device *focuser = NULL;
 
-	static indigo_device focuser_template = INDIGO_DEVICE_INITIALIZER(
-		"ASTROMECHANICS Focuser",
-		focuser_attach,
-		focuser_enumerate_properties,
-		focuser_change_property,
-		NULL,
-		focuser_detach
-	);
+	SET_DRIVER_INFO(info, DRIVER_LABEL, __FUNCTION__, DRIVER_VERSION, false, last_action);
 
-	SET_DRIVER_INFO(info, "ASTROMECHANICS Focuser", __FUNCTION__, DRIVER_VERSION, false, last_action);
-
-	if (action == last_action)
+	if (action == last_action) {
 		return INDIGO_OK;
+	}
 
 	switch (action) {
-		case INDIGO_DRIVER_INIT:
+		case INDIGO_DRIVER_INIT: {
 			last_action = action;
-			private_data = indigo_safe_malloc(sizeof(astromechanics_private_data));
-			focuser = indigo_safe_malloc_copy(sizeof(indigo_device), &focuser_template);
+			private_data = (astromechanics_private_data *)indigo_safe_malloc(sizeof(astromechanics_private_data));
+			focuser = (indigo_device *)indigo_safe_malloc_copy(sizeof(indigo_device), &focuser_template);
 			focuser->private_data = private_data;
 			indigo_attach_device(focuser);
 			break;
 
-		case INDIGO_DRIVER_SHUTDOWN:
+		}
+		case INDIGO_DRIVER_SHUTDOWN: {
 			VERIFY_NOT_CONNECTED(focuser);
 			last_action = action;
 			if (focuser != NULL) {
 				indigo_detach_device(focuser);
-				free(focuser);
+				indigo_safe_free(focuser);
 				focuser = NULL;
 			}
 			if (private_data != NULL) {
-				free(private_data);
+				indigo_safe_free(private_data);
 				private_data = NULL;
 			}
 			break;
 
+		}
 		case INDIGO_DRIVER_INFO:
 			break;
 	}

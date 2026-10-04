@@ -1,4 +1,4 @@
-// Copyright (c) 2016 CloudMakers, s. r. o.
+// Copyright (c) 2016-2026 CloudMakers, s. r. o.
 // All rights reserved.
 //
 // You can use this software under the terms of 'INDIGO Astronomy
@@ -23,7 +23,7 @@
  \file indigo_aux_joystick.c
  */
 
-#define DRIVER_VERSION 0x0008
+#define DRIVER_VERSION 0x0300000A
 #define DRIVER_NAME "indigo_joystick"
 
 #include <stdlib.h>
@@ -32,13 +32,8 @@
 #include <math.h>
 #include <assert.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/time.h>
-
-#if defined(INDIGO_FREEBSD)
-#include <libusb.h>
-#else
-#include <libusb-1.0/libusb.h>
-#endif
 
 #ifdef INDIGO_MACOS
 #import <Cocoa/Cocoa.h>
@@ -48,14 +43,12 @@
 #ifdef INDIGO_LINUX
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <float.h>
 #include <errno.h>
 #include <linux/joystick.h>
-
-#define MAX_BUTTONS	64
-#define MAX_AXES		16
 
 #endif
 
@@ -63,6 +56,17 @@
 #include <indigo/indigo_usb_utils.h>
 
 #include "indigo_aux_joystick.h"
+
+#define MAX_BUTTONS	64
+#define MAX_AXES		16
+#define MAX_EVENTS		256
+#define MAX_DEVICES		5
+
+#ifndef JOYSTICK_RESCAN_DELAY
+#define JOYSTICK_RESCAN_DELAY	0.5
+#endif
+
+#define JOYSTICK_MACOS_RESCAN_INTERVAL	1.0
 
 #define JOYSTICK_MAIN_GROUP		"Joystick"
 #define JOYSTICK_MAPPING_GROUP			"Joystick Mapping"
@@ -74,20 +78,18 @@
 #define JOYSTICK_AXES_PROPERTY												(PRIVATE_DATA->joystick_axes_property)
 
 #define JOYSTICK_MAPPING_PROPERTY											(PRIVATE_DATA->joystick_mapping_property)
-#define JOYSTICK_MAPPING_PARKED_ITEM									(JOYSTICK_MAPPING_PROPERTY->items+0)
-#define JOYSTICK_MAPPING_UNPARKED_ITEM								(JOYSTICK_MAPPING_PROPERTY->items+1)
-#define JOYSTICK_MAPPING_ABORT_ITEM										(JOYSTICK_MAPPING_PROPERTY->items+2)
-#define JOYSTICK_MAPPING_HOME_ITEM										(JOYSTICK_MAPPING_PROPERTY->items+3)
-#define JOYSTICK_MAPPING_TRACKING_ON_ITEM							(JOYSTICK_MAPPING_PROPERTY->items+4)
-#define JOYSTICK_MAPPING_TRACKING_OFF_ITEM						(JOYSTICK_MAPPING_PROPERTY->items+5)
-#define JOYSTICK_MAPPING_MOTION_RA_ITEM								(JOYSTICK_MAPPING_PROPERTY->items+6)
-#define JOYSTICK_MAPPING_MOTION_DEC_ITEM							(JOYSTICK_MAPPING_PROPERTY->items+7)
-#define JOYSTICK_MAPPING_RATE_GUIDE_ITEM							(JOYSTICK_MAPPING_PROPERTY->items+8)
-#define JOYSTICK_MAPPING_RATE_CENTERING_ITEM					(JOYSTICK_MAPPING_PROPERTY->items+9)
-#define JOYSTICK_MAPPING_RATE_FIND_ITEM								(JOYSTICK_MAPPING_PROPERTY->items+10)
-#define JOYSTICK_MAPPING_RATE_MAX_ITEM								(JOYSTICK_MAPPING_PROPERTY->items+11)
-#define JOYSTICK_MAPPING_FOCUS_IN_ITEM								(JOYSTICK_MAPPING_PROPERTY->items+12)
-#define JOYSTICK_MAPPING_FOCUS_OUT_ITEM								(JOYSTICK_MAPPING_PROPERTY->items+13)
+#define JOYSTICK_MAPPING_MOTION_RA_ITEM								(JOYSTICK_MAPPING_PROPERTY->items+0)
+#define JOYSTICK_MAPPING_MOTION_DEC_ITEM							(JOYSTICK_MAPPING_PROPERTY->items+1)
+#define JOYSTICK_MAPPING_RATE_GUIDE_ITEM							(JOYSTICK_MAPPING_PROPERTY->items+2)
+#define JOYSTICK_MAPPING_RATE_CENTERING_ITEM					(JOYSTICK_MAPPING_PROPERTY->items+3)
+#define JOYSTICK_MAPPING_RATE_FIND_ITEM								(JOYSTICK_MAPPING_PROPERTY->items+4)
+#define JOYSTICK_MAPPING_RATE_MAX_ITEM								(JOYSTICK_MAPPING_PROPERTY->items+5)
+#define JOYSTICK_MAPPING_PARKED_ITEM									(JOYSTICK_MAPPING_PROPERTY->items+6)
+#define JOYSTICK_MAPPING_UNPARKED_ITEM								(JOYSTICK_MAPPING_PROPERTY->items+7)
+#define JOYSTICK_MAPPING_TRACKING_ON_ITEM							(JOYSTICK_MAPPING_PROPERTY->items+8)
+#define JOYSTICK_MAPPING_TRACKING_OFF_ITEM						(JOYSTICK_MAPPING_PROPERTY->items+9)
+#define JOYSTICK_MAPPING_HOME_ITEM										(JOYSTICK_MAPPING_PROPERTY->items+10)
+#define JOYSTICK_MAPPING_ABORT_ITEM										(JOYSTICK_MAPPING_PROPERTY->items+11)
 
 #define JOYSTICK_OPTIONS_PROPERTY											(PRIVATE_DATA->joystick_options_property)
 #define JOYSTICK_OPTIONS_ANALOG_STICK_ITEM						(JOYSTICK_OPTIONS_PROPERTY->items+0)
@@ -98,8 +100,8 @@
 #define MOUNT_PARK_PARKED_ITEM												(MOUNT_PARK_PROPERTY->items+0)
 #define MOUNT_PARK_UNPARKED_ITEM											(MOUNT_PARK_PROPERTY->items+1)
 
-#define MOUNT_HOME_PROPERTY													(PRIVATE_DATA->mount_home_property)
-#define MOUNT_HOME_ITEM														(MOUNT_HOME_PROPERTY->items+0)
+#define MOUNT_HOME_PROPERTY														(PRIVATE_DATA->mount_home_property)
+#define MOUNT_HOME_ITEM																(MOUNT_HOME_PROPERTY->items+0)
 
 #define MOUNT_SLEW_RATE_PROPERTY											(PRIVATE_DATA->mount_slew_rate_property)
 #define MOUNT_SLEW_RATE_GUIDE_ITEM										(MOUNT_SLEW_RATE_PROPERTY->items+0)
@@ -122,9 +124,17 @@
 #define MOUNT_TRACKING_ON_ITEM												(MOUNT_TRACKING_PROPERTY->items+0)
 #define MOUNT_TRACKING_OFF_ITEM												(MOUNT_TRACKING_PROPERTY->items+1)
 
-#define FOCUSER_CONTROL_PROPERTY											(PRIVATE_DATA->focuser_control_property)
-#define FOCUSER_FOCUS_IN_ITEM													(FOCUSER_CONTROL_PROPERTY->items+0)
-#define FOCUSER_FOCUS_OUT_ITEM												(FOCUSER_CONTROL_PROPERTY->items+1)
+typedef enum {
+	JOYSTICK_AXIS_EVENT,
+	JOYSTICK_BUTTON_EVENT,
+	JOYSTICK_POV_EVENT
+} joystick_event_type;
+
+typedef struct {
+	joystick_event_type type;
+	int index;
+	int value;
+} joystick_event;
 
 typedef struct {
 	long index;
@@ -144,10 +154,16 @@ typedef struct {
 	indigo_property *mount_motion_ra_property;
 	indigo_property *mount_abort_motion_property;
 	indigo_property *mount_tracking_property;
-	indigo_property *focuser_control_property;
+	pthread_mutex_t event_mutex;
+	joystick_event events[MAX_EVENTS];
+	int event_head;
+	int event_count;
+	bool event_handler_pending;
 #ifdef INDIGO_LINUX
 	int fd;
 	pthread_t thread;
+	atomic_bool stop_requested;
+	bool thread_started;
 	bool last_button_state[MAX_BUTTONS];
 	int last_axis_value[MAX_AXES];
 #endif
@@ -155,6 +171,11 @@ typedef struct {
 
 static bool open_joystick(indigo_device *device);
 static void close_joystick(indigo_device *device);
+static void joystick_event_handler(indigo_device *device);
+static indigo_queue *driver_queue = NULL;
+static pthread_mutex_t driver_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+static atomic_bool rescan_pending;
+static atomic_bool shutting_down;
 
 // -------------------------------------------------------------------------------- INDIGO CCD device implementation
 
@@ -167,99 +188,102 @@ static indigo_result aux_attach(indigo_device *device) {
 	if (indigo_aux_attach(device, DRIVER_NAME, DRIVER_VERSION, INDIGO_INTERFACE_AUX_JOYSTICK) == INDIGO_OK) {
 		// -------------------------------------------------------------------------------- JOYSTICK_BUTTONS
 		JOYSTICK_BUTTONS_PROPERTY = indigo_init_switch_property(NULL, device->name, JOYSTICK_BUTTONS_PROPERTY_NAME, JOYSTICK_MAIN_GROUP, "Joystick buttons", INDIGO_OK_STATE, INDIGO_RO_PERM, INDIGO_ANY_OF_MANY_RULE, PRIVATE_DATA->button_count);
-		if (JOYSTICK_BUTTONS_PROPERTY == NULL)
+		if (JOYSTICK_BUTTONS_PROPERTY == NULL) {
 			return INDIGO_FAILED;
+		}
 		for (int i = 0; i < PRIVATE_DATA->button_count; i++) {
 			char name[INDIGO_NAME_SIZE], label[INDIGO_NAME_SIZE];
-			sprintf(name, JOYSTICK_BUTTON_ITEM_NAME, i + 1);
-			sprintf(label, "Button %d", i + 1);
+			snprintf(name, sizeof(name), JOYSTICK_BUTTON_ITEM_NAME, i + 1);
+			snprintf(label, sizeof(label), "Button %d", i + 1);
 			indigo_init_switch_item(JOYSTICK_BUTTONS_PROPERTY->items + i, name, label, false);
 		}
 		// -------------------------------------------------------------------------------- JOYSTICK_AXES
 		int axis_count = PRIVATE_DATA->axis_count + 2 * PRIVATE_DATA->pov_count;
 		JOYSTICK_AXES_PROPERTY = indigo_init_number_property(NULL, device->name, JOYSTICK_AXES_PROPERTY_NAME, JOYSTICK_MAIN_GROUP, "Joystick axes", INDIGO_OK_STATE, INDIGO_RO_PERM, axis_count);
-		if (JOYSTICK_AXES_PROPERTY == NULL)
+		if (JOYSTICK_AXES_PROPERTY == NULL) {
 			return INDIGO_FAILED;
+		}
 		for (int i = 0; i < axis_count; i++) {
 			char name[INDIGO_NAME_SIZE], label[INDIGO_NAME_SIZE];
-			sprintf(name, JOYSTICK_AXIS_ITEM_NAME, i + 1);
-			sprintf(label, "Axis %d", i + 1);
+			snprintf(name, sizeof(name), JOYSTICK_AXIS_ITEM_NAME, i + 1);
+			snprintf(label, sizeof(label), "Axis %d", i + 1);
 			indigo_init_number_item(JOYSTICK_AXES_PROPERTY->items + i, name, label, -65536, 65536, 0, 0);
 		}
 		// -------------------------------------------------------------------------------- JOYSTICK_MAPPING
-		JOYSTICK_MAPPING_PROPERTY = indigo_init_number_property(NULL, device->name, JOYSTICK_MAPPING_PROPERTY_NAME, JOYSTICK_MAIN_GROUP, "Buttons and axes mapping", INDIGO_OK_STATE, INDIGO_RW_PERM, 14);
-		if (JOYSTICK_MAPPING_PROPERTY == NULL)
+		JOYSTICK_MAPPING_PROPERTY = indigo_init_number_property(NULL, device->name, JOYSTICK_MAPPING_PROPERTY_NAME, JOYSTICK_MAIN_GROUP, "Buttons and axes mapping", INDIGO_OK_STATE, INDIGO_RW_PERM, 12);
+		if (JOYSTICK_MAPPING_PROPERTY == NULL) {
 			return INDIGO_FAILED;
-		indigo_init_number_item(JOYSTICK_MAPPING_PARKED_ITEM, JOYSTICK_MAPPING_PARKED_ITEM_NAME, "Park mount button", 0, PRIVATE_DATA->button_count, 1, 6);
-		indigo_init_number_item(JOYSTICK_MAPPING_UNPARKED_ITEM, JOYSTICK_MAPPING_UNPARKED_ITEM_NAME, "Unpark mount button", 0, PRIVATE_DATA->button_count, 1, 8);
-		indigo_init_number_item(JOYSTICK_MAPPING_ABORT_ITEM, JOYSTICK_MAPPING_ABORT_ITEM_NAME, "Abort mount movement button", 0, PRIVATE_DATA->button_count, 1, 9);
-		indigo_init_number_item(JOYSTICK_MAPPING_HOME_ITEM, JOYSTICK_MAPPING_HOME_ITEM_NAME, "Home button", 0, PRIVATE_DATA->button_count, 1, 10);
-		indigo_init_number_item(JOYSTICK_MAPPING_TRACKING_ON_ITEM, JOYSTICK_MAPPING_TRACKING_ON_ITEM_NAME, "Tracking on button", 0, PRIVATE_DATA->button_count, 1, 5);
-		indigo_init_number_item(JOYSTICK_MAPPING_TRACKING_OFF_ITEM, JOYSTICK_MAPPING_TRACKING_OFF_ITEM_NAME, "Tracking off button", 0, PRIVATE_DATA->button_count, 1, 7);
-		indigo_init_number_item(JOYSTICK_MAPPING_MOTION_RA_ITEM, JOYSTICK_MAPPING_MOTION_RA_ITEM_NAME, "RA motion axis", 0, PRIVATE_DATA->axis_count + 2 * PRIVATE_DATA->pov_count, 1, 1);
-		indigo_init_number_item(JOYSTICK_MAPPING_MOTION_DEC_ITEM, JOYSTICK_MAPPING_MOTION_DEC_ITEM_NAME, "Dec motion axis", 0, PRIVATE_DATA->axis_count + 2 * PRIVATE_DATA->pov_count, 1, 2);
-		indigo_init_number_item(JOYSTICK_MAPPING_RATE_GUIDE_ITEM, JOYSTICK_MAPPING_RATE_GUIDE_ITEM_NAME, "Guide rate button", 0, PRIVATE_DATA->button_count, 1, 1);
-		indigo_init_number_item(JOYSTICK_MAPPING_RATE_CENTERING_ITEM, JOYSTICK_MAPPING_RATE_CENTERING_ITEM_NAME, "Centering rate button", 0, PRIVATE_DATA->button_count, 1, 2);
-		indigo_init_number_item(JOYSTICK_MAPPING_RATE_FIND_ITEM, JOYSTICK_MAPPING_RATE_FIND_ITEM_NAME, "Find rate button", 0, PRIVATE_DATA->button_count, 1, 3);
-		indigo_init_number_item(JOYSTICK_MAPPING_RATE_MAX_ITEM, JOYSTICK_MAPPING_RATE_MAX_ITEM_NAME, "Max rate button", 0, PRIVATE_DATA->button_count, 1, 4);
-		indigo_init_number_item(JOYSTICK_MAPPING_FOCUS_IN_ITEM, JOYSTICK_MAPPING_FOCUS_IN_ITEM_NAME, "Focus in button", 0, PRIVATE_DATA->button_count, 1, 11);
-		indigo_init_number_item(JOYSTICK_MAPPING_FOCUS_OUT_ITEM, JOYSTICK_MAPPING_FOCUS_OUT_ITEM_NAME, "Focus out button", 0, PRIVATE_DATA->button_count, 1, 12);
-		// -------------------------------------------------------------------------------- MOUNT_PARK
+		}
+		indigo_init_number_item(JOYSTICK_MAPPING_MOTION_RA_ITEM, JOYSTICK_MAPPING_MOTION_RA_ITEM_NAME, "RA motion axis", -1, PRIVATE_DATA->axis_count + 2 * PRIVATE_DATA->pov_count, 1, 1);
+		indigo_init_number_item(JOYSTICK_MAPPING_MOTION_DEC_ITEM, JOYSTICK_MAPPING_MOTION_DEC_ITEM_NAME, "Dec motion axis", -1, PRIVATE_DATA->axis_count + 2 * PRIVATE_DATA->pov_count, 1, 2);
+		indigo_init_number_item(JOYSTICK_MAPPING_RATE_GUIDE_ITEM, JOYSTICK_MAPPING_RATE_GUIDE_ITEM_NAME, "Guide rate button", -1, PRIVATE_DATA->button_count, 1, 1);
+		indigo_init_number_item(JOYSTICK_MAPPING_RATE_CENTERING_ITEM, JOYSTICK_MAPPING_RATE_CENTERING_ITEM_NAME, "Centering rate button", -1, PRIVATE_DATA->button_count, 1, 2);
+		indigo_init_number_item(JOYSTICK_MAPPING_RATE_FIND_ITEM, JOYSTICK_MAPPING_RATE_FIND_ITEM_NAME, "Find rate button", -1, PRIVATE_DATA->button_count, 1, 3);
+		indigo_init_number_item(JOYSTICK_MAPPING_RATE_MAX_ITEM, JOYSTICK_MAPPING_RATE_MAX_ITEM_NAME, "Max rate button", -1, PRIVATE_DATA->button_count, 1, 4);
+		indigo_init_number_item(JOYSTICK_MAPPING_PARKED_ITEM, JOYSTICK_MAPPING_PARKED_ITEM_NAME, "Park mount button", -1, PRIVATE_DATA->button_count, 1, 5);
+		indigo_init_number_item(JOYSTICK_MAPPING_UNPARKED_ITEM, JOYSTICK_MAPPING_UNPARKED_ITEM_NAME, "Unpark mount button", -1, PRIVATE_DATA->button_count, 1, 6);
+		indigo_init_number_item(JOYSTICK_MAPPING_TRACKING_ON_ITEM, JOYSTICK_MAPPING_TRACKING_ON_ITEM_NAME, "Tracking on button", -1, PRIVATE_DATA->button_count, 1, -1);
+		indigo_init_number_item(JOYSTICK_MAPPING_TRACKING_OFF_ITEM, JOYSTICK_MAPPING_TRACKING_OFF_ITEM_NAME, "Tracking off button", -1, PRIVATE_DATA->button_count, 1, -1);
+		indigo_init_number_item(JOYSTICK_MAPPING_HOME_ITEM, JOYSTICK_MAPPING_HOME_ITEM_NAME, "Home button", -1, PRIVATE_DATA->button_count, 1, -1);
+		indigo_init_number_item(JOYSTICK_MAPPING_ABORT_ITEM, JOYSTICK_MAPPING_ABORT_ITEM_NAME, "Abort mount movement button", -1, PRIVATE_DATA->button_count, 1, -1);
+		// -------------------------------------------------------------------------------- JOYSTICK_OPTIONS
 		JOYSTICK_OPTIONS_PROPERTY = indigo_init_switch_property(NULL, device->name, JOYSTICK_OPTIONS_PROPERTY_NAME, JOYSTICK_MAIN_GROUP, "Options", INDIGO_OK_STATE, INDIGO_RW_PERM, INDIGO_ANY_OF_MANY_RULE, 3);
-		if (JOYSTICK_OPTIONS_PROPERTY == NULL)
+		if (JOYSTICK_OPTIONS_PROPERTY == NULL) {
 			return INDIGO_FAILED;
+		}
 		indigo_init_switch_item(JOYSTICK_OPTIONS_ANALOG_STICK_ITEM, JOYSTICK_OPTIONS_ANALOG_STICK_ITEM_NAME, "Use stick in analog mode", false);
 		indigo_init_switch_item(JOYSTICK_OPTIONS_SWAP_RA_ITEM, JOYSTICK_OPTIONS_SWAP_RA_ITEM_NAME, "Swap RA axis", false);
 		indigo_init_switch_item(JOYSTICK_OPTIONS_SWAP_DEC_ITEM, JOYSTICK_OPTIONS_SWAP_DEC_ITEM_NAME, "Swap Dec axis", false);
 		// -------------------------------------------------------------------------------- MOUNT_PARK
 		MOUNT_PARK_PROPERTY = indigo_init_switch_property(NULL, device->name, MOUNT_PARK_PROPERTY_NAME, JOYSTICK_MAPPING_GROUP, "Park", INDIGO_OK_STATE, INDIGO_RO_PERM, INDIGO_AT_MOST_ONE_RULE, 2);
-		if (MOUNT_PARK_PROPERTY == NULL)
+		if (MOUNT_PARK_PROPERTY == NULL) {
 			return INDIGO_FAILED;
+		}
 		indigo_init_switch_item(MOUNT_PARK_PARKED_ITEM, MOUNT_PARK_PARKED_ITEM_NAME, "Mount parked", false);
 		indigo_init_switch_item(MOUNT_PARK_UNPARKED_ITEM, MOUNT_PARK_UNPARKED_ITEM_NAME, "Mount unparked", false);
 		// -------------------------------------------------------------------------------- MOUNT_HOME
 		MOUNT_HOME_PROPERTY = indigo_init_switch_property(NULL, device->name, MOUNT_HOME_PROPERTY_NAME, JOYSTICK_MAPPING_GROUP, "Home", INDIGO_OK_STATE, INDIGO_RO_PERM, INDIGO_AT_MOST_ONE_RULE, 1);
-		if (MOUNT_HOME_PROPERTY == NULL)
+		if (MOUNT_HOME_PROPERTY == NULL) {
 			return INDIGO_FAILED;
+		}
 		indigo_init_switch_item(MOUNT_HOME_ITEM, MOUNT_HOME_ITEM_NAME, "Goto home position", false);
 		// -------------------------------------------------------------------------------- MOUNT_SLEW_RATE
 		MOUNT_SLEW_RATE_PROPERTY = indigo_init_switch_property(NULL, device->name, MOUNT_SLEW_RATE_PROPERTY_NAME, JOYSTICK_MAPPING_GROUP, "Slew rate", INDIGO_OK_STATE, INDIGO_RO_PERM, INDIGO_AT_MOST_ONE_RULE, 4);
-		if (MOUNT_SLEW_RATE_PROPERTY == NULL)
+		if (MOUNT_SLEW_RATE_PROPERTY == NULL) {
 			return INDIGO_FAILED;
+		}
 		indigo_init_switch_item(MOUNT_SLEW_RATE_GUIDE_ITEM, MOUNT_SLEW_RATE_GUIDE_ITEM_NAME, "Guide rate", false);
 		indigo_init_switch_item(MOUNT_SLEW_RATE_CENTERING_ITEM, MOUNT_SLEW_RATE_CENTERING_ITEM_NAME, "Centering rate", false);
 		indigo_init_switch_item(MOUNT_SLEW_RATE_FIND_ITEM, MOUNT_SLEW_RATE_FIND_ITEM_NAME, "Find rate", false);
 		indigo_init_switch_item(MOUNT_SLEW_RATE_MAX_ITEM, MOUNT_SLEW_RATE_MAX_ITEM_NAME, "Max rate", false);
 		// -------------------------------------------------------------------------------- MOUNT_MOTION_NS
 		MOUNT_MOTION_DEC_PROPERTY = indigo_init_switch_property(NULL, device->name, MOUNT_MOTION_DEC_PROPERTY_NAME, JOYSTICK_MAPPING_GROUP, "Move N/S", INDIGO_OK_STATE, INDIGO_RO_PERM, INDIGO_AT_MOST_ONE_RULE, 2);
-		if (MOUNT_MOTION_DEC_PROPERTY == NULL)
+		if (MOUNT_MOTION_DEC_PROPERTY == NULL) {
 			return INDIGO_FAILED;
+		}
 		indigo_init_switch_item(MOUNT_MOTION_NORTH_ITEM, MOUNT_MOTION_NORTH_ITEM_NAME, "North", false);
 		indigo_init_switch_item(MOUNT_MOTION_SOUTH_ITEM, MOUNT_MOTION_SOUTH_ITEM_NAME, "South", false);
 		// -------------------------------------------------------------------------------- MOUNT_MOTION_WE
 		MOUNT_MOTION_RA_PROPERTY = indigo_init_switch_property(NULL, device->name, MOUNT_MOTION_RA_PROPERTY_NAME, JOYSTICK_MAPPING_GROUP, "Move W/E", INDIGO_OK_STATE, INDIGO_RO_PERM, INDIGO_AT_MOST_ONE_RULE, 2);
-		if (MOUNT_MOTION_RA_PROPERTY == NULL)
+		if (MOUNT_MOTION_RA_PROPERTY == NULL) {
 			return INDIGO_FAILED;
+		}
 		indigo_init_switch_item(MOUNT_MOTION_WEST_ITEM, MOUNT_MOTION_WEST_ITEM_NAME, "West", false);
 		indigo_init_switch_item(MOUNT_MOTION_EAST_ITEM, MOUNT_MOTION_EAST_ITEM_NAME, "East", false);
 		// -------------------------------------------------------------------------------- MOUNT_ABORT_MOTION
 		MOUNT_ABORT_MOTION_PROPERTY = indigo_init_switch_property(NULL, device->name, MOUNT_ABORT_MOTION_PROPERTY_NAME, JOYSTICK_MAPPING_GROUP, "Abort motion", INDIGO_OK_STATE, INDIGO_RO_PERM, INDIGO_AT_MOST_ONE_RULE, 1);
-		if (MOUNT_ABORT_MOTION_PROPERTY == NULL)
+		if (MOUNT_ABORT_MOTION_PROPERTY == NULL) {
 			return INDIGO_FAILED;
+		}
 		indigo_init_switch_item(MOUNT_ABORT_MOTION_ITEM, MOUNT_ABORT_MOTION_ITEM_NAME, "Abort motion", false);
 		// -------------------------------------------------------------------------------- MOUNT_TRACKING
 		MOUNT_TRACKING_PROPERTY = indigo_init_switch_property(NULL, device->name, MOUNT_TRACKING_PROPERTY_NAME, JOYSTICK_MAPPING_GROUP, "Tracking", INDIGO_OK_STATE, INDIGO_RO_PERM, INDIGO_AT_MOST_ONE_RULE, 2);
-		if (MOUNT_TRACKING_PROPERTY == NULL)
+		if (MOUNT_TRACKING_PROPERTY == NULL) {
 			return INDIGO_FAILED;
+		}
 		indigo_init_switch_item(MOUNT_TRACKING_ON_ITEM, MOUNT_TRACKING_ON_ITEM_NAME, "Tracking", false);
 		indigo_init_switch_item(MOUNT_TRACKING_OFF_ITEM, MOUNT_TRACKING_OFF_ITEM_NAME, "Stopped" , false);
-		// -------------------------------------------------------------------------------- FOCUSER_CONTROL
-		FOCUSER_CONTROL_PROPERTY = indigo_init_switch_property(NULL, device->name, FOCUSER_CONTROL_PROPERTY_NAME, JOYSTICK_MAPPING_GROUP, "Focuser control", INDIGO_OK_STATE, INDIGO_RO_PERM, INDIGO_AT_MOST_ONE_RULE, 2);
-		if (FOCUSER_CONTROL_PROPERTY == NULL)
-			return INDIGO_FAILED;
-		indigo_init_switch_item(FOCUSER_FOCUS_IN_ITEM, FOCUSER_FOCUS_IN_ITEM_NAME, "Focus in", false);
-		indigo_init_switch_item(FOCUSER_FOCUS_OUT_ITEM, FOCUSER_FOCUS_OUT_ITEM_NAME, "Focus out" , false);
-
+		// --------------------------------------------------------------------------------
 		INDIGO_DEVICE_ATTACH_LOG(DRIVER_NAME, device->name);
 		return aux_enumerate_properties(device, NULL, NULL);
 	}
@@ -269,20 +293,76 @@ static indigo_result aux_attach(indigo_device *device) {
 static indigo_result aux_enumerate_properties(indigo_device *device, indigo_client *client, indigo_property *property) {
 	assert(device != NULL);
 	if (IS_CONNECTED) {
-		indigo_define_matching_property(JOYSTICK_BUTTONS_PROPERTY);
-		indigo_define_matching_property(JOYSTICK_AXES_PROPERTY);
-		indigo_define_matching_property(JOYSTICK_MAPPING_PROPERTY);
-		indigo_define_matching_property(JOYSTICK_OPTIONS_PROPERTY);
-		indigo_define_matching_property(MOUNT_PARK_PROPERTY);
-		indigo_define_matching_property(MOUNT_HOME_PROPERTY);
-		indigo_define_matching_property(MOUNT_SLEW_RATE_PROPERTY);
-		indigo_define_matching_property(MOUNT_MOTION_DEC_PROPERTY);
-		indigo_define_matching_property(MOUNT_MOTION_RA_PROPERTY);
-		indigo_define_matching_property(MOUNT_TRACKING_PROPERTY);
-		indigo_define_matching_property(MOUNT_ABORT_MOTION_PROPERTY);
-		indigo_define_matching_property(FOCUSER_CONTROL_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(JOYSTICK_BUTTONS_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(JOYSTICK_AXES_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(JOYSTICK_MAPPING_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(JOYSTICK_OPTIONS_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(MOUNT_PARK_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(MOUNT_HOME_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(MOUNT_SLEW_RATE_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(MOUNT_MOTION_DEC_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(MOUNT_MOTION_RA_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(MOUNT_TRACKING_PROPERTY);
+		INDIGO_DEFINE_MATCHING_PROPERTY(MOUNT_ABORT_MOTION_PROPERTY);
 	}
 	return indigo_aux_enumerate_properties(device, client, property);
+}
+
+static void aux_connection_handler(indigo_device *device) {
+	if (CONNECTION_CONNECTED_ITEM->sw.value) {
+		if (open_joystick(device)) {
+			MOUNT_PARK_PARKED_ITEM->sw.value = false;
+			MOUNT_PARK_UNPARKED_ITEM->sw.value = false;
+			MOUNT_HOME_ITEM->sw.value = false;
+			MOUNT_SLEW_RATE_GUIDE_ITEM->sw.value = false;
+			MOUNT_SLEW_RATE_CENTERING_ITEM->sw.value = false;
+			MOUNT_SLEW_RATE_FIND_ITEM->sw.value = false;
+			MOUNT_SLEW_RATE_MAX_ITEM->sw.value = false;
+			MOUNT_MOTION_NORTH_ITEM->sw.value = false;
+			MOUNT_MOTION_SOUTH_ITEM->sw.value = false;
+			MOUNT_MOTION_WEST_ITEM->sw.value = false;
+			MOUNT_MOTION_EAST_ITEM->sw.value = false;
+			MOUNT_ABORT_MOTION_ITEM->sw.value = false;
+			MOUNT_TRACKING_ON_ITEM->sw.value = false;
+			MOUNT_TRACKING_OFF_ITEM->sw.value = false;
+			indigo_define_property(device, JOYSTICK_AXES_PROPERTY, NULL);
+			indigo_define_property(device, JOYSTICK_BUTTONS_PROPERTY, NULL);
+			indigo_define_property(device, JOYSTICK_MAPPING_PROPERTY, NULL);
+			indigo_define_property(device, JOYSTICK_OPTIONS_PROPERTY, NULL);
+			indigo_define_property(device, MOUNT_PARK_PROPERTY, NULL);
+			indigo_define_property(device, MOUNT_HOME_PROPERTY, NULL);
+			indigo_define_property(device, MOUNT_SLEW_RATE_PROPERTY, NULL);
+			indigo_define_property(device, MOUNT_MOTION_DEC_PROPERTY, NULL);
+			indigo_define_property(device, MOUNT_MOTION_RA_PROPERTY, NULL);
+			indigo_define_property(device, MOUNT_TRACKING_PROPERTY, NULL);
+			indigo_define_property(device, MOUNT_ABORT_MOTION_PROPERTY, NULL);
+			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
+		} else {
+			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
+			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
+		}
+	} else {
+		close_joystick(device);
+		indigo_queue_remove(driver_queue, device, joystick_event_handler);
+		pthread_mutex_lock(&PRIVATE_DATA->event_mutex);
+		PRIVATE_DATA->event_head = 0;
+		PRIVATE_DATA->event_count = 0;
+		PRIVATE_DATA->event_handler_pending = false;
+		pthread_mutex_unlock(&PRIVATE_DATA->event_mutex);
+		indigo_delete_property(device, JOYSTICK_AXES_PROPERTY, NULL);
+		indigo_delete_property(device, JOYSTICK_BUTTONS_PROPERTY, NULL);
+		indigo_delete_property(device, JOYSTICK_MAPPING_PROPERTY, NULL);
+		indigo_delete_property(device, JOYSTICK_OPTIONS_PROPERTY, NULL);
+		indigo_delete_property(device, MOUNT_PARK_PROPERTY, NULL);
+		indigo_delete_property(device, MOUNT_HOME_PROPERTY, NULL);
+		indigo_delete_property(device, MOUNT_SLEW_RATE_PROPERTY, NULL);
+		indigo_delete_property(device, MOUNT_MOTION_DEC_PROPERTY, NULL);
+		indigo_delete_property(device, MOUNT_MOTION_RA_PROPERTY, NULL);
+		indigo_delete_property(device, MOUNT_TRACKING_PROPERTY, NULL);
+		indigo_delete_property(device, MOUNT_ABORT_MOTION_PROPERTY, NULL);
+		CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
+	}
+	indigo_aux_change_property(device, NULL, CONNECTION_PROPERTY);
 }
 
 static indigo_result aux_change_property(indigo_device *device, indigo_client *client, indigo_property *property) {
@@ -291,63 +371,30 @@ static indigo_result aux_change_property(indigo_device *device, indigo_client *c
 	assert(property != NULL);
 	if (indigo_property_match_changeable(CONNECTION_PROPERTY, property)) {
 		// -------------------------------------------------------------------------------- CONNECTION
-		if (indigo_ignore_connection_change(device, property))
+		if (indigo_ignore_connection_change(device, property)) {
 			return INDIGO_OK;
-		indigo_property_copy_values(CONNECTION_PROPERTY, property, false);
-		if (CONNECTION_CONNECTED_ITEM->sw.value) {
-			if (open_joystick(device)) {
-				MOUNT_PARK_PARKED_ITEM->sw.value = false;
-				MOUNT_PARK_UNPARKED_ITEM->sw.value = false;
-				MOUNT_HOME_ITEM->sw.value = false;
-				MOUNT_SLEW_RATE_GUIDE_ITEM->sw.value = false;
-				MOUNT_SLEW_RATE_CENTERING_ITEM->sw.value = false;
-				MOUNT_SLEW_RATE_FIND_ITEM->sw.value = false;
-				MOUNT_SLEW_RATE_MAX_ITEM->sw.value = false;
-				MOUNT_MOTION_NORTH_ITEM->sw.value = false;
-				MOUNT_MOTION_SOUTH_ITEM->sw.value = false;
-				MOUNT_MOTION_WEST_ITEM->sw.value = false;
-				MOUNT_MOTION_EAST_ITEM->sw.value = false;
-				MOUNT_ABORT_MOTION_ITEM->sw.value = false;
-				MOUNT_TRACKING_ON_ITEM->sw.value = false;
-				MOUNT_TRACKING_OFF_ITEM->sw.value = false;
-				FOCUSER_FOCUS_IN_ITEM->sw.value = false;
-				FOCUSER_FOCUS_OUT_ITEM->sw.value = false;
-				indigo_define_property(device, JOYSTICK_AXES_PROPERTY, NULL);
-				indigo_define_property(device, JOYSTICK_BUTTONS_PROPERTY, NULL);
-				indigo_define_property(device, JOYSTICK_MAPPING_PROPERTY, NULL);
-				indigo_define_property(device, JOYSTICK_OPTIONS_PROPERTY, NULL);
-				indigo_define_property(device, MOUNT_PARK_PROPERTY, NULL);
-				indigo_define_property(device, MOUNT_HOME_PROPERTY, NULL);
-				indigo_define_property(device, MOUNT_SLEW_RATE_PROPERTY, NULL);
-				indigo_define_property(device, MOUNT_MOTION_DEC_PROPERTY, NULL);
-				indigo_define_property(device, MOUNT_MOTION_RA_PROPERTY, NULL);
-				indigo_define_property(device, MOUNT_TRACKING_PROPERTY, NULL);
-				indigo_define_property(device, MOUNT_ABORT_MOTION_PROPERTY, NULL);
-				indigo_define_property(device, FOCUSER_CONTROL_PROPERTY, NULL);
-				CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
-			} else {
-				CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
-				indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
-			}
-		} else {
-			close_joystick(device);
-			indigo_delete_property(device, JOYSTICK_AXES_PROPERTY, NULL);
-			indigo_delete_property(device, JOYSTICK_BUTTONS_PROPERTY, NULL);
-			indigo_delete_property(device, JOYSTICK_MAPPING_PROPERTY, NULL);
-			indigo_delete_property(device, JOYSTICK_OPTIONS_PROPERTY, NULL);
-			indigo_delete_property(device, MOUNT_PARK_PROPERTY, NULL);
-			indigo_delete_property(device, MOUNT_HOME_PROPERTY, NULL);
-			indigo_delete_property(device, MOUNT_SLEW_RATE_PROPERTY, NULL);
-			indigo_delete_property(device, MOUNT_MOTION_DEC_PROPERTY, NULL);
-			indigo_delete_property(device, MOUNT_MOTION_RA_PROPERTY, NULL);
-			indigo_delete_property(device, MOUNT_TRACKING_PROPERTY, NULL);
-			indigo_delete_property(device, MOUNT_ABORT_MOTION_PROPERTY, NULL);
-			indigo_delete_property(device, FOCUSER_CONTROL_PROPERTY, NULL);
-			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 		}
+		indigo_property_copy_values(CONNECTION_PROPERTY, property, false);
+		INDIGO_UPDATE_PROPERTY_STATE(CONNECTION_PROPERTY, INDIGO_BUSY_STATE, NULL);
+		indigo_queue_add(driver_queue, device, INDIGO_TASK_PRIORITY_NORMAL, 0, aux_connection_handler, &driver_queue_mutex);
+		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(JOYSTICK_MAPPING_PROPERTY, property)) {
 		// -------------------------------------------------------------------------------- JOYSTICK_MAPPING
 		indigo_property_copy_values(JOYSTICK_MAPPING_PROPERTY, property, false);
+		if (JOYSTICK_MAPPING_PROPERTY->items[0].number.target != -1 && JOYSTICK_MAPPING_PROPERTY->items[0].number.target == JOYSTICK_MAPPING_PROPERTY->items[1].number.target) {
+			JOYSTICK_MAPPING_PROPERTY->state = INDIGO_ALERT_STATE;
+			indigo_update_property(device, JOYSTICK_MAPPING_PROPERTY, "Duplicate axes mapping");
+			return INDIGO_OK;
+		}
+		for (int i = 2; i < JOYSTICK_MAPPING_PROPERTY->count; i++) {
+			for (int j = 2; j < JOYSTICK_MAPPING_PROPERTY->count; j++) {
+				if (i != j && JOYSTICK_MAPPING_PROPERTY->items[i].number.target != -1 && JOYSTICK_MAPPING_PROPERTY->items[i].number.target == JOYSTICK_MAPPING_PROPERTY->items[j].number.target) {
+					JOYSTICK_MAPPING_PROPERTY->state = INDIGO_ALERT_STATE;
+					indigo_update_property(device, JOYSTICK_MAPPING_PROPERTY, "Duplicate buttons mapping");
+					return INDIGO_OK;
+				}
+			}
+		}
 		JOYSTICK_MAPPING_PROPERTY->state = INDIGO_OK_STATE;
 		indigo_update_property(device, JOYSTICK_MAPPING_PROPERTY, NULL);
 	} else if (indigo_property_match_changeable(JOYSTICK_OPTIONS_PROPERTY, property)) {
@@ -355,7 +402,7 @@ static indigo_result aux_change_property(indigo_device *device, indigo_client *c
 		indigo_property_copy_values(JOYSTICK_OPTIONS_PROPERTY, property, false);
 		JOYSTICK_OPTIONS_PROPERTY->state = INDIGO_OK_STATE;
 		indigo_update_property(device, JOYSTICK_OPTIONS_PROPERTY, NULL);
-	} else if (indigo_property_match_changeable(CONFIG_PROPERTY, property)) {
+	} else if (indigo_property_match(CONFIG_PROPERTY, property)) {
 		// -------------------------------------------------------------------------------- CONFIG
 		if (indigo_switch_match(CONFIG_SAVE_ITEM, property)) {
 			indigo_save_property(device, NULL, JOYSTICK_MAPPING_PROPERTY);
@@ -368,9 +415,8 @@ static indigo_result aux_change_property(indigo_device *device, indigo_client *c
 static indigo_result aux_detach(indigo_device *device) {
 	assert(device != NULL);
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
-		close_joystick(device);
 		indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
-		indigo_aux_change_property(device, NULL, CONNECTION_PROPERTY);
+		aux_connection_handler(device);
 	}
 	indigo_release_property(JOYSTICK_AXES_PROPERTY);
 	indigo_release_property(JOYSTICK_BUTTONS_PROPERTY);
@@ -383,7 +429,6 @@ static indigo_result aux_detach(indigo_device *device) {
 	indigo_release_property(MOUNT_MOTION_RA_PROPERTY);
 	indigo_release_property(MOUNT_TRACKING_PROPERTY);
 	indigo_release_property(MOUNT_ABORT_MOTION_PROPERTY);
-	indigo_release_property(FOCUSER_CONTROL_PROPERTY);
 	INDIGO_DEVICE_DETACH_LOG(DRIVER_NAME, device->name);
 	return indigo_aux_detach(device);
 }
@@ -399,20 +444,34 @@ static indigo_device *allocate_device(const char *name, long index, int button_c
 		NULL,
 		aux_detach
 		);
-	INDIGO_DRIVER_LOG(DRIVER_NAME, "Joystick %s #%08x with %d buttons and %d axes detected", name, index, button_count, axis_count + 2 * pov_count);
+	INDIGO_DRIVER_LOG(DRIVER_NAME, "Joystick %s #%08lx with %d buttons and %d axes detected", name, index, button_count, axis_count + 2 * pov_count);
 	joystick_private_data *private_data = indigo_safe_malloc(sizeof(joystick_private_data));
 	indigo_device *device = indigo_safe_malloc_copy(sizeof(indigo_device), &aux_template);
 	snprintf(device->name, INDIGO_NAME_SIZE, "%s #%08lx", name, index);
 	private_data->index = index;
-	private_data->button_count = button_count;
-	private_data->axis_count = axis_count;
-	private_data->pov_count = pov_count;
+	private_data->button_count = button_count < 0 ? 0 : button_count > MAX_BUTTONS ? MAX_BUTTONS : button_count;
+	private_data->axis_count = axis_count < 0 ? 0 : axis_count > MAX_AXES ? MAX_AXES : axis_count;
+	int max_pov_count = (MAX_AXES - private_data->axis_count) / 2;
+	private_data->pov_count = pov_count < 0 ? 0 : pov_count > max_pov_count ? max_pov_count : pov_count;
+	pthread_mutex_init(&private_data->event_mutex, NULL);
+#ifdef INDIGO_LINUX
+	private_data->fd = -1;
+#endif
 	device->private_data = private_data;
-	indigo_attach_device(device);
+	if (indigo_attach_device(device) != INDIGO_OK) {
+		pthread_mutex_destroy(&private_data->event_mutex);
+		free(private_data);
+		free(device);
+		return NULL;
+	}
 	return device;
 }
 
 static void event_axis(indigo_device *device, int axis, int value) {
+	if (axis < 0 || axis >= JOYSTICK_AXES_PROPERTY->count) {
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Ignoring invalid joystick axis %d", axis);
+		return;
+	}
 	//printf("AXIS %d -> %d\n", axis, value);
 	JOYSTICK_AXES_PROPERTY->items[axis].number.value = value;
 	JOYSTICK_AXES_PROPERTY->state = INDIGO_OK_STATE;
@@ -500,6 +559,10 @@ static void event_axis(indigo_device *device, int axis, int value) {
 }
 
 static void event_pov(indigo_device *device, int pov, int value) {
+	if (pov < 0 || pov >= PRIVATE_DATA->pov_count) {
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Ignoring invalid joystick POV %d", pov);
+		return;
+	}
 	//printf("POV %d -> %d\n", pov, value);
 	switch (value) {
 		case 0:
@@ -542,6 +605,10 @@ static void event_pov(indigo_device *device, int pov, int value) {
 }
 
 static void event_button(indigo_device *device, int button, bool value) {
+	if (button < 0 || button >= JOYSTICK_BUTTONS_PROPERTY->count) {
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Ignoring invalid joystick button %d", button);
+		return;
+	}
 	//printf("BUTTON %d -> %d\n", button, value);
 	JOYSTICK_BUTTONS_PROPERTY->items[button].sw.value = value;
 	JOYSTICK_BUTTONS_PROPERTY->state = INDIGO_OK_STATE;
@@ -587,19 +654,61 @@ static void event_button(indigo_device *device, int button, bool value) {
 		indigo_set_switch(MOUNT_SLEW_RATE_PROPERTY, MOUNT_SLEW_RATE_MAX_ITEM, true);
 		MOUNT_SLEW_RATE_PROPERTY->state = INDIGO_OK_STATE;
 		indigo_update_property(device, MOUNT_SLEW_RATE_PROPERTY, NULL);
-	} else  if (JOYSTICK_MAPPING_FOCUS_IN_ITEM->number.value == button) {
-		indigo_set_switch(FOCUSER_CONTROL_PROPERTY, FOCUSER_FOCUS_IN_ITEM, value);
-		FOCUSER_CONTROL_PROPERTY->state = INDIGO_OK_STATE;
-		indigo_update_property(device, FOCUSER_CONTROL_PROPERTY, NULL);
-	} else  if (JOYSTICK_MAPPING_FOCUS_OUT_ITEM->number.value == button) {
-		indigo_set_switch(FOCUSER_CONTROL_PROPERTY, FOCUSER_FOCUS_OUT_ITEM, value);
-		FOCUSER_CONTROL_PROPERTY->state = INDIGO_OK_STATE;
-		indigo_update_property(device, FOCUSER_CONTROL_PROPERTY, NULL);
+	}
+}
+
+static void joystick_event_handler(indigo_device *device) {
+	joystick_event events[MAX_EVENTS];
+	pthread_mutex_lock(&PRIVATE_DATA->event_mutex);
+	int count = PRIVATE_DATA->event_count;
+	for (int i = 0; i < count; i++) {
+		events[i] = PRIVATE_DATA->events[(PRIVATE_DATA->event_head + i) % MAX_EVENTS];
+	}
+	PRIVATE_DATA->event_head = 0;
+	PRIVATE_DATA->event_count = 0;
+	PRIVATE_DATA->event_handler_pending = false;
+	pthread_mutex_unlock(&PRIVATE_DATA->event_mutex);
+	if (!IS_CONNECTED) {
+		return;
+	}
+	for (int i = 0; i < count; i++) {
+		switch (events[i].type) {
+			case JOYSTICK_AXIS_EVENT:
+				event_axis(device, events[i].index, events[i].value);
+				break;
+			case JOYSTICK_BUTTON_EVENT:
+				event_button(device, events[i].index, events[i].value != 0);
+				break;
+			case JOYSTICK_POV_EVENT:
+				event_pov(device, events[i].index, events[i].value);
+				break;
+		}
+	}
+}
+
+static void queue_joystick_event(indigo_device *device, joystick_event_type type, int index, int value) {
+	bool schedule = false;
+	pthread_mutex_lock(&PRIVATE_DATA->event_mutex);
+	if (PRIVATE_DATA->event_count < MAX_EVENTS) {
+		int tail = (PRIVATE_DATA->event_head + PRIVATE_DATA->event_count) % MAX_EVENTS;
+		PRIVATE_DATA->events[tail] = (joystick_event){ type, index, value };
+		PRIVATE_DATA->event_count++;
+		if (!PRIVATE_DATA->event_handler_pending) {
+			PRIVATE_DATA->event_handler_pending = true;
+			schedule = true;
+		}
+	} else {
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Joystick event queue overflow");
+	}
+	pthread_mutex_unlock(&PRIVATE_DATA->event_mutex);
+	if (schedule) {
+		indigo_queue_add(driver_queue, device, INDIGO_TASK_PRIORITY_NORMAL, 0, joystick_event_handler, &driver_queue_mutex);
 	}
 }
 
 static void release_device(indigo_device *device) {
 	indigo_detach_device(device);
+	pthread_mutex_destroy(&PRIVATE_DATA->event_mutex);
 	free(PRIVATE_DATA);
 	free(device);
 }
@@ -616,7 +725,26 @@ static NSMutableArray *wrappers = nil;
 @implementation DDHidJoystickWrapper {
 	indigo_device *device;
 	DDHidJoystick *joystick;
-	dispatch_queue_global_t queue;
+}
+
+-(void)startListening {
+	if ([NSThread isMainThread]) {
+		[joystick startListening];
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), ^{
+			[joystick startListening];
+		});
+	}
+}
+
+-(void)stopListening {
+	if ([NSThread isMainThread]) {
+		[joystick stopListening];
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), ^{
+			[joystick stopListening];
+		});
+	}
 }
 
 +(void)rescan {
@@ -624,27 +752,28 @@ static NSMutableArray *wrappers = nil;
 		wrappers = [NSMutableArray array];
 	}
 	NSMutableArray *tmp = [NSMutableArray array];
-  __block NSArray *allJoysticks;
-  if ([NSThread isMainThread]) {
-    allJoysticks = DDHidJoystick.allJoysticks;
-  } else {
-    dispatch_sync(dispatch_get_main_queue(), ^{
-      allJoysticks = DDHidJoystick.allJoysticks;
-    });
-  }
+	NSMutableArray *remaining = [wrappers mutableCopy];
+	__block NSArray *allJoysticks;
+	if ([NSThread isMainThread]) {
+		allJoysticks = DDHidJoystick.allJoysticks;
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), ^{
+			allJoysticks = DDHidJoystick.allJoysticks;
+		});
+	}
 	for (DDHidJoystick *joystick in allJoysticks) {
-		bool found = false;
-		for (DDHidJoystickWrapper *wrapper in wrappers) {
+		DDHidJoystickWrapper *found_wrapper = nil;
+		for (DDHidJoystickWrapper *wrapper in remaining) {
 			if (joystick.locationId == wrapper->joystick.locationId) {
-				[tmp addObject:wrapper];
-				[wrappers removeObject:wrapper];
-				found = true;
+				found_wrapper = wrapper;
 				break;
 			}
 		}
-		if (!found) {
+		if (found_wrapper != nil) {
+			[tmp addObject:found_wrapper];
+			[remaining removeObject:found_wrapper];
+		} else {
 			DDHidJoystickWrapper *wrapper = [[DDHidJoystickWrapper alloc] init];
-			
 			int axis_count = 0;
 			int pov_count = 0;
 			if (joystick.countOfSticks > 0) {
@@ -658,39 +787,46 @@ static NSMutableArray *wrappers = nil;
 				axis_count += stick.countOfStickElements;
 				pov_count = stick.countOfPovElements;
 			}
-			
 			wrapper->device = allocate_device([joystick.productName cStringUsingEncoding:NSASCIIStringEncoding], joystick.locationId, joystick.numberOfButtons, axis_count, pov_count);
+			if (wrapper->device == NULL) {
+				continue;
+			}
 			wrapper->joystick = joystick;
-			wrapper->queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
 			[joystick setDelegate:wrapper];
-			dispatch_async(dispatch_get_main_queue(), ^{
-				[joystick startListening];
-			});
 			[tmp addObject:wrapper];
 		}
 	}
-	for (DDHidJoystickWrapper *wrapper in wrappers) {
-		dispatch_async(wrapper->queue, ^{
-			release_device(wrapper->device);
-		});
+	for (DDHidJoystickWrapper *wrapper in remaining) {
+		[wrapper stopListening];
+		indigo_device *removed_device = wrapper->device;
+		wrapper->device = NULL;
+		release_device(removed_device);
 	}
 	wrappers = tmp;
 }
 
 +(void)shutdown {
 	for (DDHidJoystickWrapper *wrapper in wrappers) {
-		dispatch_async(wrapper->queue, ^{
-			release_device(wrapper->device);
-		});
+		[wrapper stopListening];
+		indigo_device *removed_device = wrapper->device;
+		wrapper->device = NULL;
+		release_device(removed_device);
 	}
+	wrappers = nil;
+}
+
++(indigo_result)verifyDisconnected {
+	for (DDHidJoystickWrapper *wrapper in wrappers) {
+		VERIFY_NOT_CONNECTED(wrapper->device);
+	}
+	return INDIGO_OK;
 }
 
 +(void)startDevice:(indigo_device *)device {
 	for (DDHidJoystickWrapper *wrapper in wrappers) {
 		if (wrapper->device == device) {
-			dispatch_async(dispatch_get_main_queue(), ^{
-				[wrapper->joystick startListening];
-			});
+			[wrapper startListening];
+			return;
 		}
 	}
 }
@@ -698,9 +834,8 @@ static NSMutableArray *wrappers = nil;
 +(void)stopDevice:(indigo_device *)device {
 	for (DDHidJoystickWrapper *wrapper in wrappers) {
 		if (wrapper->device == device) {
-			dispatch_async(dispatch_get_main_queue(), ^{
-				[wrapper->joystick stopListening];
-			});
+			[wrapper stopListening];
+			return;
 		}
 	}
 }
@@ -716,53 +851,43 @@ static NSMutableArray *wrappers = nil;
 
 -(void)ddhidJoystick: (DDHidJoystick *) joystick stick: (unsigned) stick xChanged: (int) value {
 	indigo_device *device = self->device;
-	if (IS_CONNECTED) {
-		dispatch_async(queue, ^{
-			event_axis(device, 0, value);
-		});
+	if (device != NULL) {
+		queue_joystick_event(device, JOYSTICK_AXIS_EVENT, 0, value);
 	}
 }
 
 -(void)ddhidJoystick: (DDHidJoystick *) joystick stick: (unsigned) stick yChanged: (int) value {
 	indigo_device *device = self->device;
-	if (IS_CONNECTED) {
-		dispatch_async(queue, ^{
-			event_axis(device, 1, value);
-		});
+	if (device != NULL) {
+		queue_joystick_event(device, JOYSTICK_AXIS_EVENT, 1, value);
 	}
 }
 
 -(void)ddhidJoystick: (DDHidJoystick *) joystick stick: (unsigned) stick otherAxis: (unsigned) otherAxis valueChanged: (int) value {
 	indigo_device *device = self->device;
-	if (IS_CONNECTED) {
-		dispatch_async(queue, ^{
-			event_axis(device, otherAxis + 2, value);
-		});
+	if (device != NULL) {
+		queue_joystick_event(device, JOYSTICK_AXIS_EVENT, otherAxis + 2, value);
 	}
 }
 
 -(void)ddhidJoystick: (DDHidJoystick *) joystick stick: (unsigned) stick povNumber: (unsigned) povNumber valueChanged: (int) value {
 	indigo_device *device = self->device;
-	if (IS_CONNECTED) {
-		dispatch_async(queue, ^{
-			event_pov(device, povNumber, value);
-		});
+	if (device != NULL) {
+		queue_joystick_event(device, JOYSTICK_POV_EVENT, povNumber, value);
 	}
 }
+
 -(void)ddhidJoystick: (DDHidJoystick *) joystick buttonDown: (unsigned) buttonNumber {
 	indigo_device *device = self->device;
-	if (IS_CONNECTED) {
-		dispatch_async(queue, ^{
-			event_button(device, buttonNumber, 1);
-		});
+	if (device != NULL) {
+		queue_joystick_event(device, JOYSTICK_BUTTON_EVENT, buttonNumber, 1);
 	}
 }
+
 -(void)ddhidJoystick: (DDHidJoystick *) joystick buttonUp: (unsigned) buttonNumber {
 	indigo_device *device = self->device;
-	if (IS_CONNECTED) {
-		dispatch_async(queue, ^{
-			event_button(device, buttonNumber, 0);
-		});
+	if (device != NULL) {
+		queue_joystick_event(device, JOYSTICK_BUTTON_EVENT, buttonNumber, 0);
 	}
 }
 
@@ -777,64 +902,50 @@ static void close_joystick(indigo_device *device) {
 	[DDHidJoystickWrapper stopDevice:device];
 }
 
+static indigo_result verify_joysticks_disconnected() {
+	return [DDHidJoystickWrapper verifyDisconnected];
+}
+
 #endif
 
 #ifdef INDIGO_LINUX
 
 // -------------------------------------------------------------------------------- Linux wrapper
 
-#define MAX_DEVICES		5
-
 static indigo_device *devices[MAX_DEVICES];
-static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static void *poll(indigo_device *device) {
+static void *poll(void *arg) {
+	indigo_device *device = arg;
+	indigo_rename_thread("Joystick poller");
 	int index = PRIVATE_DATA->index;
-	int joy_fd;
-	char path[128];
+	int joy_fd = PRIVATE_DATA->fd;
 	INDIGO_DRIVER_LOG(DRIVER_NAME, "Joystick #%ld poll thread started", index);
-	sprintf(path, "/dev/input/js%ld", PRIVATE_DATA->index);
-	if ((joy_fd = open(path, O_RDONLY)) == -1) {
-		PRIVATE_DATA->fd = 0;
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Can't access %s (%s)", path, strerror(errno));
-	} else {
-		struct js_event js;
-		PRIVATE_DATA->fd = joy_fd;
-		fcntl(joy_fd, F_SETFL, O_NONBLOCK);
-		while (joy_fd) {
-			if (read(joy_fd, &js, sizeof(struct js_event)) > 0) {
-				pthread_mutex_lock(&mutex);
-				if (devices[index]) {
-					switch (js.type & ~JS_EVENT_INIT) {
-						case JS_EVENT_AXIS: {
-							if (js.number < MAX_AXES && PRIVATE_DATA->last_axis_value[js.number] != js.value) {
-								event_axis(device, js.number, 2 * js.value);
-								PRIVATE_DATA->last_axis_value[js.number] = js.value;
-							}
-							break;
-						}
-						case JS_EVENT_BUTTON: {
-							if (js.number < MAX_BUTTONS && PRIVATE_DATA->last_button_state[js.number] != js.value) {
-								event_button(device, js.number, js.value);
-								PRIVATE_DATA->last_button_state[js.number] = js.value;
-							}
-							break;
-						}
+	struct js_event js;
+	while (!atomic_load(&PRIVATE_DATA->stop_requested)) {
+		ssize_t count = read(joy_fd, &js, sizeof(js));
+		if (count == sizeof(js)) {
+			switch (js.type & ~JS_EVENT_INIT) {
+				case JS_EVENT_AXIS:
+					if (js.number < PRIVATE_DATA->axis_count && PRIVATE_DATA->last_axis_value[js.number] != js.value) {
+						PRIVATE_DATA->last_axis_value[js.number] = js.value;
+						queue_joystick_event(device, JOYSTICK_AXIS_EVENT, js.number, 2 * js.value);
 					}
-				} else {
-					joy_fd = 0;
-				}
-				pthread_mutex_unlock(&mutex);
-			} else {
-				if (errno == EBADF) {
-					joy_fd = 0;
-				} else {
-					indigo_usleep(100000);
-				}
+					break;
+				case JS_EVENT_BUTTON:
+					if (js.number < PRIVATE_DATA->button_count && PRIVATE_DATA->last_button_state[js.number] != (js.value != 0)) {
+						PRIVATE_DATA->last_button_state[js.number] = js.value != 0;
+						queue_joystick_event(device, JOYSTICK_BUTTON_EVENT, js.number, js.value);
+					}
+					break;
 			}
+		} else if (count < 0 && errno != EAGAIN && errno != EINTR) {
+			break;
+		} else {
+			indigo_usleep(10000);
 		}
 	}
 	INDIGO_DRIVER_LOG(DRIVER_NAME, "Joystick #%ld poll thread finished", index);
+	return NULL;
 }
 
 static void rescan() {
@@ -844,13 +955,11 @@ static void rescan() {
 		return;
 	}
 	struct dirent * dir;
-	bool found[MAX_DEVICES];
-	pthread_mutex_lock(&mutex);
-	for (int i = 0; i < MAX_DEVICES; i++)
-		found[i] = false;
+	bool found[MAX_DEVICES] = { false };
 	while ((dir = readdir(dev_input)) != NULL) {
 		int index = 0;
-		if (sscanf(dir->d_name, "js%d", &index) == 1) {
+		char extra = 0;
+		if (sscanf(dir->d_name, "js%d%c", &index, &extra) == 1 && index >= 0 && index < MAX_DEVICES) {
 			found[index] = true;
 			if (devices[index]) {
 				continue;
@@ -860,59 +969,99 @@ static void rescan() {
 			memset(name, 0, sizeof(name));
 			snprintf(name, sizeof(name), "/dev/input/%s", dir->d_name);
 			if ((joy_fd = open(name, O_RDONLY)) == -1) {
-				pthread_mutex_unlock(&mutex);
 				INDIGO_DRIVER_ERROR(DRIVER_NAME, "Can't access %s (%s)", name, strerror(errno));
-				return;
+				continue;
 			}
-			ioctl(joy_fd, JSIOCGAXES, &axis_count);
-			ioctl(joy_fd, JSIOCGBUTTONS, &button_count);
-			ioctl(joy_fd, JSIOCGNAME(80), &name);
+			bool valid = ioctl(joy_fd, JSIOCGAXES, &axis_count) >= 0 && ioctl(joy_fd, JSIOCGBUTTONS, &button_count) >= 0 && ioctl(joy_fd, JSIOCGNAME(80), name) >= 0;
 			close(joy_fd);
-			devices[index] = allocate_device(name, index, button_count, axis_count, 0);
+			if (valid) {
+				devices[index] = allocate_device(name, index, button_count, axis_count, 0);
+			}
 		}
 	}
+	closedir(dev_input);
 	for (int i = 0; i < MAX_DEVICES; i++) {
 		if (devices[i] && !found[i]) {
 			release_device(devices[i]);
 			devices[i] = NULL;
 		}
 	}
-	pthread_mutex_unlock(&mutex);
 }
 
-static void shutdown() {
-	pthread_mutex_lock(&mutex);
+static void shutdown_joystick() {
 	for (int i = 0; i < MAX_DEVICES; i++) {
 		if (devices[i]) {
 			release_device(devices[i]);
 			devices[i] = NULL;
 		}
 	}
-	pthread_mutex_unlock(&mutex);
 }
 
 static bool open_joystick(indigo_device *device) {
-	indigo_async((void *(*)(void *))poll, device);
+	if (PRIVATE_DATA->thread_started) {
+		return true;
+	}
+	char path[128];
+	snprintf(path, sizeof(path), "/dev/input/js%ld", PRIVATE_DATA->index);
+	int joy_fd = open(path, O_RDONLY);
+	if (joy_fd < 0) {
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Can't access %s (%s)", path, strerror(errno));
+		return false;
+	}
+	if (fcntl(joy_fd, F_SETFL, O_NONBLOCK) < 0) {
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Can't configure %s (%s)", path, strerror(errno));
+		close(joy_fd);
+		return false;
+	}
+	PRIVATE_DATA->fd = joy_fd;
+	atomic_store(&PRIVATE_DATA->stop_requested, false);
+	if (pthread_create(&PRIVATE_DATA->thread, NULL, poll, device) != 0) {
+		close(joy_fd);
+		PRIVATE_DATA->fd = -1;
+		return false;
+	}
+	PRIVATE_DATA->thread_started = true;
 	return true;
 }
 
 static void close_joystick(indigo_device *device) {
-	if (PRIVATE_DATA->fd) {
-		close(PRIVATE_DATA->fd);
-		PRIVATE_DATA->fd = 0;
+	if (PRIVATE_DATA->thread_started) {
+		atomic_store(&PRIVATE_DATA->stop_requested, true);
+		if (PRIVATE_DATA->fd >= 0) {
+			close(PRIVATE_DATA->fd);
+			PRIVATE_DATA->fd = -1;
+		}
+		pthread_join(PRIVATE_DATA->thread, NULL);
+		PRIVATE_DATA->thread_started = false;
 	}
+}
+
+static indigo_result verify_joysticks_disconnected() {
+	for (int i = 0; i < MAX_DEVICES; i++) {
+		VERIFY_NOT_CONNECTED(devices[i]);
+	}
+	return INDIGO_OK;
 }
 
 #endif
 
-static int hotplug_callback(libusb_context *ctx, libusb_device *dev, libusb_hotplug_event event, void *user_data) {
-	indigo_usleep(500000);
+static void rescan_handler(indigo_device *device) {
+	atomic_store(&rescan_pending, false);
 #ifdef INDIGO_MACOS
-  [DDHidJoystickWrapper rescan];
+	[DDHidJoystickWrapper rescan];
+	if (!atomic_load(&shutting_down) && !atomic_exchange(&rescan_pending, true)) {
+		indigo_queue_add(driver_queue, NULL, INDIGO_TASK_PRIORITY_NORMAL, JOYSTICK_MACOS_RESCAN_INTERVAL, rescan_handler, &driver_queue_mutex);
+	}
 #endif
 #ifdef INDIGO_LINUX
 	rescan();
 #endif
+}
+
+static int hotplug_callback(libusb_context *ctx, libusb_device *dev, libusb_hotplug_event event, void *user_data) {
+	if (!atomic_load(&shutting_down) && !atomic_exchange(&rescan_pending, true)) {
+		indigo_queue_add(driver_queue, NULL, INDIGO_TASK_PRIORITY_NORMAL, JOYSTICK_RESCAN_DELAY, rescan_handler, &driver_queue_mutex);
+	}
 	return 0;
 };
 
@@ -923,44 +1072,71 @@ indigo_result indigo_aux_joystick(indigo_driver_action action, indigo_driver_inf
 
 	SET_DRIVER_INFO(info, "HID Joystick", __FUNCTION__, DRIVER_VERSION, true, last_action);
 
-	if (action == last_action)
+	if (action == last_action) {
 		return INDIGO_OK;
+	}
 
 	switch (action) {
-	case INDIGO_DRIVER_INIT:
-		last_action = action;
-#ifdef INDIGO_MACOS
-		[DDHidJoystickWrapper rescan];
-#endif
-#ifdef INDIGO_LINUX
-			rescan();
-#endif
-		indigo_start_usb_event_handler();
-		int rc = libusb_hotplug_register_callback(NULL, LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED | LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT, LIBUSB_HOTPLUG_NO_FLAGS, LIBUSB_HOTPLUG_MATCH_ANY, LIBUSB_HOTPLUG_MATCH_ANY, LIBUSB_HOTPLUG_MATCH_ANY, hotplug_callback, NULL, &callback_handle);
-		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "libusb_hotplug_register_callback ->  %s", rc < 0 ? libusb_error_name(rc) : "OK");
-		return rc >= 0 ? INDIGO_OK : INDIGO_FAILED;
+			case INDIGO_DRIVER_INIT: {
+				last_action = action;
+				atomic_store(&shutting_down, false);
+				atomic_store(&rescan_pending, false);
+				driver_queue = indigo_queue_create(NULL);
+				if (driver_queue == NULL) {
+					last_action = INDIGO_DRIVER_SHUTDOWN;
+					return INDIGO_FAILED;
+				}
+				indigo_queue_set_name(driver_queue, "Queue HID Joystick");
+		#ifdef INDIGO_MACOS
+				[DDHidJoystickWrapper rescan];
+				atomic_store(&rescan_pending, true);
+				indigo_queue_add(driver_queue, NULL, INDIGO_TASK_PRIORITY_NORMAL, JOYSTICK_MACOS_RESCAN_INTERVAL, rescan_handler, &driver_queue_mutex);
+		#endif
+		#ifdef INDIGO_LINUX
+				rescan();
+		#endif
+				indigo_start_usb_event_handler();
+				int rc = libusb_hotplug_register_callback(NULL, LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED | LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT, LIBUSB_HOTPLUG_NO_FLAGS, LIBUSB_HOTPLUG_MATCH_ANY, LIBUSB_HOTPLUG_MATCH_ANY, LIBUSB_HOTPLUG_MATCH_ANY, hotplug_callback, NULL, &callback_handle);
+				INDIGO_DRIVER_DEBUG(DRIVER_NAME, "libusb_hotplug_register_callback ->  %s", rc < 0 ? libusb_error_name(rc) : "OK");
+				if (rc < 0) {
+		#ifdef INDIGO_MACOS
+					[DDHidJoystickWrapper shutdown];
+		#endif
+		#ifdef INDIGO_LINUX
+					shutdown_joystick();
+		#endif
+					indigo_queue_delete(&driver_queue);
+					last_action = INDIGO_DRIVER_SHUTDOWN;
+					return INDIGO_FAILED;
+				}
+				return INDIGO_OK;
+			}
 
-	case INDIGO_DRIVER_SHUTDOWN:
-#ifdef INDIGO_LINUX
-		for (int i = 0; i < MAX_DEVICES; i++)
-			VERIFY_NOT_CONNECTED(devices[i]);
-#endif
-#ifdef INDIGO_MACOS
-		//TBD
-#endif
-		last_action = action;
-		libusb_hotplug_deregister_callback(NULL, callback_handle);
-		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "libusb_hotplug_deregister_callback");
-#ifdef INDIGO_MACOS
-		[DDHidJoystickWrapper shutdown];
-#endif
-#ifdef INDIGO_LINUX
-			shutdown();
-#endif
-		break;
+			case INDIGO_DRIVER_SHUTDOWN: {
+				pthread_mutex_lock(&driver_queue_mutex);
+				indigo_result result = verify_joysticks_disconnected();
+				pthread_mutex_unlock(&driver_queue_mutex);
+				if (result != INDIGO_OK) {
+					return result;
+				}
+				last_action = action;
+				atomic_store(&shutting_down, true);
+				libusb_hotplug_deregister_callback(NULL, callback_handle);
+				INDIGO_DRIVER_DEBUG(DRIVER_NAME, "libusb_hotplug_deregister_callback");
+				indigo_queue_remove(driver_queue, NULL, rescan_handler);
+				indigo_queue_drain(driver_queue);
+		#ifdef INDIGO_MACOS
+				[DDHidJoystickWrapper shutdown];
+		#endif
+		#ifdef INDIGO_LINUX
+				shutdown_joystick();
+		#endif
+				indigo_queue_delete(&driver_queue);
+				break;
+			}
 
-	case INDIGO_DRIVER_INFO:
-		break;
+		case INDIGO_DRIVER_INFO:
+			break;
 	}
 
 	return INDIGO_OK;
