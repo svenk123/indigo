@@ -33,6 +33,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <arpa/inet.h>
+#include <sys/socket.h>
 
 
 #include <indigo/indigo_json.h>
@@ -42,6 +43,14 @@
 //#define INDIGO_TRACE_PROTOCOL(c) c
 
 static pthread_mutex_t json_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Socket is owned and closed by the server worker thread, only shut it down here to wake up its reader
+static void json_shutdown(indigo_adapter_context *client_context) {
+	shutdown(client_context->input, SHUT_RDWR);
+	if (client_context->output != client_context->input)
+		shutdown(client_context->output, SHUT_RDWR);
+	client_context->output = client_context->input = -1;
+}
 
 static bool ws_write(int handle, const char *buffer, long length) {
 	uint8_t header[10] = { 0x81 };
@@ -88,6 +97,10 @@ static indigo_result json_define_property(indigo_client *client, indigo_device *
 	indigo_adapter_context *client_context = (indigo_adapter_context *)client->client_context;
 	assert(client_context != NULL);
 	int handle = client_context->output;
+	if (handle < 0) {
+		pthread_mutex_unlock(&json_mutex);
+		return INDIGO_OK;
+	}
 	long buffer_size = JSON_BUFFER_SIZE;
 	char *output_buffer = indigo_safe_malloc(buffer_size);
 	char *pnt = output_buffer;
@@ -194,13 +207,7 @@ static indigo_result json_define_property(indigo_client *client, indigo_device *
 		INDIGO_TRACE_PROTOCOL(indigo_trace("%d <- %s\n", handle, output_buffer));
 	} else {
 		INDIGO_TRACE_PROTOCOL(indigo_trace("%d <- FAILED\n", handle));
-		if (client_context->output == client_context->input) {
-			close(client_context->input);
-		} else {
-			close(client_context->input);
-			close(client_context->output);
-		}
-		client_context->output = client_context->input = -1;
+		json_shutdown(client_context);
 	}
 	free(output_buffer);
 	pthread_mutex_unlock(&json_mutex);
@@ -215,11 +222,13 @@ static indigo_result json_update_property(indigo_client *client, indigo_device *
 		return INDIGO_OK;
 	if (client->version == INDIGO_VERSION_NONE)
 		return INDIGO_OK;
+	pthread_mutex_lock(&json_mutex);
 	indigo_adapter_context *client_context = (indigo_adapter_context *)client->client_context;
 	int handle = client_context->output;
-	if (handle <= 0)
+	if (handle < 0) {
+		pthread_mutex_unlock(&json_mutex);
 		return INDIGO_OK;
-	pthread_mutex_lock(&json_mutex);
+	}
 	assert(client_context != NULL);
 	long buffer_size = JSON_BUFFER_SIZE;
 	char *output_buffer = indigo_safe_malloc(buffer_size);
@@ -312,13 +321,7 @@ static indigo_result json_update_property(indigo_client *client, indigo_device *
 		INDIGO_TRACE_PROTOCOL(indigo_trace("%d <- %s\n", handle, output_buffer));
 	} else {
 		INDIGO_TRACE_PROTOCOL(indigo_trace("%d <- FAILED\n", handle));
-		if (client_context->output == client_context->input) {
-			close(client_context->input);
-		} else {
-			close(client_context->input);
-			close(client_context->output);
-		}
-		client_context->output = client_context->input = -1;
+		json_shutdown(client_context);
 	}
 	free(output_buffer);
 	pthread_mutex_unlock(&json_mutex);
@@ -337,6 +340,10 @@ static indigo_result json_delete_property(indigo_client *client, indigo_device *
 	indigo_adapter_context *client_context = (indigo_adapter_context *)client->client_context;
 	assert(client_context != NULL);
 	int handle = client_context->output;
+	if (handle < 0) {
+		pthread_mutex_unlock(&json_mutex);
+		return INDIGO_OK;
+	}
 	char *output_buffer = indigo_safe_malloc(JSON_BUFFER_SIZE);
 	char *pnt = output_buffer;
 	long size;
@@ -359,13 +366,7 @@ static indigo_result json_delete_property(indigo_client *client, indigo_device *
 		INDIGO_TRACE_PROTOCOL(indigo_trace("%d <- %s\n", handle, output_buffer));
 	} else {
 		INDIGO_TRACE_PROTOCOL(indigo_trace("%d <- FAILED\n", handle));
-		if (client_context->output == client_context->input) {
-			close(client_context->input);
-		} else {
-			close(client_context->input);
-			close(client_context->output);
-		}
-		client_context->output = client_context->input = -1;
+		json_shutdown(client_context);
 	}
 	free(output_buffer);
 	pthread_mutex_unlock(&json_mutex);
@@ -381,6 +382,10 @@ static indigo_result json_message_property(indigo_client *client, indigo_device 
 	indigo_adapter_context *client_context = (indigo_adapter_context *)client->client_context;
 	assert(client_context != NULL);
 	int handle = client_context->output;
+	if (handle < 0) {
+		pthread_mutex_unlock(&json_mutex);
+		return INDIGO_OK;
+	}
 	char *output_buffer = indigo_safe_malloc(JSON_BUFFER_SIZE);
 	char *pnt = output_buffer;
 	long size = sprintf(pnt, "{ \"message\": \"%s\" }", message);
@@ -388,24 +393,10 @@ static indigo_result json_message_property(indigo_client *client, indigo_device 
 		INDIGO_TRACE_PROTOCOL(indigo_trace("%d <- %s\n", handle, output_buffer));
 	} else {
 		INDIGO_TRACE_PROTOCOL(indigo_trace("%d <- FAILED\n", handle));
-		if (client_context->output == client_context->input) {
-			close(client_context->input);
-		} else {
-			close(client_context->input);
-			close(client_context->output);
-		}
-		client_context->output = client_context->input = -1;
+		json_shutdown(client_context);
 	}
 	free(output_buffer);
 	pthread_mutex_unlock(&json_mutex);
-	return INDIGO_OK;
-}
-
-static indigo_result json_detach(indigo_client *client) {
-	assert(client != NULL);
-	indigo_adapter_context *client_context = (indigo_adapter_context *)client->client_context;
-	close(client_context->input);
-	close(client_context->output);
 	return INDIGO_OK;
 }
 
@@ -417,7 +408,7 @@ indigo_client *indigo_json_device_adapter(int input, int ouput, bool web_socket)
 		json_update_property,
 		json_delete_property,
 		json_message_property,
-		json_detach,
+		NULL,
 
 	};
 	indigo_client *client = indigo_safe_malloc_copy(sizeof(indigo_client), &client_template);
