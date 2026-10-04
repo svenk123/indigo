@@ -395,6 +395,24 @@ input {
 	border-radius: 4px;
 }
 
+.indigo-guider-graph-legend {
+	position: absolute;
+	top: 4px;
+	left: 8px;
+	color: #fff;
+	font-size: 0.75rem;
+}
+
+.indigo-guider-graph-legend > span {
+	margin-right: 0.75rem;
+}
+
+.indigo-guider-graph-swatch {
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+}
+
 .indigo-autofocus-graph {
 	position: absolute;
 	bottom: 10px;
@@ -620,6 +638,28 @@ indigo-sky-map,
 	top: 0.5rem;
 	left: 0.5rem;
 	z-index: 5;
+}
+
+.indigo-sky-map-allsky {
+	position: absolute;
+	top: 0;
+	left: 0;
+	pointer-events: none;
+}
+
+.indigo-sky-map-allsky-controls {
+	top: 3.5rem;
+	left: 0.5rem;
+	z-index: 6;
+	font-size: 0.8rem;
+}
+
+.indigo-sky-map-allsky-controls label {
+	width: 70px;
+}
+
+.indigo-sky-map-allsky-controls input[type=range] {
+	width: 120px;
 }
 
 .fixed {

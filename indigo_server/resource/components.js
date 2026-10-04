@@ -2092,6 +2092,7 @@ app.component('indigo-navbar', {
 		return {
 			appLinks: [
 				{ id: "imager", href: "imager.html", icon: "imager.png", title: "Imager" },
+				{ id: "imager2", href: "imager2.html", icon: "imager.png", title: "Imager #2", device: "Imager Agent #2" },
 				{ id: "mount", href: "mount.html", icon: "mount.png", title: "Mount" },
 				{ id: "guider", href: "guider.html", icon: "guider.png", title: "Guider" },
 				{ id: "astrometry", href: "astrometry.html", icon: "astrometry.png", title: "Astrometry" },
@@ -2110,6 +2111,12 @@ app.component('indigo-navbar', {
 			if (properties == null)
 				return null;
 			return properties["FEATURES"];
+		},
+		visibleAppLinks: function() {
+			var devices = this.$root != null ? this.$root.devices : null;
+			return this.appLinks.filter(function(link) {
+				return link.device == null || (devices != null && devices[link.device] != null);
+			});
 		},
 		webApps: function() {
 			if (this.features == null)
@@ -2161,7 +2168,7 @@ app.component('indigo-navbar', {
 						<img src="ctrl.png" width="40" height="40" class="align-middle" alt=""/>
 					</a>
 					<template v-if="webApps">
-						<a v-for="link in appLinks" :key="link.id" class="nav-link" :href="link.href" data-bs-toggle="tooltip" :title="link.title">
+						<a v-for="link in visibleAppLinks" :key="link.id" class="nav-link" :href="link.href" data-bs-toggle="tooltip" :title="link.title">
 							<img :src="link.icon" width="40" height="40" class="d-inline-block align-middle" alt=""/>
 						</a>
 					</template>
@@ -2624,6 +2631,10 @@ app.component('indigo-guider-graph', {
 		<div class="indigo-guider-graph">
 			<canvas ref="driftCanvas" data-bs-toggle="tooltip" title="Drift"></canvas>
 			<canvas ref="corrCanvas" data-bs-toggle="tooltip" title="Corrections"></canvas>
+			<div class="indigo-guider-graph-legend">
+				<span><span class="indigo-guider-graph-swatch" style="background: #33b5ff;"></span> RA</span>
+				<span><span class="indigo-guider-graph-swatch" style="background: #ff5555;"></span> Dec</span>
+			</div>
 		</div>
 		`
 });
@@ -2724,6 +2735,31 @@ app.component('indigo-wifi-setup', {
 		`
 });
 
+var INDIGO_ALLSKY_STORAGE_KEY = "indigo.mount.allsky";
+
+function indigoLoadAllskySettings() {
+	var settings = { enabled: false, rotation: 0, scale: 100, offsetX: 0, offsetY: 0 };
+	try {
+		var stored = localStorage.getItem(INDIGO_ALLSKY_STORAGE_KEY);
+		if (stored != null) {
+			var parsed = JSON.parse(stored);
+			for (var key in settings) {
+				if (parsed[key] != null)
+					settings[key] = parsed[key];
+			}
+		}
+	} catch (e) {
+	}
+	return settings;
+}
+
+function indigoSaveAllskySettings(settings) {
+	try {
+		localStorage.setItem(INDIGO_ALLSKY_STORAGE_KEY, JSON.stringify(settings));
+	} catch (e) {
+	}
+}
+
 app.component('indigo-sky-map', {
 	props: {
 		currentCoordinates: Array,
@@ -2747,6 +2783,7 @@ app.component('indigo-sky-map', {
 			localZoomLevel: this.zoomLevel,
 			follow: 0,
 			zooms: [ 500, 750, 1000, 1500, 2048, 2500 ],
+			allsky: indigoLoadAllskySettings(),
 			canvas: null,
 			canvasClickHandler: null,
 			resizeHandler: null
@@ -2799,6 +2836,25 @@ app.component('indigo-sky-map', {
 		},
 		dark: function() {
 			this.displayMap();
+		},
+		allsky: {
+			handler: function() {
+				indigoSaveAllskySettings(this.allsky);
+			},
+			deep: true
+		},
+		'allsky.enabled': function() {
+			this.displayMap();
+		}
+	},
+	computed: {
+		allskyStyle: function() {
+			var width = this.celestialConfig != null ? this.celestialConfig.width : 0;
+			return {
+				width: width + "px",
+				height: width + "px",
+				transform: "translate(" + this.allsky.offsetX + "%, " + this.allsky.offsetY + "%) rotate(" + this.allsky.rotation + "deg) scale(" + (this.allsky.scale / 100) + ")"
+			};
 		}
 	},
 	methods: {
@@ -2849,15 +2905,10 @@ app.component('indigo-sky-map', {
 			};
 		},
 		applyTheme: function() {
-			if (this.dark) {
-				this.celestialConfig.background.fill = "#000";
-				this.celestialConfig.background.stroke = "#000";
-				this.celestialConfig.stars.style.fill = "#FFF";
-			} else {
-				this.celestialConfig.background.fill = "#fff";
-				this.celestialConfig.background.stroke = "#fff";
-				this.celestialConfig.stars.style.fill = "#000";
-			}
+			var background = this.dark ? "#000" : "#001a33";
+			this.celestialConfig.background.fill = this.allsky.enabled ? "transparent" : background;
+			this.celestialConfig.background.stroke = background;
+			this.celestialConfig.stars.style.fill = "#FFF";
 		},
 		applyZoomConfig: function() {
 			this.celestialConfig.width = this.zooms[this.localZoomLevel];
@@ -3064,7 +3115,7 @@ app.component('indigo-sky-map', {
 			if (this.targetCoordinates != null) {
 				var target = Celestial.mapProjection(this.targetCoordinates);
 				Celestial.context.beginPath();
-				Celestial.setStyle({ stroke: "#0000ff", width: 1 });
+				Celestial.setStyle({ stroke: "#808080", width: 1 });
 				Celestial.context.moveTo(target[0] - 15, target[1]);
 				Celestial.context.lineTo(target[0] - 5, target[1]);
 				Celestial.context.moveTo(target[0] + 5, target[1]);
@@ -3096,7 +3147,30 @@ app.component('indigo-sky-map', {
 	template: `
 		<div class="position-relative indigo-sky-map-frame">
 			<div ref="mapViewport" class="position-relative indigo-sky-map">
+				<img v-show="allsky.enabled" src="/allsky.jpg" class="indigo-sky-map-allsky" :style="allskyStyle" alt=""/>
 				<div id="map" class="position-relative"></div>
+			</div>
+			<div v-if="allsky.enabled" class="position-absolute bg-light p-2 m-1 rounded indigo-sky-map-allsky-controls">
+				<div class="d-flex align-items-center mb-1">
+					<label class="me-1">Drehung</label>
+					<input type="range" min="-180" max="180" step="1" v-model.number="allsky.rotation"/>
+					<span class="ms-1">{{allsky.rotation}}°</span>
+				</div>
+				<div class="d-flex align-items-center mb-1">
+					<label class="me-1">Skalierung</label>
+					<input type="range" min="50" max="300" step="1" v-model.number="allsky.scale"/>
+					<span class="ms-1">{{allsky.scale}}%</span>
+				</div>
+				<div class="d-flex align-items-center mb-1">
+					<label class="me-1">X</label>
+					<input type="range" min="-50" max="50" step="1" v-model.number="allsky.offsetX"/>
+					<span class="ms-1">{{allsky.offsetX}}%</span>
+				</div>
+				<div class="d-flex align-items-center">
+					<label class="me-1">Y</label>
+					<input type="range" min="-50" max="50" step="1" v-model.number="allsky.offsetY"/>
+					<span class="ms-1">{{allsky.offsetY}}%</span>
+				</div>
 			</div>
 			<div v-if="initialized" class="position-absolute d-flex indigo-sky-map-controls">
 				<button class="btn btn-svg idle-state m-1" :disabled="localZoomLevel >= zooms.length - 1" @click.prevent="zoomIn" data-bs-toggle="tooltip" title="Zoom In">
@@ -3108,6 +3182,9 @@ app.component('indigo-sky-map', {
 					<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
 						<path d="M26,14v4a1,1,0,0,1-1,1H7a1,1,0,0,1-1-1V14a1,1,0,0,1,1-1H25A1,1,0,0,1,26,14Z"/>
 					</svg>
+				</button>
+				<button class="btn btn-svg m-1" :class="allsky.enabled ? 'ok-state' : 'idle-state'" @click.prevent="allsky.enabled = !allsky.enabled" data-bs-toggle="tooltip" title="Allsky overlay">
+					<span class="glyphicons glyphicons-picture"></span>
 				</button>
 				<button class="btn btn-svg idle-state m-1" @click.prevent="centerMarker" data-bs-toggle="tooltip" title="Center at marker">
 					<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
