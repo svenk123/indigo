@@ -425,6 +425,34 @@ int indigo_close(int handle) {
 }
 #endif
 
+// Trace a received line without passing raw control or binary bytes to the terminal, e.g. WebSocket frames or TLS handshakes sent to a plain TCP port
+static void trace_line(int handle, const char *buffer, long length) {
+	bool printable = true;
+	for (long i = 0; i < length; i++) {
+		unsigned char c = (unsigned char)buffer[i];
+		if (c < 0x20 || c >= 0x7f) {
+			printable = false;
+			break;
+		}
+	}
+	if (printable) {
+		INDIGO_TRACE_PROTOCOL(indigo_trace("%d -> %s", handle, buffer));
+		return;
+	}
+	char *escaped = indigo_safe_malloc(length * 4 + 1);
+	char *out = escaped;
+	for (long i = 0; i < length; i++) {
+		unsigned char c = (unsigned char)buffer[i];
+		if (c < 0x20 || c >= 0x7f)
+			out += sprintf(out, "\\x%02x", c);
+		else
+			*out++ = (char)c;
+	}
+	*out = '\0';
+	INDIGO_TRACE_PROTOCOL(indigo_trace("%d -> // binary data: %s", handle, escaped));
+	indigo_safe_free(escaped);
+}
+
 int indigo_read_line(int handle, char *buffer, int length) {
 	char c = '\0';
 	long total_bytes = 0;
@@ -453,7 +481,7 @@ int indigo_read_line(int handle, char *buffer, int length) {
 		}
 	}
 	buffer[total_bytes] = '\0';
-	INDIGO_TRACE_PROTOCOL(indigo_trace("%d -> %s", handle, buffer));
+	trace_line(handle, buffer, total_bytes);
 	return (int)total_bytes;
 }
 
