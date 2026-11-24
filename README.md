@@ -202,6 +202,49 @@ Install XCode and download and build autoconf, automake and libtool (use tools/c
 
 and connect from any INDIGO/INDI client or web browser to localhost on port 7624...
 
+### Optional: NVIDIA CUDA GPU support (Jetson / Orin)
+
+On Linux, INDIGO can offload part of its image processing (stretching, binarization, Bayer channel equalization, ...) to an NVIDIA GPU via CUDA. This is optional, Linux only, and primarily targeted at NVIDIA Jetson / Orin boards running JetPack; CPU-only builds (the default, `CUDA=no`) need none of the below.
+
+#### Prerequisites
+
+- A supported board and JetPack release:
+
+  | Board | GPU architecture | JetPack / L4T |
+  |---|---|---|
+  | Jetson Nano / TX1 | Maxwell, sm_53 | JetPack 4.x |
+  | Jetson TX2 | Pascal, sm_62 | JetPack 4.x |
+  | Jetson Xavier | Volta, sm_72 | JetPack 5.x |
+  | Jetson Orin | Ampere, sm_87 | JetPack 5.x / 6.x |
+  | Jetson Thor | Blackwell, sm_101 / sm_110 | JetPack 7.x (7.2 or newer is the tested target) |
+
+  A discrete NVIDIA GPU on a regular x86_64 machine may also work by passing `CUDA_ARCH` explicitly (see below), but that configuration is not the primary target and is less tested.
+
+- Install JetPack on the Jetson (via NVIDIA SDK Manager, or `sudo apt install nvidia-jetpack` if the board already runs L4T/Ubuntu). This provides the CUDA toolkit, the GPU driver library `libcuda.so` and `nvidia-l4t-cuda`.
+- `nvcc` 10.2 or newer, with `/usr/local/cuda/bin` in `PATH` (or pass `CUDA_HOME`), plus a working `g++`/`build-essential` as host compiler.
+- Your user must be in the `video` group for GPU device access: `sudo usermod -aG video $USER`, then log out and back in.
+
+Run
+
+`make cuda-check`
+
+first to get a full report of the detected board/JetPack version, `nvcc`, headers/libraries, driver library, group membership, and a compile/link/run smoke test of a tiny CUDA kernel. It points out exactly what is missing before you attempt a real build.
+
+#### Building
+
+`make CUDA=yes`
+
+builds INDIGO with CUDA support; `make CUDA=yes` runs the same environment check as `make cuda-check` first and aborts with the reason if it fails. Switching between `make CUDA=yes` and `make CUDA=no` (the default) automatically rebuilds the affected `indigo_libs` objects, so both can be used in the same checkout.
+
+Useful variables:
+
+- `CUDA_HOME=<dir>` — CUDA toolkit location, default `/usr/local/cuda`
+- `CUDA_ARCH="<sm> ..."` — override the SM architecture auto-detection, e.g. `CUDA_ARCH=87`
+- `CUDA_STD=<c++NN>` — C++ standard for `nvcc`, default `c++11`
+- `CUDA_SKIP_PKG_CHECK=1` — skip the `dpkg` package checks, e.g. for a non-dpkg (runfile) CUDA installation
+
+If no CUDA-capable GPU is available at runtime, or CUDA support was not built in, the affected functions automatically fall back to their CPU implementation.
+
 ### No pthread_yield()
 New linux distributions come with the latest glibc that does not provide pthread_yield() However libqhy.a depends on it. We do not have control over this library and it is not officially supprted by QHY any more. So if you get complaints by the linker for missing *pthread_yield* call please execute the folowing command in *indigo_drivers/ccd_qhy/bin_externals/pthread_yield_compat/*:
 
