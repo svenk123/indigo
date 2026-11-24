@@ -27,12 +27,27 @@ BENCHMARK_BUILD = $(TEST_BUILD)/benchmark
 BENCHMARKS = \
 	$(BENCHMARK_BUILD)/bench_timer \
 	$(BENCHMARK_BUILD)/bench_queue \
+	$(BENCHMARK_BUILD)/bench_scheduler_plan \
 	$(BENCHMARK_BUILD)/bench_guider_asi_timing \
 	$(BENCHMARK_BUILD)/bench_ccd_simulator_guider_timing \
 	$(BENCHMARK_BUILD)/bench_mount_simulator_timing \
 	$(BENCHMARK_BUILD)/bench_mount_nexstar_guider_timing
 UNIT_TESTS = \
+	$(UNIT_BUILD)/test_indigocat_corrections \
+	$(UNIT_BUILD)/test_dslr_raw_init \
+	$(UNIT_BUILD)/test_test_runner \
+	$(UNIT_BUILD)/test_mount_alignment_load \
+	$(UNIT_BUILD)/test_profile_selection \
+	$(UNIT_BUILD)/test_rgb48 \
+	$(UNIT_BUILD)/test_ccd_fits_header \
+	$(UNIT_BUILD)/test_image_math \
+	$(UNIT_BUILD)/test_core_text_bounds \
 	$(UNIT_BUILD)/test_align_math \
+	$(UNIT_BUILD)/test_agent_platesolver_core \
+	$(UNIT_BUILD)/test_agent_scheduler_header \
+	$(UNIT_BUILD)/test_agent_scheduler_sky \
+	$(UNIT_BUILD)/test_agent_scheduler_plan \
+	$(UNIT_BUILD)/test_agent_scheduler_night \
 	$(UNIT_BUILD)/test_aux_math \
 	$(UNIT_BUILD)/test_base64 \
 	$(UNIT_BUILD)/test_bus_helpers \
@@ -43,12 +58,33 @@ UNIT_TESTS = \
 	$(UNIT_BUILD)/test_polynomial_fit \
 	$(UNIT_BUILD)/test_protocol_json \
 	$(UNIT_BUILD)/test_protocol_xml \
+	$(UNIT_BUILD)/test_protocol_security \
+	$(UNIT_BUILD)/test_transport_cache_security \
 	$(UNIT_BUILD)/test_timer \
 	$(UNIT_BUILD)/test_token \
 	$(UNIT_BUILD)/test_uni_io \
+	$(UNIT_BUILD)/test_network_url \
+	$(UNIT_BUILD)/test_primalucelib \
 	$(UNIT_BUILD)/test_system_alpaca_json \
-	$(UNIT_BUILD)/test_raw_image
-INTEGRATION_TESTS = $(INTEGRATION_BUILD)/test_ccd_qhy_sdk \
+	$(UNIT_BUILD)/test_raw_image \
+	$(UNIT_BUILD)/test_star_detection \
+	$(UNIT_BUILD)/test_gp_guider_alloc \
+	$(UNIT_BUILD)/test_raw_to_fits \
+	$(UNIT_BUILD)/test_recording_io \
+	$(UNIT_BUILD)/test_bahtinov
+ifeq ($(OS_DETECTED),Darwin)
+UNIT_TESTS += $(UNIT_BUILD)/test_usbserial_enumeration_macos $(UNIT_BUILD)/test_service_discovery
+endif
+
+INTEGRATION_TESTS = $(INTEGRATION_BUILD)/test_additional_instances \
+	$(INTEGRATION_BUILD)/test_agent_guider_cleanup \
+	$(INTEGRATION_BUILD)/test_agent_imager_cleanup \
+	$(INTEGRATION_BUILD)/test_agent_imager_numerics \
+	$(INTEGRATION_BUILD)/test_ccd_file_names \
+	$(INTEGRATION_BUILD)/test_aux_simulator \
+	$(INTEGRATION_BUILD)/test_agent_alpaca_cache \
+	$(INTEGRATION_BUILD)/test_agent_alpaca_mapping \
+	$(INTEGRATION_BUILD)/test_ccd_qhy_sdk \
 	$(INTEGRATION_BUILD)/test_ccd_qhy2_sdk \
 	$(INTEGRATION_BUILD)/test_ccd_qsi_sdk \
 	$(INTEGRATION_BUILD)/test_guider_asi_sdk \
@@ -92,9 +128,11 @@ INTEGRATION_TESTS = $(INTEGRATION_BUILD)/test_ccd_qhy_sdk \
 	$(INTEGRATION_BUILD)/test_ccd_svb_sdk \
 	$(INTEGRATION_BUILD)/test_ccd_iidc_sdk \
 	$(INTEGRATION_BUILD)/test_ccd_uvc_sdk \
+	$(INTEGRATION_BUILD)/test_ccd_libcamera_sdk \
 	$(INTEGRATION_BUILD)/test_ccd_ptp_sdk \
 	$(INTEGRATION_BUILD)/test_ccd_sx_usb \
 	$(INTEGRATION_BUILD)/test_ccd_ssag_usb \
+	$(INTEGRATION_BUILD)/test_ccd_pentax_usb \
 	$(INTEGRATION_BUILD)/test_wheel_astroasis_sdk \
 	$(INTEGRATION_BUILD)/test_ccd_touptek_sdk \
 	$(INTEGRATION_BUILD)/test_ccd_altair_sdk \
@@ -113,14 +151,23 @@ INTEGRATION_TESTS = $(INTEGRATION_BUILD)/test_ccd_qhy_sdk \
 	$(INTEGRATION_BUILD)/test_rotator_asi_sdk \
 	$(INTEGRATION_BUILD)/test_bus_lifecycle \
 	$(INTEGRATION_BUILD)/test_detach_abort \
+	$(INTEGRATION_BUILD)/test_server_websocket \
+	$(INTEGRATION_BUILD)/test_server_static_driver \
 	$(INTEGRATION_BUILD)/test_ccd_countdown \
 	$(INTEGRATION_BUILD)/test_agent_imager \
 	$(INTEGRATION_BUILD)/test_agent_guider \
 	$(INTEGRATION_BUILD)/test_agent_mount \
+	$(INTEGRATION_BUILD)/test_agent_mount_simulator \
 	$(INTEGRATION_BUILD)/test_agent_config \
+	$(INTEGRATION_BUILD)/test_agent_auxiliary \
+	$(INTEGRATION_BUILD)/test_agent_auxiliary_simulator \
+	$(INTEGRATION_BUILD)/test_agent_mcp \
 	$(INTEGRATION_BUILD)/test_agent_astrometry \
+	$(INTEGRATION_BUILD)/test_agent_platesolver \
+	$(INTEGRATION_BUILD)/test_indigo_solver_tool \
 	$(INTEGRATION_BUILD)/test_agent_scripting \
 	$(INTEGRATION_BUILD)/test_agent_scripting_sequencer \
+	$(INTEGRATION_BUILD)/test_agent_scheduler \
 	$(INTEGRATION_BUILD)/test_agent_imager_guider_mount \
 	$(INTEGRATION_BUILD)/test_agent_imager_instances \
 	$(INTEGRATION_BUILD)/test_ccd_simulator \
@@ -138,12 +185,14 @@ INTEGRATION_TESTS = $(INTEGRATION_BUILD)/test_ccd_qhy_sdk \
 	$(INTEGRATION_BUILD)/test_mount_lx200_simulator \
 	$(INTEGRATION_BUILD)/test_mount_asi_simulator \
 	$(INTEGRATION_BUILD)/test_mount_nexstar_simulator \
+	$(INTEGRATION_BUILD)/test_mount_nexstar_deadline \
 	$(INTEGRATION_BUILD)/test_mount_nexstaraux_simulator \
 	$(INTEGRATION_BUILD)/test_mount_pmc8_simulator \
 	$(INTEGRATION_BUILD)/test_mount_rainbow_simulator \
 	$(INTEGRATION_BUILD)/test_mount_simulator \
 	$(INTEGRATION_BUILD)/test_mount_starbook_simulator \
 	$(INTEGRATION_BUILD)/test_mount_temma_simulator \
+	$(INTEGRATION_BUILD)/test_mount_temma_deadline \
 	$(INTEGRATION_BUILD)/test_polaralign_simulator \
 	$(INTEGRATION_BUILD)/test_rotator_simulator \
 	$(INTEGRATION_BUILD)/test_rotator_optec_simulator \
@@ -171,6 +220,8 @@ INTEGRATION_TESTS = $(INTEGRATION_BUILD)/test_ccd_qhy_sdk \
 	$(INTEGRATION_BUILD)/test_focuser_lakeside_simulator \
 	$(INTEGRATION_BUILD)/test_focuser_mjkzz_simulator \
 	$(INTEGRATION_BUILD)/test_focuser_moonlite_simulator \
+	$(INTEGRATION_BUILD)/test_serial_port_loss \
+	$(INTEGRATION_BUILD)/test_serial_port_claim \
 	$(INTEGRATION_BUILD)/test_focuser_mypro2_simulator \
 	$(INTEGRATION_BUILD)/test_focuser_nfocus_simulator \
 	$(INTEGRATION_BUILD)/test_focuser_nstep_simulator \
@@ -190,9 +241,10 @@ INTEGRATION_TESTS = $(INTEGRATION_BUILD)/test_ccd_qhy_sdk \
 	$(INTEGRATION_BUILD)/test_aux_fbc_simulator \
 	$(INTEGRATION_BUILD)/test_aux_flatmaster_simulator \
 	$(INTEGRATION_BUILD)/test_aux_geoptikflat_simulator \
+	$(INTEGRATION_BUILD)/test_aux_giotto_simulator \
+	$(INTEGRATION_BUILD)/test_aux_alto_simulator \
 	$(INTEGRATION_BUILD)/test_aux_flipflat_simulator \
 	$(INTEGRATION_BUILD)/test_ao_sx_simulator \
-	$(INTEGRATION_BUILD)/test_mount_synscan_simulator \
 	$(INTEGRATION_BUILD)/test_aux_upb3_simulator \
 	$(INTEGRATION_BUILD)/test_aux_ppb_simulator \
 	$(INTEGRATION_BUILD)/test_aux_skyalert_simulator \
@@ -205,6 +257,8 @@ INTEGRATION_TESTS = $(INTEGRATION_BUILD)/test_ccd_qhy_sdk \
 # Without this every test that includes the header fails to compile on Linux.
 TEST_CFLAGS = $(CFLAGS) -D_GNU_SOURCE -I.. -I../indigo_libs -I../build/include
 TEST_LDFLAGS = $(LDFLAGS) -Wl,-rpath,$(BUILD_LIB) -lindigo -lm -lpthread
+# A test that compiles indigo_driver.c itself links the serial port scan, which uses libudev on Linux only.
+FRAMEWORK_TEST_LDFLAGS = $(TEST_LDFLAGS) -lusb-1.0 $(if $(filter Darwin,$(OS_DETECTED)),,-ludev)
 CCD_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_ccd_simulator.a $(TEST_LDFLAGS) -lindigocat
 DOME_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_dome_simulator.a $(TEST_LDFLAGS) -lindigocat
 DOME_BAADER_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_dome_baader.a $(TEST_LDFLAGS) -lindigocat
@@ -261,7 +315,9 @@ FOCUSER_MYPRO2_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_mypro2.a
 FOCUSER_NFOCUS_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_nfocus.a $(TEST_LDFLAGS) -lindigocat
 FOCUSER_NSTEP_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_nstep.a $(TEST_LDFLAGS) -lindigocat
 FOCUSER_OPTEC_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_optec.a $(TEST_LDFLAGS) -lindigocat
-FOCUSER_PRIMALUCE_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_primaluce.a $(TEST_LDFLAGS) -lindigocat
+FOCUSER_PRIMALUCE_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_primaluce.a $(PRIMALUCELIB) $(TEST_LDFLAGS) -lindigocat
+AUX_GIOTTO_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_giotto.a $(PRIMALUCELIB) $(TEST_LDFLAGS) -lindigocat
+AUX_ALTO_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_alto.a $(PRIMALUCELIB) $(TEST_LDFLAGS) -lindigocat
 FOCUSER_PRODIGY_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_prodigy.a $(TEST_LDFLAGS) -lindigocat
 FOCUSER_ROBOFOCUS_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_robofocus.a $(TEST_LDFLAGS) -lindigocat
 FOCUSER_STEELDRIVE2_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_steeldrive2.a $(TEST_LDFLAGS) -lindigocat
@@ -287,15 +343,50 @@ AUX_UCH_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_uch.a $(TEST_LDFLAG
 AUX_USBDP_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_usbdp.a $(TEST_LDFLAGS) -lindigocat
 POLARALIGN_MLASTRO_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_polaralign_mlastro.a $(TEST_LDFLAGS) -lindigocat
 
-.PHONY: test test-unit test-integration benchmark test-clean check-lib
+.PHONY: test test-unit test-integration test-buildsystem benchmark test-clean check-lib
 
-test: test-unit test-integration
+test: test-examples test-shell-compliance-framework test-driver-test-recording test-unit test-integration test-buildsystem test-imager-download test-indigo-js-formatting test-tool-input-safety test-mount-manual-motion test-gps-compliance-script test-omnisim-startup test-harness-verdicts test-selected-transport-tools
+
+# Client example regressions use isolated files, processes and loopback connections.
+.PHONY: test-examples
+test-examples:
+	python3 -B integration/test_examples.py
+
+# Driver recording regressions use isolated synthetic processes.
+.PHONY: test-driver-test-recording
+test-driver-test-recording:
+	python3 -B unit/test_driver_test_recording.py
+
+# Browser script regression; requires Node.js with the built-in test runner.
+.PHONY: test-mount-manual-motion
+test-mount-manual-motion:
+	node --test unit/test_mount_manual_motion.js
+
+.PHONY: test-imager-download
+test-imager-download:
+	node --test unit/test_imager_download.js
+
+.PHONY: test-indigo-js-formatting
+test-indigo-js-formatting:
+	node --test unit/test_indigo_js_formatting.js
+
+.PHONY: test-tool-input-safety
+test-tool-input-safety: $(BUILD_LIB)/libindigo_client.a
+	python3 -B unit/test_tool_input_safety.py
+
+test-buildsystem:
+	python3 -B -m unittest discover -s buildsystem -p 'test_*.py'
 
 test-unit: check-lib $(UNIT_TESTS)
-	@for test in $(UNIT_TESTS); do \
+	@executed=0; \
+	for test in $(UNIT_TESTS); do \
 		printf "Running %s\n" "$$test"; \
-		"$$test" || exit $$?; \
-	done
+		status=0; "$$test" || status=$$?; \
+		if [ $$status -eq 77 ]; then continue; fi; \
+		if [ $$status -ne 0 ]; then exit $$status; fi; \
+		executed=$$((executed + 1)); \
+	done; \
+	if [ $$executed -eq 0 ]; then printf "No test suites executed\n"; exit 1; fi
 
 ifeq ($(OS_DETECTED),Darwin)
 INTEGRATION_TESTS += $(INTEGRATION_BUILD)/test_ccd_ptp_ica
@@ -313,17 +404,25 @@ endif
 # driver's recorded run: tools/run_driver_test.py selects a driver's tests from
 # INTEGRATION_TESTS and this list.
 OPT_IN_DRIVER_TESTS = $(INTEGRATION_BUILD)/test_aux_dragonfly_simulator \
+	$(INTEGRATION_BUILD)/test_mount_synscan_simulator \
 	$(INTEGRATION_BUILD)/test_dome_dragonfly_simulator \
+	$(INTEGRATION_BUILD)/test_focuser_askar_wifi_simulator \
 	$(INTEGRATION_BUILD)/test_rotator_lunatico_udp_simulator \
 	$(INTEGRATION_BUILD)/test_system_alpaca_http \
 	$(INTEGRATION_BUILD)/test_system_alpaca_simulator \
-	$(INTEGRATION_BUILD)/test_agent_astrometry_solver
+	$(INTEGRATION_BUILD)/test_agent_astrometry_solver \
+	$(INTEGRATION_BUILD)/test_agent_platesolver_simulator
 
 test-integration: check-lib $(INTEGRATION_TESTS)
-	@for test in $(INTEGRATION_TESTS); do \
+	@executed=0; \
+	for test in $(INTEGRATION_TESTS); do \
 		printf "Running %s\n" "$$test"; \
-		"$$test" || exit $$?; \
-	done
+		status=0; "$$test" || status=$$?; \
+		if [ $$status -eq 77 ]; then continue; fi; \
+		if [ $$status -ne 0 ]; then exit $$status; fi; \
+		executed=$$((executed + 1)); \
+	done; \
+	if [ $$executed -eq 0 ]; then printf "No test suites executed\n"; exit 1; fi
 
 # Benchmarks measure timing, they do not pass or fail, so they are not part of
 # the test target. Results are comparable only between runs on the same machine.
@@ -339,6 +438,9 @@ check-lib:
 		exit 1; \
 	}
 
+$(BUILD_BIN)/indigo_server:
+	@printf "Missing $@. Run 'make all' from the repository root first.\n"; exit 1
+
 $(UNIT_BUILD):
 	mkdir -p $@
 
@@ -353,6 +455,9 @@ $(BENCHMARK_BUILD)/bench_timer: benchmark/bench_timer.c | $(BENCHMARK_BUILD)
 
 $(BENCHMARK_BUILD)/bench_queue: benchmark/bench_queue.c | $(BENCHMARK_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+
+$(BENCHMARK_BUILD)/bench_scheduler_plan: benchmark/bench_scheduler_plan.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_plan.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_header.h $(BUILD_DRIVERS)/indigo_agent_scheduler.a | $(BENCHMARK_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(TEST_LDFLAGS) -lindigocat
 
 $(BENCHMARK_BUILD)/bench_ccd_simulator_guider_timing: integration/test_ccd_simulator.c integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/ccd_simulator_test_driver.o | $(BENCHMARK_BUILD)
 	$(CC) $(TEST_CFLAGS) -DCCD_SIMULATOR_TIMING_BENCHMARK -o $@ $< $(INTEGRATION_BUILD)/ccd_simulator_test_driver.o $(CCD_SIMULATOR_TEST_LDFLAGS)
@@ -372,7 +477,37 @@ $(UNIT_BUILD)/test_driver_loader: unit/test_driver_loader.c test_runner.h $(UNIT
 $(UNIT_BUILD)/test_token: unit/test_token.c test_runner.h | $(UNIT_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
 
-$(UNIT_BUILD)/test_raw_image: unit/test_raw_image.c test_runner.h | $(UNIT_BUILD)
+$(UNIT_BUILD)/test_raw_to_fits: unit/test_raw_to_fits.c test_runner.h | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+
+# Compile the implementation directly so sanitizer flags instrument the detector bodies.
+$(UNIT_BUILD)/test_star_detection: unit/test_star_detection.c ../indigo_libs/indigo_raw_utils.c ../indigo_libs/indigo/indigo_raw_utils.h test_runner.h | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< ../indigo_libs/indigo_raw_utils.c $(TEST_LDFLAGS)
+
+# Compile the implementation directly so malloc() can be replaced by a failing allocator.
+$(UNIT_BUILD)/test_gp_guider_alloc: unit/test_gp_guider_alloc.c ../indigo_libs/indigo_gp_guider.c ../indigo_libs/indigo/indigo_gp_guider.h test_runner.h | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+
+$(UNIT_BUILD)/test_raw_image: unit/test_raw_image.c test_runner.h $(BUILD_LIB)/libindigo.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+
+$(UNIT_BUILD)/test_recording_io: unit/test_recording_io.c test_runner.h | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+
+# Instrument the production RAW helpers as a separate object, before the static library.
+RAW_IMAGE_SANITIZE_CFLAGS = $(filter-out -arch arm64 x86_64,$(TEST_CFLAGS)) $(SANITIZE_ARCH) -O1 -fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer
+
+$(UNIT_BUILD)/raw_utils_sanitize.o: ../indigo_libs/indigo_raw_utils.c ../indigo_libs/indigo/indigo_raw_utils.h | $(UNIT_BUILD)
+	$(CC) $(RAW_IMAGE_SANITIZE_CFLAGS) -c $< -o $@
+
+$(UNIT_BUILD)/test_raw_image_sanitize: unit/test_raw_image.c test_runner.h $(UNIT_BUILD)/raw_utils_sanitize.o $(BUILD_LIB)/libindigo.a | $(UNIT_BUILD)
+	$(CC) $(RAW_IMAGE_SANITIZE_CFLAGS) -o $@ $< $(UNIT_BUILD)/raw_utils_sanitize.o $(SERVER_WEBSOCKET_SANITIZE_LDFLAGS)
+
+.PHONY: test-raw-image-sanitize
+test-raw-image-sanitize: $(UNIT_BUILD)/test_raw_image_sanitize
+	UBSAN_OPTIONS=halt_on_error=1 $(UNIT_BUILD)/test_raw_image_sanitize
+
+$(UNIT_BUILD)/test_bahtinov: unit/test_bahtinov.c test_runner.h | $(UNIT_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
 
 $(UNIT_BUILD)/test_base64: unit/test_base64.c test_runner.h | $(UNIT_BUILD)
@@ -381,8 +516,18 @@ $(UNIT_BUILD)/test_base64: unit/test_base64.c test_runner.h | $(UNIT_BUILD)
 $(UNIT_BUILD)/test_md5: unit/test_md5.c test_runner.h | $(UNIT_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
 
-$(UNIT_BUILD)/test_uni_io: unit/test_uni_io.c test_runner.h | $(UNIT_BUILD)
-	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+$(UNIT_BUILD)/test_uni_io: unit/test_uni_io.c test_runner.h $(BUILD_LIB)/libindigo.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS) -lz
+
+# Static PrimaLuce Lab protocol library, linked by the PrimaLuce drivers and their tests.
+PRIMALUCELIB = $(BUILD_LIB)/libprimalucelib.a
+PRIMALUCELIB_SOURCES = ../indigo_drivers/shared/primalucelib/primalucelib.h ../indigo_drivers/shared/primalucelib/primalucelib.c ../indigo_libs/externals/jsmn/jsmn.h ../indigo_drivers/shared/primalucelib/Makefile
+
+$(PRIMALUCELIB): $(PRIMALUCELIB_SOURCES)
+	$(MAKE) -C ../indigo_drivers/shared/primalucelib all
+
+$(UNIT_BUILD)/test_primalucelib: unit/test_primalucelib.c $(PRIMALUCELIB) test_runner.h | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(PRIMALUCELIB) $(TEST_LDFLAGS)
 
 $(UNIT_BUILD)/test_dome_azimuth: unit/test_dome_azimuth.c test_runner.h | $(UNIT_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
@@ -391,6 +536,24 @@ $(UNIT_BUILD)/test_aux_math: unit/test_aux_math.c test_runner.h | $(UNIT_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
 
 $(UNIT_BUILD)/test_align_math: unit/test_align_math.c test_runner.h | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS) -lindigocat
+
+$(UNIT_BUILD)/test_agent_platesolver_core: unit/test_agent_platesolver_core.c test_runner.h $(BUILD_DRIVERS)/indigo_agent_platesolver.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_platesolver.a $(TEST_LDFLAGS) -lindigocat
+
+$(UNIT_BUILD)/test_agent_scheduler_header: unit/test_agent_scheduler_header.c test_runner.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_header.h $(BUILD_DRIVERS)/indigo_agent_scheduler.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(TEST_LDFLAGS) -lindigocat
+
+$(UNIT_BUILD)/test_agent_scheduler_sky: unit/test_agent_scheduler_sky.c test_runner.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_sky.h $(BUILD_DRIVERS)/indigo_agent_scheduler.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(TEST_LDFLAGS) -lindigocat
+
+$(UNIT_BUILD)/test_agent_scheduler_plan: unit/test_agent_scheduler_plan.c test_runner.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_plan.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_sky.h $(BUILD_DRIVERS)/indigo_agent_scheduler.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(TEST_LDFLAGS) -lindigocat
+
+$(UNIT_BUILD)/test_agent_scheduler_night: unit/test_agent_scheduler_night.c test_runner.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_night.h $(BUILD_DRIVERS)/indigo_agent_scheduler.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(TEST_LDFLAGS) -lindigocat
+
+$(UNIT_BUILD)/test_test_runner: unit/test_test_runner.c test_runner.h | $(UNIT_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
 
 $(UNIT_BUILD)/test_polynomial_fit: unit/test_polynomial_fit.c test_runner.h | $(UNIT_BUILD)
@@ -411,7 +574,64 @@ $(INTEGRATION_BUILD)/test_ccd_countdown: integration/test_ccd_countdown.c test_r
 $(INTEGRATION_BUILD)/test_bus_lifecycle: integration/test_bus_lifecycle.c test_runner.h | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
 
-$(INTEGRATION_BUILD)/ccd_simulator_test_driver.o: ../indigo_drivers/ccd_simulator/indigo_ccd_simulator.c Makefile | $(INTEGRATION_BUILD)
+# WebSocket handshake of the production TCP server (FND-000045). The sanitize build compiles
+# indigo_server_tcp.c into the test and links the static library, so the handshake runs under
+# AddressSanitizer with a single copy of the server code.
+SERVER_WEBSOCKET_SANITIZE_CFLAGS = $(filter-out -arch arm64 x86_64,$(TEST_CFLAGS)) $(SANITIZE_ARCH) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
+SERVER_WEBSOCKET_SANITIZE_LDFLAGS = $(filter-out -arch arm64 x86_64,$(LDFLAGS)) $(SANITIZE_ARCH) -fsanitize=address,undefined $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libjpeg.a $(BUILD_LIB)/libtiff.a $(BUILD_LIB)/libraw.a -lusb-1.0 $(if $(filter Darwin,$(OS_DETECTED)),-lhidapi,-lhidapi-libusb -ludev -ldns_sd -lavahi-client -lavahi-common) -lz -lstdc++ -lm -lpthread -Wl,-rpath,$(BUILD_LIB)
+
+# Compiles indigo_server.c into the test to drive its UNLOAD and DRIVERS handlers with a stub static driver. The
+# server source embeds the generated control panel resources, which make all builds with build/bin/indigo_server.
+$(INTEGRATION_BUILD)/test_server_static_driver: integration/test_server_static_driver.c ../indigo_server/indigo_server.c test_runner.h | $(BUILD_BIN)/indigo_server $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -Wno-unused-function -Wno-return-type -o $@ $< $(TEST_LDFLAGS) -lindigocat -lz
+
+.PHONY: test-server-static-driver
+test-server-static-driver: check-lib $(INTEGRATION_BUILD)/test_server_static_driver
+	$(INTEGRATION_BUILD)/test_server_static_driver
+
+$(INTEGRATION_BUILD)/test_server_websocket: integration/test_server_websocket.c test_runner.h $(BUILD_LIB)/libindigo.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+
+AGENT_MCP_TEST_DEFINES = -DMCP_PROGRESS_TIMEOUT=0.25 -DMCP_TOTAL_TIMEOUT=1.0
+AGENT_MCP_HELP = ../indigo_drivers/agent_mcp/indigo_agent_mcp_help.h
+AGENT_MCP_HELP_SOURCES = $(wildcard ../indigo_docs/mcp/*.md ../indigo_docs/mcp/agents/*.md) ../indigo_drivers/agent_scripting/library/Sequencer.md
+
+$(AGENT_MCP_HELP): ../indigo_drivers/agent_mcp/generate_help.py $(AGENT_MCP_HELP_SOURCES)
+	python3 ../indigo_drivers/agent_mcp/generate_help.py
+
+AGENT_MCP_TEST_SOURCES = integration/test_agent_mcp.c ../indigo_drivers/agent_mcp/indigo_agent_mcp.c ../indigo_libs/indigo_server_tcp.c
+
+$(INTEGRATION_BUILD)/test_agent_mcp: $(AGENT_MCP_TEST_SOURCES) $(AGENT_MCP_HELP) ../indigo_drivers/agent_mcp/indigo_agent_mcp.h ../indigo_libs/externals/jsmn/jsmn.h test_runner.h $(BUILD_LIB)/libindigo.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) $(AGENT_MCP_TEST_DEFINES) -o $@ $(AGENT_MCP_TEST_SOURCES) $(TEST_LDFLAGS) $(if $(filter Darwin,$(OS_DETECTED)),,-ldns_sd)
+
+$(INTEGRATION_BUILD)/test_agent_mcp_sanitize: $(AGENT_MCP_TEST_SOURCES) $(AGENT_MCP_HELP) ../indigo_drivers/agent_mcp/indigo_agent_mcp.h ../indigo_libs/externals/jsmn/jsmn.h test_runner.h $(BUILD_LIB)/libindigo.a | $(INTEGRATION_BUILD)
+	$(CC) $(SERVER_WEBSOCKET_SANITIZE_CFLAGS) $(AGENT_MCP_TEST_DEFINES) -o $@ $(AGENT_MCP_TEST_SOURCES) $(SERVER_WEBSOCKET_SANITIZE_LDFLAGS)
+
+.PHONY: test-agent-mcp test-agent-mcp-sanitize
+test-agent-mcp: check-lib $(INTEGRATION_BUILD)/test_agent_mcp
+	$(INTEGRATION_BUILD)/test_agent_mcp
+
+test-agent-mcp-sanitize: check-lib $(INTEGRATION_BUILD)/test_agent_mcp_sanitize
+	$(INTEGRATION_BUILD)/test_agent_mcp_sanitize
+
+$(INTEGRATION_BUILD)/test_server_websocket_sanitize: integration/test_server_websocket.c ../indigo_libs/indigo_server_tcp.c test_runner.h $(BUILD_LIB)/libindigo.a | $(INTEGRATION_BUILD)
+	$(CC) $(SERVER_WEBSOCKET_SANITIZE_CFLAGS) -o $@ $< ../indigo_libs/indigo_server_tcp.c $(SERVER_WEBSOCKET_SANITIZE_LDFLAGS)
+
+.PHONY: test-server-websocket test-server-websocket-sanitize
+test-server-websocket: check-lib $(INTEGRATION_BUILD)/test_server_websocket
+	$(INTEGRATION_BUILD)/test_server_websocket
+
+test-server-websocket-sanitize: check-lib $(INTEGRATION_BUILD)/test_server_websocket_sanitize
+	$(INTEGRATION_BUILD)/test_server_websocket_sanitize
+
+# Memory leak check of the indigo_server executable with the simulator drivers under Valgrind. Opt-in and slow (several
+# minutes): it starts the server on a free loopback port, exercises every simulator device LEAK_CYCLES times (default 1)
+# and fails on definitely or indirectly lost memory. Needs valgrind and a built server (make all in the repository root).
+.PHONY: test-server-leaks
+test-server-leaks:
+	python3 leak/run_server_leak_check.py $(if $(LEAK_CYCLES),--cycles $(LEAK_CYCLES))
+
+$(INTEGRATION_BUILD)/ccd_simulator_test_driver.o: integration/ccd_simulator_test_driver.c ../indigo_drivers/ccd_simulator/indigo_ccd_simulator.c Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -Dindigo_set_timer=sim_test_set_timer -Dindigo_reschedule_timer=sim_test_reschedule_timer -c $< -o $@
 
 # The mount simulator is linked in for the camera following the mount's pointing and guide pulses
@@ -421,22 +641,28 @@ $(INTEGRATION_BUILD)/test_ccd_simulator: integration/test_ccd_simulator.c integr
 $(INTEGRATION_BUILD)/test_dome_simulator: integration/test_dome_simulator.c integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h integration/serial_simulator_test_common.h $(BUILD_DRIVERS)/indigo_dome_simulator.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(DOME_SIMULATOR_TEST_LDFLAGS)
 
+$(INTEGRATION_BUILD)/test_aux_simulator: integration/test_aux_simulator.c integration/simulator_test_common.h integration/serial_simulator_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_simulator.a $(BUILD_DRIVERS)/indigo_agent_auxiliary.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_aux_simulator.a $(BUILD_DRIVERS)/indigo_agent_auxiliary.a $(TEST_LDFLAGS)
+
+$(INTEGRATION_BUILD)/test_aux_simulator_asan: integration/test_aux_simulator.c ../indigo_drivers/aux_simulator/indigo_aux_simulator.c integration/simulator_test_common.h integration/serial_simulator_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_agent_auxiliary.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $< ../indigo_drivers/aux_simulator/indigo_aux_simulator.c $(BUILD_DRIVERS)/indigo_agent_auxiliary.a $(TEST_LDFLAGS) -fsanitize=address,undefined
+
 $(INTEGRATION_BUILD)/test_gps_simulator: integration/test_gps_simulator.c integration/simulator_test_common.h test_runner.h integration/serial_simulator_test_common.h $(BUILD_DRIVERS)/indigo_gps_simulator.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(GPS_SIMULATOR_TEST_LDFLAGS)
 
-$(INTEGRATION_BUILD)/test_mount_simulator: integration/test_mount_simulator.c integration/simulator_test_common.h test_runner.h integration/serial_simulator_test_common.h $(BUILD_DRIVERS)/indigo_mount_simulator.a | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_simulator: integration/test_mount_simulator.c integration/mount_coordinates_test_common.h integration/simulator_test_common.h test_runner.h integration/serial_simulator_test_common.h $(BUILD_DRIVERS)/indigo_mount_simulator.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(MOUNT_SIMULATOR_TEST_LDFLAGS)
 
-$(INTEGRATION_BUILD)/test_mount_simulator_asan: integration/test_mount_simulator.c ../indigo_drivers/mount_simulator/indigo_mount_simulator.c integration/simulator_test_common.h test_runner.h integration/serial_simulator_test_common.h | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_simulator_asan: integration/test_mount_simulator.c ../indigo_drivers/mount_simulator/indigo_mount_simulator.c integration/mount_coordinates_test_common.h integration/simulator_test_common.h test_runner.h integration/serial_simulator_test_common.h | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -O1 -fsanitize=address -fno-omit-frame-pointer -o $@ $< ../indigo_drivers/mount_simulator/indigo_mount_simulator.c $(TEST_LDFLAGS) -lindigocat -fsanitize=address
 
-$(INTEGRATION_BUILD)/test_mount_nexstar_simulator_asan: integration/test_mount_nexstar_simulator.c ../indigo_drivers/mount_nexstar/indigo_mount_nexstar.c integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h integration/serial_simulator_test_common.h $(INTEGRATION_BUILD)/mount_nexstar_simulator | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_nexstar_simulator_asan: integration/test_mount_nexstar_simulator.c integration/mount_coordinates_test_common.h ../indigo_drivers/mount_nexstar/indigo_mount_nexstar.c integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h integration/serial_simulator_test_common.h $(INTEGRATION_BUILD)/mount_nexstar_simulator | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -I../indigo_drivers/mount_nexstar/externals/libnexstar/build/include -o $@ $< ../indigo_drivers/mount_nexstar/indigo_mount_nexstar.c $(TEST_LDFLAGS) ../indigo_drivers/mount_nexstar/externals/libnexstar/build/lib/libnexstar.a -lindigocat -fsanitize=address,undefined
 
-$(BENCHMARK_BUILD)/bench_mount_simulator_timing: integration/test_mount_simulator.c integration/simulator_test_common.h test_runner.h integration/serial_simulator_test_common.h $(BUILD_DRIVERS)/indigo_mount_simulator.a | $(BENCHMARK_BUILD)
+$(BENCHMARK_BUILD)/bench_mount_simulator_timing: integration/test_mount_simulator.c integration/mount_coordinates_test_common.h integration/simulator_test_common.h test_runner.h integration/serial_simulator_test_common.h $(BUILD_DRIVERS)/indigo_mount_simulator.a | $(BENCHMARK_BUILD)
 	$(CC) $(TEST_CFLAGS) -DMOUNT_SIMULATOR_TIMING_BENCHMARK -o $@ $< $(MOUNT_SIMULATOR_TEST_LDFLAGS)
 
-$(BENCHMARK_BUILD)/bench_mount_nexstar_guider_timing: integration/test_mount_nexstar_simulator.c integration/simulator_test_common.h test_runner.h integration/serial_simulator_test_common.h $(INTEGRATION_BUILD)/mount_nexstar_simulator | $(BENCHMARK_BUILD)
+$(BENCHMARK_BUILD)/bench_mount_nexstar_guider_timing: integration/test_mount_nexstar_simulator.c integration/mount_coordinates_test_common.h integration/simulator_test_common.h test_runner.h integration/serial_simulator_test_common.h $(INTEGRATION_BUILD)/mount_nexstar_simulator | $(BENCHMARK_BUILD)
 	$(CC) $(TEST_CFLAGS) -DMOUNT_NEXSTAR_TIMING_BENCHMARK -o $@ $< $(MOUNT_NEXSTAR_SIMULATOR_TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/test_polaralign_simulator: integration/test_polaralign_simulator.c integration/simulator_test_common.h test_runner.h integration/serial_simulator_test_common.h $(BUILD_DRIVERS)/indigo_polaralign_simulator.a | $(INTEGRATION_BUILD)
@@ -580,6 +806,12 @@ $(INTEGRATION_BUILD)/aux_arteskyflat_simulator: ../indigo_drivers/aux_arteskyfla
 $(INTEGRATION_BUILD)/aux_geoptikflat_simulator: ../indigo_drivers/aux_geoptikflat/aux_geoptikflat_simulator/aux_geoptikflat_simulator.c simulator_common/serial_simulator_common.h | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $<
 
+$(INTEGRATION_BUILD)/giotto_simulator: ../indigo_drivers/aux_giotto/giotto_simulator/giotto_simulator.c ../indigo_libs/externals/jsmn/jsmn.h simulator_common/serial_simulator_common.h | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $<
+
+$(INTEGRATION_BUILD)/alto_simulator: ../indigo_drivers/aux_alto/alto_simulator/alto_simulator.c ../indigo_libs/externals/jsmn/jsmn.h simulator_common/serial_simulator_common.h simulator_common/serial_motion.h | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< -lm
+
 $(INTEGRATION_BUILD)/aux_astromechanics_simulator: ../indigo_drivers/aux_astromechanics/aux_astromechanics_simulator/aux_astromechanics_simulator.c simulator_common/serial_simulator_common.h | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $<
 
@@ -620,6 +852,9 @@ $(INTEGRATION_BUILD)/polaralign_mlastro_simulator: ../indigo_drivers/polaralign_
 	$(CC) $(TEST_CFLAGS) -pthread -o $@ $< -lm
 
 $(INTEGRATION_BUILD)/test_focuser_askar_simulator: integration/test_focuser_askar_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/focuser_askar_simulator $(BUILD_DRIVERS)/indigo_focuser_askar.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(FOCUSER_ASKAR_SIMULATOR_TEST_LDFLAGS)
+
+$(INTEGRATION_BUILD)/test_focuser_askar_wifi_simulator: integration/test_focuser_askar_wifi_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/focuser_askar_simulator $(BUILD_DRIVERS)/indigo_focuser_askar.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(FOCUSER_ASKAR_SIMULATOR_TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/test_dome_baader_simulator: integration/test_dome_baader_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h fixtures/dome_baader/original_reference_trace.txt fixtures/dome_baader/generated_reference_trace.txt $(INTEGRATION_BUILD)/dome_baader_simulator $(BUILD_DRIVERS)/indigo_dome_baader.a | $(INTEGRATION_BUILD)
@@ -765,10 +1000,10 @@ test-gps-gpsd-simulator-sanitize: $(INTEGRATION_BUILD)/test_gps_gpsd_simulator_s
 
 IOPTRON_TEST_CFLAGS = $(TEST_CFLAGS) -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter -Wno-sign-compare
 
-$(INTEGRATION_BUILD)/test_mount_ioptron_simulator: integration/test_mount_ioptron_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_ioptron_simulator $(BUILD_DRIVERS)/indigo_mount_ioptron.a | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_ioptron_simulator: integration/test_mount_ioptron_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_ioptron_simulator $(BUILD_DRIVERS)/indigo_mount_ioptron.a | $(INTEGRATION_BUILD)
 	$(CC) $(IOPTRON_TEST_CFLAGS) -o $@ $< $(MOUNT_IOPTRON_SIMULATOR_TEST_LDFLAGS)
 
-$(INTEGRATION_BUILD)/test_mount_ioptron_simulator_sanitize: integration/test_mount_ioptron_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h ../indigo_drivers/mount_ioptron/indigo_mount_ioptron.c $(INTEGRATION_BUILD)/mount_ioptron_simulator | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_ioptron_simulator_sanitize: integration/test_mount_ioptron_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h ../indigo_drivers/mount_ioptron/indigo_mount_ioptron.c $(INTEGRATION_BUILD)/mount_ioptron_simulator | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $< ../indigo_drivers/mount_ioptron/indigo_mount_ioptron.c $(TEST_LDFLAGS) -lindigocat -fsanitize=address,undefined
 
 .PHONY: test-mount-ioptron-tcp
@@ -780,7 +1015,7 @@ LX200_TEST_CFLAGS = $(TEST_CFLAGS) -Wall -Wextra -Werror -Wno-unused-function -W
 $(INTEGRATION_BUILD)/mount_lx200_simulator: ../indigo_drivers/mount_lx200/mount_lx200_simulator/mount_lx200_simulator.c simulator_common/serial_simulator_common.h simulator_common/serial_motion.h | $(INTEGRATION_BUILD)
 	$(CC) $(LX200_TEST_CFLAGS) -o $@ $< -lm
 
-$(INTEGRATION_BUILD)/test_mount_lx200_simulator: integration/test_mount_lx200_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_lx200_simulator $(BUILD_DRIVERS)/indigo_mount_lx200.a | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_lx200_simulator: integration/test_mount_lx200_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_lx200_simulator $(BUILD_DRIVERS)/indigo_mount_lx200.a | $(INTEGRATION_BUILD)
 	$(CC) $(LX200_TEST_CFLAGS) -o $@ $< $(MOUNT_LX200_SIMULATOR_TEST_LDFLAGS)
 
 MOUNT_ASI_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_mount_asi.a $(TEST_LDFLAGS) -lindigocat
@@ -790,7 +1025,7 @@ MOUNT_ASI_SIMULATOR_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_mount_asi.a $(TEST_LD
 $(INTEGRATION_BUILD)/test_mount_asi_simulator: integration/test_mount_asi_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_lx200_simulator $(BUILD_DRIVERS)/indigo_mount_asi.a | $(INTEGRATION_BUILD)
 	$(CC) $(LX200_TEST_CFLAGS) -o $@ $< $(MOUNT_ASI_SIMULATOR_TEST_LDFLAGS)
 
-$(INTEGRATION_BUILD)/test_mount_lx200_simulator_sanitize: integration/test_mount_lx200_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h ../indigo_drivers/mount_lx200/indigo_mount_lx200.c $(INTEGRATION_BUILD)/mount_lx200_simulator | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_lx200_simulator_sanitize: integration/test_mount_lx200_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h ../indigo_drivers/mount_lx200/indigo_mount_lx200.c $(INTEGRATION_BUILD)/mount_lx200_simulator | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $< ../indigo_drivers/mount_lx200/indigo_mount_lx200.c $(TEST_LDFLAGS) -lindigocat -fsanitize=address,undefined
 
 # Detach-abort registry and mount manual-motion ownership: the bus API, the generated mount
@@ -810,6 +1045,15 @@ test-detach-abort: check-lib $(INTEGRATION_BUILD)/test_detach_abort
 test-detach-abort-network: check-lib $(INTEGRATION_BUILD)/test_detach_abort
 	$(INTEGRATION_BUILD)/test_detach_abort --network
 
+# Opt-in: launches build/bin/indigo_server and drives Server.DRIVERS over loopback, loading and unloading the
+# driver libraries in build/drivers, so it is in neither INTEGRATION_TESTS nor OPT_IN_DRIVER_TESTS.
+$(INTEGRATION_BUILD)/test_server_driver_stress: integration/test_server_driver_stress.c test_runner.h | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -DINDIGO_SERVER_EXECUTABLE='"$(BUILD_BIN)/indigo_server"' -o $@ $< $(TEST_LDFLAGS)
+
+.PHONY: test-server-driver-stress
+test-server-driver-stress: check-lib $(INTEGRATION_BUILD)/test_server_driver_stress
+	$(INTEGRATION_BUILD)/test_server_driver_stress
+
 .PHONY: test-mount-lx200-tcp
 test-mount-lx200-tcp: $(INTEGRATION_BUILD)/test_mount_lx200_simulator $(INTEGRATION_BUILD)/test_mount_lx200_simulator_sanitize
 	$(INTEGRATION_BUILD)/test_mount_lx200_simulator --tcp; lx200_normal_status=$$?; $(INTEGRATION_BUILD)/test_mount_lx200_simulator_sanitize --tcp; lx200_sanitize_status=$$?; test $$lx200_normal_status -eq 0 -a $$lx200_sanitize_status -eq 0
@@ -817,31 +1061,35 @@ test-mount-lx200-tcp: $(INTEGRATION_BUILD)/test_mount_lx200_simulator $(INTEGRAT
 $(INTEGRATION_BUILD)/mount_nexstar_simulator: ../indigo_drivers/mount_nexstar/mount_nexstar_simulator/mount_nexstar_simulator.c simulator_common/serial_simulator_common.h | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< -lm
 
-$(INTEGRATION_BUILD)/test_mount_nexstar_simulator: integration/test_mount_nexstar_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_nexstar_simulator $(BUILD_DRIVERS)/indigo_mount_nexstar.a ../indigo_drivers/mount_nexstar/externals/libnexstar/build/lib/libnexstar.a | $(INTEGRATION_BUILD)
+# The GOTO deadline outlasts the simulator's one second GOTO, so the GOTO after the timed-out one can arrive in time.
+$(INTEGRATION_BUILD)/test_mount_nexstar_deadline: integration/test_mount_nexstar_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_nexstar_simulator ../indigo_drivers/mount_nexstar/externals/libnexstar/build/lib/libnexstar.a ../indigo_drivers/mount_nexstar/indigo_mount_nexstar.c ../indigo_drivers/mount_nexstar/indigo_mount_nexstar.driver | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -DINDIGO_TEST_MOTION_DEADLINE -DNEXSTAR_PARK_TIMEOUT=1 -DNEXSTAR_GOTO_TIMEOUT=3 -I../indigo_drivers/mount_nexstar/externals/libnexstar/build/include -o $@ $< ../indigo_drivers/mount_nexstar/indigo_mount_nexstar.c $(TEST_LDFLAGS) ../indigo_drivers/mount_nexstar/externals/libnexstar/build/lib/libnexstar.a -lindigocat
+
+$(INTEGRATION_BUILD)/test_mount_nexstar_simulator: integration/test_mount_nexstar_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_nexstar_simulator $(BUILD_DRIVERS)/indigo_mount_nexstar.a ../indigo_drivers/mount_nexstar/externals/libnexstar/build/lib/libnexstar.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(MOUNT_NEXSTAR_SIMULATOR_TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/mount_nexstaraux_simulator: ../indigo_drivers/mount_nexstaraux/mount_nexstaraux_simulator/mount_nexstaraux_simulator.c simulator_common/serial_simulator_common.h | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) -o $@ $<
+	$(CC) $(TEST_CFLAGS) -o $@ $< -lm
 
-$(INTEGRATION_BUILD)/test_mount_nexstaraux_simulator: integration/test_mount_nexstaraux_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_nexstaraux_simulator $(BUILD_DRIVERS)/indigo_mount_nexstaraux.a | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_nexstaraux_simulator: integration/test_mount_nexstaraux_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_nexstaraux_simulator $(BUILD_DRIVERS)/indigo_mount_nexstaraux.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(MOUNT_NEXSTARAUX_SIMULATOR_TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/mount_pmc8_simulator: ../indigo_drivers/mount_pmc8/mount_pmc8_simulator/mount_pmc8_simulator.c simulator_common/serial_simulator_common.h simulator_common/serial_motion.h | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< -lm
 
-$(INTEGRATION_BUILD)/test_mount_pmc8_simulator: integration/test_mount_pmc8_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_pmc8_simulator $(BUILD_DRIVERS)/indigo_mount_pmc8.a | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_pmc8_simulator: integration/test_mount_pmc8_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_pmc8_simulator $(BUILD_DRIVERS)/indigo_mount_pmc8.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(MOUNT_PMC8_SIMULATOR_TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/mount_rainbow_simulator: ../indigo_drivers/mount_rainbow/mount_rainbow_simulator/mount_rainbow_simulator.c simulator_common/serial_simulator_common.h simulator_common/serial_motion.h | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< -lm
 
-$(INTEGRATION_BUILD)/test_mount_rainbow_simulator: integration/test_mount_rainbow_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h fixtures/mount_rainbow/original_reference_trace.txt $(INTEGRATION_BUILD)/mount_rainbow_simulator $(BUILD_DRIVERS)/indigo_mount_rainbow.a | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_rainbow_simulator: integration/test_mount_rainbow_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h fixtures/mount_rainbow/original_reference_trace.txt $(INTEGRATION_BUILD)/mount_rainbow_simulator $(BUILD_DRIVERS)/indigo_mount_rainbow.a | $(INTEGRATION_BUILD)
 	$(CC) $(MOUNT_RAINBOW_TEST_CFLAGS) -o $@ $< $(MOUNT_RAINBOW_SIMULATOR_TEST_LDFLAGS)
 
 MOUNT_RAINBOW_SANITIZE_CFLAGS = $(filter-out -arch arm64 x86_64,$(MOUNT_RAINBOW_TEST_CFLAGS)) $(SANITIZE_ARCH) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
 MOUNT_RAINBOW_SANITIZE_LDFLAGS = $(filter-out -arch arm64 x86_64,$(TEST_LDFLAGS)) $(SANITIZE_ARCH) -fsanitize=address,undefined -lindigocat
 
-$(INTEGRATION_BUILD)/test_mount_rainbow_simulator_sanitize: integration/test_mount_rainbow_simulator.c ../indigo_drivers/mount_rainbow/indigo_mount_rainbow.c ../indigo_drivers/mount_rainbow/indigo_mount_rainbow.h integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h fixtures/mount_rainbow/original_reference_trace.txt $(INTEGRATION_BUILD)/mount_rainbow_simulator | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_rainbow_simulator_sanitize: integration/test_mount_rainbow_simulator.c integration/mount_coordinates_test_common.h ../indigo_drivers/mount_rainbow/indigo_mount_rainbow.c ../indigo_drivers/mount_rainbow/indigo_mount_rainbow.h integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h fixtures/mount_rainbow/original_reference_trace.txt $(INTEGRATION_BUILD)/mount_rainbow_simulator | $(INTEGRATION_BUILD)
 	$(CC) $(MOUNT_RAINBOW_SANITIZE_CFLAGS) -o $@ $< ../indigo_drivers/mount_rainbow/indigo_mount_rainbow.c $(MOUNT_RAINBOW_SANITIZE_LDFLAGS)
 
 .PHONY: test-mount-rainbow-simulator test-mount-rainbow-simulator-sanitize
@@ -854,7 +1102,7 @@ test-mount-rainbow-simulator-sanitize: $(INTEGRATION_BUILD)/test_mount_rainbow_s
 $(INTEGRATION_BUILD)/mount_starbook_simulator: ../indigo_drivers/mount_starbook/mount_starbook_simulator/mount_starbook_simulator.c simulator_common/serial_simulator_common.h | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $<
 
-$(INTEGRATION_BUILD)/test_mount_starbook_simulator: integration/test_mount_starbook_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_starbook_simulator $(BUILD_DRIVERS)/indigo_mount_starbook.a | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_starbook_simulator: integration/test_mount_starbook_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_starbook_simulator $(BUILD_DRIVERS)/indigo_mount_starbook.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(MOUNT_STARBOOK_SIMULATOR_TEST_LDFLAGS)
 
 # system_alpaca keeps its JSON parser and HTTP client in the driver directory, so their tests link the driver archive.
@@ -887,7 +1135,7 @@ benchmark-system-alpaca-guide: $(INTEGRATION_BUILD)/test_system_alpaca_simulator
 	SYSTEM_ALPACA_TEST_TIMING=1 INDIGO_TEST_JOBS=1 INDIGO_TEST_CASE_FILTER=guider_timing ./$(INTEGRATION_BUILD)/test_system_alpaca_simulator
 
 # Opt-in OmniSim tier: the system_alpaca driver against ASCOM OmniSim (ASCOM Alpaca Simulators) on real time. OmniSim is installed by
-# hand into omnisim/ next to the INDIGO working tree (system_alpaca REFACTOR.md 4.1) or named by INDIGO_TEST_OMNISIM; nothing is downloaded
+# hand into omnisim/ next to the INDIGO working tree (3dedba4cb:.factory/tasks/archive/20261027203747-a8d5-archive-refactor-notes/refactor/system_alpaca.md 4.1) or named by INDIGO_TEST_OMNISIM; nothing is downloaded
 # here, and without it the test reports the tier as not run. Not in INTEGRATION_TESTS or OPT_IN_DRIVER_TESTS on purpose, so the
 # ordinary recorded run of the driver never depends on OmniSim.
 SYSTEM_ALPACA_OMNISIM_TEST_CFLAGS = $(TEST_CFLAGS) -DSYSTEM_ALPACA_OMNISIM_DIR='"$(abspath ../../omnisim)"'
@@ -914,7 +1162,10 @@ $(TEST_BUILD)/hardware/test_system_alpaca_hw: hardware/test_system_alpaca_hw.c h
 $(INTEGRATION_BUILD)/mount_temma_simulator: ../indigo_drivers/mount_temma/mount_temma_simulator/mount_temma_simulator.c simulator_common/serial_simulator_common.h | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< -lm
 
-$(INTEGRATION_BUILD)/test_mount_temma_simulator: integration/test_mount_temma_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_temma_simulator $(BUILD_DRIVERS)/indigo_mount_temma.a | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_temma_deadline: integration/test_mount_temma_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_temma_simulator ../indigo_drivers/mount_temma/indigo_mount_temma.c ../indigo_drivers/mount_temma/indigo_mount_temma.driver | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -DINDIGO_TEST_MOTION_DEADLINE -DTEMMA_SLEW_TIMEOUT=1 -o $@ $< ../indigo_drivers/mount_temma/indigo_mount_temma.c $(TEST_LDFLAGS) -lindigocat
+
+$(INTEGRATION_BUILD)/test_mount_temma_simulator: integration/test_mount_temma_simulator.c integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_temma_simulator $(BUILD_DRIVERS)/indigo_mount_temma.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(MOUNT_TEMMA_SIMULATOR_TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/test_focuser_astromechanics_simulator: integration/test_focuser_astromechanics_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/focuser_astromechanics_simulator $(BUILD_DRIVERS)/indigo_focuser_astromechanics.a | $(INTEGRATION_BUILD)
@@ -1032,6 +1283,24 @@ $(INTEGRATION_BUILD)/test_focuser_mjkzz_simulator_asan: integration/test_focuser
 $(INTEGRATION_BUILD)/test_focuser_moonlite_simulator: integration/test_focuser_moonlite_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/focuser_moonlite_simulator $(BUILD_DRIVERS)/indigo_focuser_moonlite.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(FOCUSER_MOONLITE_SIMULATOR_TEST_LDFLAGS)
 
+# The framework's own copy of indigo_driver.c with the USB-serial scan replaced by the test's fake port list, so the
+# test decides when a port disappears; the MoonLite driver and the focuser base class are linked against that copy.
+$(INTEGRATION_BUILD)/serial_port_loss_framework.o: ../indigo_libs/indigo_driver.c Makefile | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -Dindigo_enumerate_usbserial_devices=fake_usbserial_devices -c $< -o $@
+
+$(INTEGRATION_BUILD)/serial_port_loss_base.o: ../indigo_libs/indigo_focuser_driver.c Makefile | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -c $< -o $@
+
+$(INTEGRATION_BUILD)/serial_port_loss_driver.o: ../indigo_drivers/focuser_moonlite/indigo_focuser_moonlite.c ../indigo_drivers/focuser_moonlite/indigo_focuser_moonlite.h Makefile | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -c $< -o $@
+
+$(INTEGRATION_BUILD)/test_serial_port_loss: integration/test_serial_port_loss.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/focuser_moonlite_simulator $(INTEGRATION_BUILD)/serial_port_loss_framework.o $(INTEGRATION_BUILD)/serial_port_loss_base.o $(INTEGRATION_BUILD)/serial_port_loss_driver.o | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) $< $(INTEGRATION_BUILD)/serial_port_loss_framework.o $(INTEGRATION_BUILD)/serial_port_loss_base.o $(INTEGRATION_BUILD)/serial_port_loss_driver.o -o $@ $(FRAMEWORK_TEST_LDFLAGS)
+
+# Auto-selection of claimed ports, against the same framework copy with the fake port list and focusers of the test.
+$(INTEGRATION_BUILD)/test_serial_port_claim: integration/test_serial_port_claim.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/serial_port_loss_framework.o $(INTEGRATION_BUILD)/serial_port_loss_base.o | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) $< $(INTEGRATION_BUILD)/serial_port_loss_framework.o $(INTEGRATION_BUILD)/serial_port_loss_base.o -o $@ $(FRAMEWORK_TEST_LDFLAGS)
+
 $(INTEGRATION_BUILD)/test_focuser_moonlite_simulator_asan: integration/test_focuser_moonlite_simulator.c ../indigo_drivers/focuser_moonlite/indigo_focuser_moonlite.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/focuser_moonlite_simulator | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -O1 -fsanitize=address -fno-omit-frame-pointer -o $@ $< ../indigo_drivers/focuser_moonlite/indigo_focuser_moonlite.c $(TEST_LDFLAGS)
 
@@ -1050,7 +1319,7 @@ $(INTEGRATION_BUILD)/test_focuser_optec_simulator: integration/test_focuser_opte
 $(INTEGRATION_BUILD)/test_focuser_optec_simulator_asan: integration/test_focuser_optec_simulator.c ../indigo_drivers/focuser_optec/indigo_focuser_optec.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/focuser_optec_simulator | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -O1 -fsanitize=address -fno-omit-frame-pointer -o $@ $< ../indigo_drivers/focuser_optec/indigo_focuser_optec.c $(TEST_LDFLAGS)
 
-$(INTEGRATION_BUILD)/test_focuser_primaluce_simulator: integration/test_focuser_primaluce_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/focuser_primaluce_simulator $(BUILD_DRIVERS)/indigo_focuser_primaluce.a | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_focuser_primaluce_simulator: integration/test_focuser_primaluce_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/focuser_primaluce_simulator $(BUILD_DRIVERS)/indigo_focuser_primaluce.a $(PRIMALUCELIB) | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(FOCUSER_PRIMALUCE_SIMULATOR_TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/test_focuser_prodigy_simulator_asan: integration/test_focuser_prodigy_simulator.c ../indigo_drivers/focuser_prodigy/indigo_focuser_prodigy.c integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/focuser_prodigy_simulator | $(INTEGRATION_BUILD)
@@ -1095,6 +1364,12 @@ $(INTEGRATION_BUILD)/test_aux_wcv4ec_simulator: integration/test_aux_wcv4ec_simu
 $(INTEGRATION_BUILD)/test_aux_arteskyflat_simulator: integration/test_aux_arteskyflat_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/aux_arteskyflat_simulator $(BUILD_DRIVERS)/indigo_aux_arteskyflat.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(AUX_ARTESKYFLAT_SIMULATOR_TEST_LDFLAGS)
 
+$(INTEGRATION_BUILD)/test_aux_alto_simulator: integration/test_aux_alto_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/alto_simulator $(BUILD_DRIVERS)/indigo_aux_alto.a $(PRIMALUCELIB) | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(AUX_ALTO_SIMULATOR_TEST_LDFLAGS)
+
+$(INTEGRATION_BUILD)/test_aux_giotto_simulator: integration/test_aux_giotto_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/giotto_simulator $(BUILD_DRIVERS)/indigo_aux_giotto.a $(PRIMALUCELIB) | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(AUX_GIOTTO_SIMULATOR_TEST_LDFLAGS)
+
 $(INTEGRATION_BUILD)/test_aux_geoptikflat_simulator: integration/test_aux_geoptikflat_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/aux_geoptikflat_simulator $(BUILD_DRIVERS)/indigo_aux_geoptikflat.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(AUX_GEOPTIKFLAT_SIMULATOR_TEST_LDFLAGS)
 
@@ -1122,7 +1397,7 @@ $(INTEGRATION_BUILD)/test_aux_flipflat_simulator: integration/test_aux_flipflat_
 $(INTEGRATION_BUILD)/test_ao_sx_simulator: integration/test_ao_sx_simulator.c $(BUILD_DRIVERS)/indigo_ao_sx.a integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/ao_sx_simulator | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(AO_SX_SIMULATOR_TEST_LDFLAGS)
 
-$(INTEGRATION_BUILD)/test_mount_synscan_simulator: integration/test_mount_synscan_simulator.c $(INTEGRATION_BUILD)/mount_synscan_test_driver.o integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_synscan_simulator | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/test_mount_synscan_simulator: integration/test_mount_synscan_simulator.c $(INTEGRATION_BUILD)/mount_synscan_test_driver.o integration/mount_coordinates_test_common.h integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_synscan_simulator | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(MOUNT_SYNSCAN_SIMULATOR_TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/test_aux_upb3_simulator: integration/test_aux_upb3_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/aux_upb3_simulator $(BUILD_DRIVERS)/indigo_aux_upb3.a | $(INTEGRATION_BUILD)
@@ -1181,7 +1456,7 @@ $(INTEGRATION_BUILD)/focuser_astroasis_sdk_base.o: ../indigo_libs/indigo_focuser
 	$(CC) $(TEST_CFLAGS) -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_focuser_astroasis_sdk: integration/test_focuser_astroasis_sdk.c integration/simulator_test_common.h test_runner.h fixtures/focuser_astroasis/generated_reference_trace.txt $(INTEGRATION_BUILD)/focuser_astroasis_sdk_driver.o $(INTEGRATION_BUILD)/focuser_astroasis_sdk_framework.o $(INTEGRATION_BUILD)/focuser_astroasis_sdk_base.o | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) $(OAF_SDK_TEST_INCLUDE) $(OAF_SDK_TEST_TRACE) $< $(INTEGRATION_BUILD)/focuser_astroasis_sdk_driver.o $(INTEGRATION_BUILD)/focuser_astroasis_sdk_framework.o $(INTEGRATION_BUILD)/focuser_astroasis_sdk_base.o -o $@ $(TEST_LDFLAGS) -lusb-1.0
+	$(CC) $(TEST_CFLAGS) $(OAF_SDK_TEST_INCLUDE) $(OAF_SDK_TEST_TRACE) $< $(INTEGRATION_BUILD)/focuser_astroasis_sdk_driver.o $(INTEGRATION_BUILD)/focuser_astroasis_sdk_framework.o $(INTEGRATION_BUILD)/focuser_astroasis_sdk_base.o -o $@ $(FRAMEWORK_TEST_LDFLAGS)
 
 .PHONY: test-focuser-astroasis-sdk
 test-focuser-astroasis-sdk: $(INTEGRATION_BUILD)/test_focuser_astroasis_sdk
@@ -1207,7 +1482,7 @@ test-focuser-astroasis-sdk-sanitize: $(INTEGRATION_BUILD)/test_focuser_astroasis
 	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 $(INTEGRATION_BUILD)/test_focuser_astroasis_sdk_sanitize
 
 EFW_SDK_TEST_INCLUDE = -I../indigo_drivers/wheel_asi/bin_externals/libEFWFilter/include
-EFW_SDK_TEST_REPLACEMENTS = -Dlibusb_hotplug_register_callback_sim=efw_test_usb_register_sim -Dlibusb_hotplug_deregister_callback_poll=efw_test_usb_deregister_poll -Dindigo_start_usb_event_handler=efw_test_usb_start -Dindigo_attach_device=efw_test_attach -Dindigo_detach_device=efw_test_detach -Dlibusb_hotplug_register_callback=efw_test_usb_register -Dlibusb_hotplug_deregister_callback=efw_test_usb_deregister -Dlibusb_ref_device=efw_test_usb_ref -Dlibusb_unref_device=efw_test_usb_unref -Dlibusb_get_device_descriptor=efw_test_usb_descriptor
+EFW_SDK_TEST_REPLACEMENTS = -DEFW_MOVE_TIMEOUT=3.0 -DEFW_CALIBRATION_TIMEOUT=4.0 -Dlibusb_hotplug_register_callback_sim=efw_test_usb_register_sim -Dlibusb_hotplug_deregister_callback_poll=efw_test_usb_deregister_poll -Dindigo_start_usb_event_handler=efw_test_usb_start -Dindigo_attach_device=efw_test_attach -Dindigo_detach_device=efw_test_detach -Dlibusb_hotplug_register_callback=efw_test_usb_register -Dlibusb_hotplug_deregister_callback=efw_test_usb_deregister -Dlibusb_ref_device=efw_test_usb_ref -Dlibusb_unref_device=efw_test_usb_unref -Dlibusb_get_device_descriptor=efw_test_usb_descriptor
 
 $(INTEGRATION_BUILD)/wheel_asi_sdk_driver.o: ../indigo_drivers/wheel_asi/indigo_wheel_asi.c ../indigo_drivers/wheel_asi/indigo_wheel_asi.h Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $(EFW_SDK_TEST_INCLUDE) $(EFW_SDK_TEST_REPLACEMENTS) -c $< -o $@
@@ -1216,7 +1491,7 @@ $(INTEGRATION_BUILD)/test_wheel_asi_sdk: integration/test_wheel_asi_sdk.c integr
 	$(CC) $(TEST_CFLAGS) $(EFW_SDK_TEST_INCLUDE) $< $(INTEGRATION_BUILD)/wheel_asi_sdk_driver.o -o $@ $(TEST_LDFLAGS) -lusb-1.0
 
 PW_SDK_TEST_INCLUDE = -I../indigo_drivers/wheel_playerone/bin_externals/libPlayerOnePW/include
-PW_SDK_TEST_REPLACEMENTS = -Dindigo_execute_handler_in=pw_test_poll -Dlibusb_hotplug_register_callback_sim=pw_test_usb_register_sim -Dlibusb_hotplug_deregister_callback_poll=pw_test_usb_deregister_poll -Dindigo_start_usb_event_handler=pw_test_usb_start -Dindigo_attach_device=pw_test_attach -Dindigo_detach_device=pw_test_detach -Dlibusb_hotplug_register_callback=pw_test_usb_register -Dlibusb_hotplug_deregister_callback=pw_test_usb_deregister -Dlibusb_ref_device=pw_test_usb_ref -Dlibusb_unref_device=pw_test_usb_unref -Dlibusb_get_device_descriptor=pw_test_usb_descriptor
+PW_SDK_TEST_REPLACEMENTS = -DPW_MOVE_TIMEOUT=3.0 -Dindigo_execute_handler_in=pw_test_poll -Dlibusb_hotplug_register_callback_sim=pw_test_usb_register_sim -Dlibusb_hotplug_deregister_callback_poll=pw_test_usb_deregister_poll -Dindigo_start_usb_event_handler=pw_test_usb_start -Dindigo_attach_device=pw_test_attach -Dindigo_detach_device=pw_test_detach -Dlibusb_hotplug_register_callback=pw_test_usb_register -Dlibusb_hotplug_deregister_callback=pw_test_usb_deregister -Dlibusb_ref_device=pw_test_usb_ref -Dlibusb_unref_device=pw_test_usb_unref -Dlibusb_get_device_descriptor=pw_test_usb_descriptor
 
 $(INTEGRATION_BUILD)/wheel_playerone_sdk_driver.o: ../indigo_drivers/wheel_playerone/indigo_wheel_playerone.c ../indigo_drivers/wheel_playerone/indigo_wheel_playerone.h Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $(PW_SDK_TEST_INCLUDE) $(PW_SDK_TEST_REPLACEMENTS) -c $< -o $@
@@ -1228,7 +1503,7 @@ $(INTEGRATION_BUILD)/wheel_playerone_sdk_base.o: ../indigo_libs/indigo_wheel_dri
 	$(CC) $(TEST_CFLAGS) -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_wheel_playerone_sdk: integration/test_wheel_playerone_sdk.c integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/wheel_playerone_sdk_driver.o $(INTEGRATION_BUILD)/wheel_playerone_sdk_framework.o $(INTEGRATION_BUILD)/wheel_playerone_sdk_base.o | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) $(PW_SDK_TEST_INCLUDE) $< $(INTEGRATION_BUILD)/wheel_playerone_sdk_driver.o $(INTEGRATION_BUILD)/wheel_playerone_sdk_framework.o $(INTEGRATION_BUILD)/wheel_playerone_sdk_base.o -o $@ $(TEST_LDFLAGS) -lusb-1.0
+	$(CC) $(TEST_CFLAGS) $(PW_SDK_TEST_INCLUDE) $< $(INTEGRATION_BUILD)/wheel_playerone_sdk_driver.o $(INTEGRATION_BUILD)/wheel_playerone_sdk_framework.o $(INTEGRATION_BUILD)/wheel_playerone_sdk_base.o -o $@ $(FRAMEWORK_TEST_LDFLAGS)
 
 MIW_SDK_TEST_INCLUDE = -I../indigo_drivers/wheel_mi/bin_externals/libgxccd/include
 MIW_SDK_TEST_REPLACEMENTS = -Dindigo_queue_create=miw_test_queue_create -Dlibusb_hotplug_register_callback_sim=miw_test_usb_register_sim -Dlibusb_hotplug_deregister_callback_poll=miw_test_usb_deregister_poll -Dindigo_start_usb_event_handler=miw_test_usb_start -Dindigo_attach_device=miw_test_attach -Dindigo_detach_device=miw_test_detach -Dlibusb_hotplug_register_callback=miw_test_usb_register -Dlibusb_hotplug_deregister_callback=miw_test_usb_deregister -Dlibusb_ref_device=miw_test_usb_ref -Dlibusb_unref_device=miw_test_usb_unref -Dlibusb_get_device_descriptor=miw_test_usb_descriptor
@@ -1269,7 +1544,7 @@ $(INTEGRATION_BUILD)/wheel_astroasis_sdk_base.o: ../indigo_libs/indigo_wheel_dri
 	$(CC) $(TEST_CFLAGS) -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_wheel_astroasis_sdk: integration/test_wheel_astroasis_sdk.c integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/wheel_astroasis_sdk_driver.o $(INTEGRATION_BUILD)/wheel_astroasis_sdk_framework.o $(INTEGRATION_BUILD)/wheel_astroasis_sdk_base.o | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) $(OFW_SDK_TEST_INCLUDE) $< $(INTEGRATION_BUILD)/wheel_astroasis_sdk_driver.o $(INTEGRATION_BUILD)/wheel_astroasis_sdk_framework.o $(INTEGRATION_BUILD)/wheel_astroasis_sdk_base.o -o $@ $(TEST_LDFLAGS) -lusb-1.0
+	$(CC) $(TEST_CFLAGS) $(OFW_SDK_TEST_INCLUDE) $< $(INTEGRATION_BUILD)/wheel_astroasis_sdk_driver.o $(INTEGRATION_BUILD)/wheel_astroasis_sdk_framework.o $(INTEGRATION_BUILD)/wheel_astroasis_sdk_base.o -o $@ $(FRAMEWORK_TEST_LDFLAGS)
 
 CAA_SDK_TEST_INCLUDE = -I../indigo_drivers/rotator_asi/bin_externals/libCAA/include
 CAA_SDK_TEST_REPLACEMENTS = -Dindigo_rotator_change_property=caa_test_base_change -Dlibusb_hotplug_register_callback_sim=caa_test_usb_register_sim -Dlibusb_hotplug_deregister_callback_poll=caa_test_usb_deregister_poll -Dindigo_save_property=caa_test_save -Dindigo_start_usb_event_handler=caa_test_usb_start -Dindigo_attach_device=caa_test_attach -Dindigo_detach_device=caa_test_detach -Dlibusb_hotplug_register_callback=caa_test_usb_register -Dlibusb_hotplug_deregister_callback=caa_test_usb_deregister -Dlibusb_ref_device=caa_test_usb_ref -Dlibusb_unref_device=caa_test_usb_unref -Dlibusb_get_device_descriptor=caa_test_usb_descriptor
@@ -1519,6 +1794,43 @@ $(INTEGRATION_BUILD)/test_ccd_iidc_sdk_sanitize: integration/test_ccd_iidc_sdk.c
 test-ccd-iidc-sdk-sanitize: $(INTEGRATION_BUILD)/test_ccd_iidc_sdk_sanitize
 	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 $(INTEGRATION_BUILD)/test_ccd_iidc_sdk_sanitize
 
+# The libcamera driver is tested through its C bridge: the test defines the lcam_* functions the
+# generated driver calls instead of indigo_ccd_libcamera_bridge.cpp, so it needs no libcamera.
+LIBCAMERA_SDK_TEST_INCLUDE = -I../indigo_linux_drivers/ccd_libcamera
+LIBCAMERA_SDK_TEST_REPLACEMENTS = -Dindigo_attach_device=lcam_test_attach -Dindigo_detach_device=lcam_test_detach -DLIBCAMERA_READOUT_TIMEOUT=0.3
+LIBCAMERA_SDK_TEST_DEPENDENCIES = ../indigo_linux_drivers/ccd_libcamera/indigo_ccd_libcamera.c ../indigo_linux_drivers/ccd_libcamera/indigo_ccd_libcamera.h ../indigo_linux_drivers/ccd_libcamera/indigo_ccd_libcamera_bridge.h Makefile
+
+$(INTEGRATION_BUILD)/ccd_libcamera_sdk_driver.o: $(LIBCAMERA_SDK_TEST_DEPENDENCIES) | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) $(LIBCAMERA_SDK_TEST_INCLUDE) $(LIBCAMERA_SDK_TEST_REPLACEMENTS) -c $< -o $@
+
+$(INTEGRATION_BUILD)/test_ccd_libcamera_sdk: integration/test_ccd_libcamera_sdk.c integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/ccd_libcamera_sdk_driver.o | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) $(LIBCAMERA_SDK_TEST_INCLUDE) $< $(INTEGRATION_BUILD)/ccd_libcamera_sdk_driver.o -o $@ $(TOUPTEK_SDK_TEST_LDFLAGS)
+
+.PHONY: test-ccd-libcamera-sdk
+test-ccd-libcamera-sdk: $(INTEGRATION_BUILD)/test_ccd_libcamera_sdk
+	$(INTEGRATION_BUILD)/test_ccd_libcamera_sdk
+
+LIBCAMERA_SANITIZE_CFLAGS = $(filter-out -arch arm64 x86_64,$(TEST_CFLAGS)) $(SANITIZE_ARCH) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
+LIBCAMERA_SANITIZE_LDFLAGS = $(filter-out -arch arm64 x86_64,$(TOUPTEK_SDK_TEST_LDFLAGS)) $(SANITIZE_ARCH) -fsanitize=address,undefined
+
+$(INTEGRATION_BUILD)/ccd_libcamera_sdk_driver_sanitize.o: $(LIBCAMERA_SDK_TEST_DEPENDENCIES) | $(INTEGRATION_BUILD)
+	$(CC) $(LIBCAMERA_SANITIZE_CFLAGS) $(LIBCAMERA_SDK_TEST_INCLUDE) $(LIBCAMERA_SDK_TEST_REPLACEMENTS) -c $< -o $@
+
+$(INTEGRATION_BUILD)/test_ccd_libcamera_sdk_sanitize: integration/test_ccd_libcamera_sdk.c integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/ccd_libcamera_sdk_driver_sanitize.o | $(INTEGRATION_BUILD)
+	$(CC) $(LIBCAMERA_SANITIZE_CFLAGS) $(LIBCAMERA_SDK_TEST_INCLUDE) $< $(INTEGRATION_BUILD)/ccd_libcamera_sdk_driver_sanitize.o -o $@ $(LIBCAMERA_SANITIZE_LDFLAGS)
+
+.PHONY: test-ccd-libcamera-sdk-sanitize
+test-ccd-libcamera-sdk-sanitize: $(INTEGRATION_BUILD)/test_ccd_libcamera_sdk_sanitize
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 $(INTEGRATION_BUILD)/test_ccd_libcamera_sdk_sanitize
+
+# Physical libcamera cameras (Raspberry Pi CSI) are opt-in and Linux only.
+.PHONY: test-ccd-libcamera-hw
+test-ccd-libcamera-hw: check-lib $(TEST_BUILD)/hardware/test_ccd_libcamera_hw
+	$(TEST_BUILD)/hardware/test_ccd_libcamera_hw --run
+
+$(TEST_BUILD)/hardware/test_ccd_libcamera_hw: hardware/test_ccd_libcamera_hw.c hardware/hardware_device_record.h test_runner.h ../build/drivers/indigo_ccd_libcamera.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< ../build/drivers/indigo_ccd_libcamera.a -o $@ $(TEST_LDFLAGS) $(shell pkg-config --libs libcamera 2>/dev/null) -lstdc++
+
 # Physical IIDC camera hardware is opt-in and excluded from normal integration tests.
 # Physical Meade DSI hardware is opt-in; HW_HOTPLUG=1 adds the unplug cases, which switch the camera's USB port on Linux.
 .PHONY: test-ccd-dsi-hw
@@ -1629,9 +1941,9 @@ $(TEST_BUILD)/hardware/test_aux_upb_hw: hardware/test_aux_upb_hw.c hardware/hard
 test-focuser-primaluce-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_primaluce_hw
 	$(TEST_BUILD)/hardware/test_focuser_primaluce_hw --run
 
-FOCUSER_PRIMALUCE_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_primaluce.a $(TEST_LDFLAGS)
+FOCUSER_PRIMALUCE_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_primaluce.a $(PRIMALUCELIB) $(TEST_LDFLAGS)
 
-$(TEST_BUILD)/hardware/test_focuser_primaluce_hw: hardware/test_focuser_primaluce_hw.c hardware/hardware_device_record.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_primaluce.a | $(TEST_BUILD)/hardware
+$(TEST_BUILD)/hardware/test_focuser_primaluce_hw: hardware/test_focuser_primaluce_hw.c hardware/hardware_device_record.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_primaluce.a $(PRIMALUCELIB) | $(TEST_BUILD)/hardware
 	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_PRIMALUCE_HW_TEST_LDFLAGS)
 
 # Physical Starlight Xpress filter wheel hardware is opt-in and excluded from normal integration
@@ -1682,6 +1994,15 @@ test-ccd-uvc-hw: check-lib $(TEST_BUILD)/hardware/test_ccd_uvc_hw
 
 $(TEST_BUILD)/hardware/test_ccd_uvc_hw: hardware/test_ccd_uvc_hw.c hardware/hardware_device_record.h ../build/drivers/indigo_ccd_uvc.a | $(TEST_BUILD)/hardware
 	$(CC) $(TEST_CFLAGS) $< ../build/drivers/indigo_ccd_uvc.a -o $@ $(TEST_LDFLAGS) -ljpeg -lusb-1.0
+
+# Physical PTP camera (DSLR / mirrorless) hardware is opt-in and excluded from normal integration
+# tests. macOS builds the driver on ImageCaptureCore, Linux on libusb.
+.PHONY: test-ccd-ptp-hw
+test-ccd-ptp-hw: check-lib $(TEST_BUILD)/hardware/test_ccd_ptp_hw
+	$(TEST_BUILD)/hardware/test_ccd_ptp_hw --run
+
+$(TEST_BUILD)/hardware/test_ccd_ptp_hw: hardware/test_ccd_ptp_hw.c hardware/hardware_device_record.h test_runner.h ../build/drivers/indigo_ccd_ptp.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< ../build/drivers/indigo_ccd_ptp.a -o $@ $(TEST_LDFLAGS) -ljpeg $(if $(filter Darwin,$(OS_DETECTED)),-framework ImageCaptureCore -framework Cocoa -framework IOKit,-lusb-1.0)
 
 # Physical Starlight Xpress camera hardware is opt-in and excluded from normal integration tests.
 .PHONY: test-ccd-sx-hw
@@ -1788,27 +2109,27 @@ $(TEST_BUILD)/hardware/test_ccd_ssag_hw: hardware/test_ccd_ssag_hw.c hardware/ha
 
 OUTPUT_TRANSPORT_REPLACEMENTS = -Dindigo_uni_open_serial=output_open -Dindigo_uni_close=output_close -Dindigo_uni_discard=output_discard -Dindigo_uni_vprintf=output_write -Dindigo_uni_vtprintf=output_write_line -Dindigo_uni_read_section=output_read -Dindigo_uni_set_rts=output_rts
 
-$(INTEGRATION_BUILD)/guider_cgusbst4_transport.o: ../indigo_drivers/guider_cgusbst4/indigo_guider_cgusbst4.c | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) $(OUTPUT_TRANSPORT_REPLACEMENTS) -c $< -o $@
+$(INTEGRATION_BUILD)/guider_cgusbst4_transport.o: ../indigo_drivers/guider_cgusbst4/indigo_guider_cgusbst4.c Makefile | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial2=output_open2 $(OUTPUT_TRANSPORT_REPLACEMENTS) -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_guider_cgusbst4_transport: integration/test_serial_outputs.c $(INTEGRATION_BUILD)/guider_cgusbst4_transport.o integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -DTEST_KIND=1 -DTEST_ENTRY=indigo_guider_cgusbst4 -DTEST_NAME='"CG-USB-ST4 Adapter"' $< $(INTEGRATION_BUILD)/guider_cgusbst4_transport.o -o $@ $(TEST_LDFLAGS)
 
-$(INTEGRATION_BUILD)/aux_geoptikflat_transport.o: ../indigo_drivers/aux_geoptikflat/indigo_aux_geoptikflat.c | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) $(OUTPUT_TRANSPORT_REPLACEMENTS) -c $< -o $@
+$(INTEGRATION_BUILD)/aux_geoptikflat_transport.o: ../indigo_drivers/aux_geoptikflat/indigo_aux_geoptikflat.c Makefile | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial2=output_open2 $(OUTPUT_TRANSPORT_REPLACEMENTS) -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_aux_geoptikflat_transport: integration/test_serial_outputs.c $(INTEGRATION_BUILD)/aux_geoptikflat_transport.o integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -DTEST_KIND=2 -DTEST_ENTRY=indigo_aux_geoptikflat -DTEST_NAME='"Geoptik Flat Generator"' $< $(INTEGRATION_BUILD)/aux_geoptikflat_transport.o -o $@ $(TEST_LDFLAGS)
 
-RTS_SHUTTER_REPLACEMENTS = -Dindigo_uni_open_serial=rts_test_open -Dindigo_uni_close=rts_test_close -Dindigo_uni_set_rts=rts_test_set_rts
+RTS_SHUTTER_REPLACEMENTS = -Dindigo_uni_open_serial2=rts_test_open -Dindigo_uni_close=rts_test_close -Dindigo_uni_set_rts=rts_test_set_rts
 
-$(INTEGRATION_BUILD)/aux_rts_shutter.o: ../indigo_drivers/aux_rts/indigo_aux_rts.c | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/aux_rts_shutter.o: ../indigo_drivers/aux_rts/indigo_aux_rts.c Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $(RTS_SHUTTER_REPLACEMENTS) -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_aux_rts_shutter: integration/test_aux_rts_shutter.c $(INTEGRATION_BUILD)/aux_rts_shutter.o integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $< $(INTEGRATION_BUILD)/aux_rts_shutter.o -o $@ $(TEST_LDFLAGS)
 
-$(INTEGRATION_BUILD)/aux_rts_shutter_asan.o: ../indigo_drivers/aux_rts/indigo_aux_rts.c | $(INTEGRATION_BUILD)
+$(INTEGRATION_BUILD)/aux_rts_shutter_asan.o: ../indigo_drivers/aux_rts/indigo_aux_rts.c Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer $(RTS_SHUTTER_REPLACEMENTS) -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_aux_rts_shutter_asan: integration/test_aux_rts_shutter.c $(INTEGRATION_BUILD)/aux_rts_shutter_asan.o integration/serial_simulator_test_common.h integration/simulator_test_common.h integration/abort_queue_test_common.h test_runner.h Makefile | $(INTEGRATION_BUILD)
@@ -1826,8 +2147,8 @@ $(INTEGRATION_BUILD)/test_focuser_dmfc_motion: integration/test_focuser_motion.c
 $(INTEGRATION_BUILD)/test_focuser_usbv3_motion: integration/test_focuser_motion.c $(INTEGRATION_BUILD)/focuser_usbv3_simulator $(BUILD_DRIVERS)/indigo_focuser_usbv3.a integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -DTEST_ENTRY=indigo_focuser_usbv3 -DTEST_NAME='"USB_Focus v3"' -DTEST_SIMULATOR='"build/integration/focuser_usbv3_simulator"' $< -o $@ $(BUILD_DRIVERS)/indigo_focuser_usbv3.a $(TEST_LDFLAGS)
 
-$(INTEGRATION_BUILD)/test_focuser_primaluce_motion: integration/test_focuser_motion.c $(INTEGRATION_BUILD)/focuser_primaluce_simulator $(BUILD_DRIVERS)/indigo_focuser_primaluce.a integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h Makefile | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) -DTEST_ENTRY=indigo_focuser_primaluce -DTEST_NAME='"PrimaluceLab Focuser"' -DTEST_SIMULATOR='"build/integration/focuser_primaluce_simulator"' $< -o $@ $(BUILD_DRIVERS)/indigo_focuser_primaluce.a $(TEST_LDFLAGS)
+$(INTEGRATION_BUILD)/test_focuser_primaluce_motion: integration/test_focuser_motion.c $(INTEGRATION_BUILD)/focuser_primaluce_simulator $(BUILD_DRIVERS)/indigo_focuser_primaluce.a $(PRIMALUCELIB) integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h Makefile | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -DTEST_ENTRY=indigo_focuser_primaluce -DTEST_NAME='"PrimaluceLab Focuser"' -DTEST_SIMULATOR='"build/integration/focuser_primaluce_simulator"' $< -o $@ $(BUILD_DRIVERS)/indigo_focuser_primaluce.a $(PRIMALUCELIB) $(TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/focuser_astromechanics_simulator: simulator_common/serial_motion.h
 
@@ -1838,7 +2159,7 @@ $(INTEGRATION_BUILD)/focuser_usbv3_simulator: simulator_common/serial_motion.h
 $(INTEGRATION_BUILD)/focuser_primaluce_simulator: simulator_common/serial_motion.h
 
 $(INTEGRATION_BUILD)/mount_synscan_test_driver.o: ../indigo_drivers/mount_synscan/indigo_mount_synscan.c | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) -c $< -o $@
+	$(CC) $(TEST_CFLAGS) -Dindigo_monotonic_time=synscan_test_monotonic_time -Dindigo_perform_active_discovery=synscan_test_active_discovery -c $< -o $@
 
 USB_OUTPUT_INCLUDES = -I../indigo_drivers/aux_dsusb/bin_externals/libdsusb/include -I../indigo_drivers/focuser_fcusb/bin_externals/libfcusb/include -I../indigo_drivers/guider_gpusb/bin_externals/libgpusb/include -I../indigo_drivers/wheel_atik/bin_externals/libatik/include
 USB_OUTPUT_REPLACEMENTS = -Dindigo_queue_create=output_queue_create -Dindigo_attach_device=output_attach -Dindigo_detach_device=output_detach -Dindigo_start_usb_event_handler=output_usb_start -Dlibusb_hotplug_register_callback=output_usb_register -Dlibusb_hotplug_deregister_callback=output_usb_deregister -Dlibusb_hotplug_register_callback_sim=output_usb_register_sim -Dlibusb_hotplug_deregister_callback_poll=output_usb_deregister_poll -Dlibusb_ref_device=output_usb_ref -Dlibusb_unref_device=output_usb_unref -Dindigo_get_usb_path=output_usb_path -Dindigo_uni_open_hid=output_hid_open -Dindigo_uni_close=output_hid_close -Dindigo_uni_read=output_hid_read -Dindigo_uni_write=output_hid_write
@@ -2004,31 +2325,31 @@ $(INTEGRATION_BUILD)/test_aux_upb_simulator: integration/test_aux_upb_simulator.
 	$(CC) $(TEST_CFLAGS) -o $@ $< $(INTEGRATION_BUILD)/aux_upb_smart_hub_driver.o $(TEST_LDFLAGS) -lusb-1.0
 
 $(INTEGRATION_BUILD)/gps_nmea_transport.o: ../indigo_drivers/gps_nmea/indigo_gps_nmea.c Makefile | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial_with_config=nmea_test_open -Dindigo_uni_read_section=nmea_test_read -Dindigo_uni_close=nmea_test_close -c $< -o $@
+	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial_with_config2=nmea_test_open -Dindigo_uni_read_section=nmea_test_read -Dindigo_uni_close=nmea_test_close -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_gps_nmea_transport: integration/test_gps_nmea_transport.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/gps_nmea_transport.o Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $< $(INTEGRATION_BUILD)/gps_nmea_transport.o -o $@ $(TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/ao_sx_transport.o: ../indigo_drivers/ao_sx/indigo_ao_sx.c Makefile | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial=ao_test_open -Dindigo_uni_close=ao_test_close -Dindigo_uni_discard=ao_test_discard -Dindigo_uni_vprintf=ao_test_write -Dindigo_uni_read_section=ao_test_read -c $< -o $@
+	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial2=ao_test_open -Dindigo_uni_close=ao_test_close -Dindigo_uni_discard=ao_test_discard -Dindigo_uni_vprintf=ao_test_write -Dindigo_uni_read_section=ao_test_read -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_ao_sx_transport: integration/test_ao_sx_transport.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/ao_sx_transport.o Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $< $(INTEGRATION_BUILD)/ao_sx_transport.o -o $@ $(TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/wheel_indigo_transport.o: ../indigo_drivers/wheel_indigo/indigo_wheel_indigo.c Makefile | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial_with_speed=wheel_test_open -Dindigo_uni_close=wheel_test_close -Dindigo_uni_discard=wheel_test_discard -Dindigo_uni_vtprintf=wheel_test_write -Dindigo_uni_read_section=wheel_test_read -c $< -o $@
+	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial_with_speed2=wheel_test_open -Dindigo_uni_close=wheel_test_close -Dindigo_uni_discard=wheel_test_discard -Dindigo_uni_vtprintf=wheel_test_write -Dindigo_uni_read_section=wheel_test_read -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_wheel_indigo_transport: integration/test_wheel_indigo_transport.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/wheel_indigo_transport.o Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $< $(INTEGRATION_BUILD)/wheel_indigo_transport.o -o $@ $(TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/aux_sqm_transport.o: ../indigo_drivers/aux_sqm/indigo_aux_sqm.c Makefile | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial_with_speed=sqm_test_open -Dindigo_uni_close=sqm_test_close -Dindigo_uni_discard=sqm_test_discard -Dindigo_uni_write=sqm_test_write -Dindigo_uni_read_section=sqm_test_read -c $< -o $@
+	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial_with_speed2=sqm_test_open -Dindigo_uni_close=sqm_test_close -Dindigo_uni_discard=sqm_test_discard -Dindigo_uni_write=sqm_test_write -Dindigo_uni_read_section=sqm_test_read -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_aux_sqm_transport: integration/test_aux_sqm_transport.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/aux_sqm_transport.o Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $< $(INTEGRATION_BUILD)/aux_sqm_transport.o -o $@ $(TEST_LDFLAGS)
 
 $(INTEGRATION_BUILD)/aux_skyalert_transport.o: ../indigo_drivers/aux_skyalert/indigo_aux_skyalert.c Makefile | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial_with_speed=skyalert_test_open -Dindigo_uni_close=skyalert_test_close -Dindigo_uni_discard=skyalert_test_discard -Dindigo_uni_printf=skyalert_test_printf -Dindigo_uni_read_section=skyalert_test_read -c $< -o $@
+	$(CC) $(TEST_CFLAGS) -Dindigo_uni_open_serial_with_speed2=skyalert_test_open -Dindigo_uni_close=skyalert_test_close -Dindigo_uni_discard=skyalert_test_discard -Dindigo_uni_printf=skyalert_test_printf -Dindigo_uni_read_section=skyalert_test_read -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_aux_skyalert_transport: integration/test_aux_skyalert_transport.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/aux_skyalert_transport.o Makefile | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $< $(INTEGRATION_BUILD)/aux_skyalert_transport.o -o $@ $(TEST_LDFLAGS)
@@ -2114,11 +2435,6 @@ $(INTEGRATION_BUILD)/guider_cgusbst4_simulator: ../indigo_drivers/guider_cgusbst
 
 $(INTEGRATION_BUILD)/test_guider_cgusbst4_simulator: integration/test_guider_cgusbst4_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/guider_cgusbst4_simulator $(BUILD_DRIVERS)/indigo_guider_cgusbst4.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $< $(BUILD_DRIVERS)/indigo_guider_cgusbst4.a -o $@ $(TEST_LDFLAGS)
-
-# opt-in: reproduces DRV-095 (numeric PHD2 dialect), not part of test-integration
-.PHONY: test-guider-cgusbst4-simulator-known-defects
-test-guider-cgusbst4-simulator-known-defects: $(INTEGRATION_BUILD)/test_guider_cgusbst4_simulator
-	$(INTEGRATION_BUILD)/test_guider_cgusbst4_simulator --known-defects
 
 LUNATICO_SIMULATOR_SOURCES = ../indigo_drivers/focuser_lunatico/focuser_lunatico_simulator/lunatico_simulator_common.h simulator_common/aux_simulator_common.h simulator_common/serial_simulator_common.h simulator_common/serial_motion.h
 
@@ -2217,6 +2533,20 @@ $(INTEGRATION_BUILD)/test_agent_config: integration/test_agent_config.c test_run
 test-agent-config: check-lib $(INTEGRATION_BUILD)/test_agent_config
 	$(INTEGRATION_BUILD)/test_agent_config
 
+$(INTEGRATION_BUILD)/test_agent_auxiliary: integration/test_agent_auxiliary.c integration/simulator_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_agent_auxiliary.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_auxiliary.a $(TEST_LDFLAGS)
+
+.PHONY: test-agent-auxiliary
+test-agent-auxiliary: check-lib $(INTEGRATION_BUILD)/test_agent_auxiliary
+	$(INTEGRATION_BUILD)/test_agent_auxiliary
+
+$(INTEGRATION_BUILD)/test_agent_auxiliary_simulator: integration/test_agent_auxiliary_simulator.c integration/simulator_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_agent_auxiliary.a $(BUILD_DRIVERS)/indigo_aux_simulator.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_auxiliary.a $(BUILD_DRIVERS)/indigo_aux_simulator.a $(TEST_LDFLAGS)
+
+.PHONY: test-agent-auxiliary-simulator
+test-agent-auxiliary-simulator: check-lib $(INTEGRATION_BUILD)/test_agent_auxiliary_simulator
+	$(INTEGRATION_BUILD)/test_agent_auxiliary_simulator
+
 # Real Astrometry Agent with controlled local image2xy, solve-field and curl peers.
 ASTROMETRY_TEST_FLAGS = -DINDIGO_ASTROMETRY_TEST
 ASTROMETRY_SANITIZE_CFLAGS = $(filter-out -arch arm64 x86_64,$(TEST_CFLAGS)) $(SANITIZE_ARCH) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -2303,9 +2633,55 @@ SEQUENCER_SIMULATORS = $(INTEGRATION_BUILD)/sequencer_ccd_simulator.o $(INTEGRAT
 $(INTEGRATION_BUILD)/test_agent_scripting_sequencer: integration/test_agent_scripting_sequencer.c test_runner.h $(SEQUENCER_TEST_OBJECTS) $(SEQUENCER_SIMULATORS) $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libindigocat.a | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) $(SEQUENCER_TEST_FLAGS) $< $(SEQUENCER_TEST_OBJECTS) $(SEQUENCER_SIMULATORS) -o $@ $(LDFLAGS) $(SEQUENCER_TEST_FLAGS) $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libindigocat.a $(BUILD_LIB)/libjpeg.a $(BUILD_LIB)/libtiff.a $(BUILD_LIB)/libraw.a -lusb-1.0 $(if $(filter Darwin,$(OS_DETECTED)),-lhidapi,-lhidapi-libusb -ludev -ldns_sd -lavahi-client -lavahi-common) -lz -lstdc++ -lm -lpthread -Wl,-rpath,$(BUILD_LIB)
 
+# Scheduler Agent with the real Scripting Agent and Sequencer.js; task bodies only wait, so no device simulators are needed.
+SCHEDULER_TEST_FLAGS = -DSEQUENCER_JS_PATH='"$(abspath ../indigo_drivers/agent_scripting/library/Sequencer.js)"'
+
+$(INTEGRATION_BUILD)/test_agent_scheduler: integration/test_agent_scheduler.c integration/parallel_case_runner.h test_runner.h ../indigo_drivers/agent_scripting/library/Sequencer.js $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(BUILD_DRIVERS)/indigo_agent_scripting.a $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libindigocat.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) $(SCHEDULER_TEST_FLAGS) $< -o $@ $(BUILD_DRIVERS)/indigo_agent_scheduler.a $(BUILD_DRIVERS)/indigo_agent_scripting.a $(TEST_LDFLAGS) -lindigocat
+
+# Sequencer.js.dat is not checked in; the Scheduler Agent's own rule generates it with indigo_hexdump.
+../indigo_drivers/agent_scheduler/Sequencer.js.dat: ../indigo_drivers/agent_scripting/library/Sequencer.js
+	$(MAKE) -C ../indigo_drivers/agent_scheduler -f ../../Makefile.drv Sequencer.js.dat
+
+$(INTEGRATION_BUILD)/test_agent_scheduler_asan: integration/test_agent_scheduler.c integration/parallel_case_runner.h test_runner.h ../indigo_drivers/agent_scheduler/indigo_agent_scheduler.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_header.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_sky.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_plan.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_night.c ../indigo_drivers/agent_scheduler/Sequencer.js.dat $(BUILD_DRIVERS)/indigo_agent_scripting.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) $(SCHEDULER_TEST_FLAGS) -I../indigo_drivers/agent_scheduler -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $< ../indigo_drivers/agent_scheduler/indigo_agent_scheduler.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_header.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_sky.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_plan.c ../indigo_drivers/agent_scheduler/indigo_agent_scheduler_night.c $(BUILD_DRIVERS)/indigo_agent_scripting.a $(TEST_LDFLAGS) -lindigocat -fsanitize=address,undefined
+
+# Opt-in native server acceptance: the Scheduler Agent runs capture, slew, guiding and urgent tasks
+# against the CCD and mount simulators, and the unsafe hold with the Auxiliary Agent and the aux simulator, in a private indigo_server.
+.PHONY: test-scheduler-simulators
+test-scheduler-simulators:
+	python3 integration/run_scheduler_simulators.py $(SCHEDULER_ARGS)
+
+OPT_IN_DRIVER_TESTS += $(INTEGRATION_BUILD)/test_agent_scheduler_simulators
+
+$(INTEGRATION_BUILD)/test_agent_scheduler_simulators: integration/run_scheduler_simulators.py | $(INTEGRATION_BUILD)
+	printf '%s\n' '#!/bin/sh' 'exec python3 "$$(dirname "$$0")/../../integration/run_scheduler_simulators.py" "$$@"' > $@
+	chmod +x $@
+
+.PHONY: test-scheduler-sandbox
+# opt-in: one night of the scheduler in a private server through the hand-testing tool
+test-scheduler-sandbox: check-lib
+	python3 ../tools/scheduler_sandbox.py --script ../tools/scheduler_sandbox_night.txt
+
+.PHONY: test-agent-scheduler
+test-agent-scheduler: check-lib $(INTEGRATION_BUILD)/test_agent_scheduler
+	$(INTEGRATION_BUILD)/test_agent_scheduler
+
 .PHONY: test-agent-scripting-sequencer
 test-agent-scripting-sequencer: check-lib $(INTEGRATION_BUILD)/test_agent_scripting_sequencer
 	$(INTEGRATION_BUILD)/test_agent_scripting_sequencer
+
+# Opt-in native server acceptance: prepared JavaScript runs in the Scripting Agent.
+# SEQUENCER_ARGS may supply --output and --index-dir; indexes are never downloaded.
+.PHONY: test-sequencer-simulators
+test-sequencer-simulators:
+	python3 integration/run_sequencer_simulators.py $(SEQUENCER_ARGS)
+
+OPT_IN_DRIVER_TESTS += $(INTEGRATION_BUILD)/test_agent_scripting_sequencer_simulators
+
+$(INTEGRATION_BUILD)/test_agent_scripting_sequencer_simulators: integration/run_sequencer_simulators.py integration/sequencer_simulators.js | $(INTEGRATION_BUILD)
+	printf '%s\n' '#!/bin/sh' 'exec python3 "$$(dirname "$$0")/../../integration/run_sequencer_simulators.py" "$$@"' > $@
+	chmod +x $@
 
 # Cooperation of the production Imager, Guider and Mount agents with the CCD and mount simulators;
 # configuration is isolated through a private HOME.
@@ -2317,6 +2693,52 @@ $(INTEGRATION_BUILD)/test_agent_imager_guider_mount: integration/test_agent_imag
 .PHONY: test-agent-imager-guider-mount
 test-agent-imager-guider-mount: check-lib $(INTEGRATION_BUILD)/test_agent_imager_guider_mount
 	$(INTEGRATION_BUILD)/test_agent_imager_guider_mount
+
+# The production Mount Agent with the mount simulator driver and with the SynScan driver on its host-side
+# simulator; configuration is isolated through a private HOME.
+AGENT_MOUNT_SIMULATOR_ARCHIVES = $(BUILD_DRIVERS)/indigo_agent_mount.a $(BUILD_DRIVERS)/indigo_mount_simulator.a $(BUILD_DRIVERS)/indigo_mount_synscan.a
+
+$(INTEGRATION_BUILD)/test_agent_mount_simulator: integration/test_agent_mount_simulator.c integration/serial_simulator_test_common.h integration/simulator_test_common.h test_runner.h $(INTEGRATION_BUILD)/mount_synscan_simulator $(AGENT_MOUNT_SIMULATOR_ARCHIVES) | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(AGENT_MOUNT_SIMULATOR_ARCHIVES) $(TEST_LDFLAGS) -lindigocat
+
+.PHONY: test-agent-mount-simulator
+test-agent-mount-simulator: check-lib $(INTEGRATION_BUILD)/test_agent_mount_simulator
+	$(INTEGRATION_BUILD)/test_agent_mount_simulator
+
+# The Platesolver Agent with its native quad solver against a synthetic index written into INDIGO_CACHE_BASE;
+# no network access, the index download is not exercised.
+$(INTEGRATION_BUILD)/test_agent_platesolver: integration/test_agent_platesolver.c test_runner.h $(BUILD_DRIVERS)/indigo_agent_platesolver.a $(INTEGRATION_BUILD)/agent_astrometry_driver.o | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_platesolver.a $(INTEGRATION_BUILD)/agent_astrometry_driver.o $(TEST_LDFLAGS) -lindigocat
+
+.PHONY: test-agent-platesolver
+test-agent-platesolver: check-lib $(INTEGRATION_BUILD)/test_agent_platesolver
+	$(INTEGRATION_BUILD)/test_agent_platesolver
+
+# The indigo_solver command line tool from indigo_tools, run as built on a synthetic index and synthetic frames in
+# a private directory. The tool is brought up to date by its own Makefile before every run of the test.
+.PHONY: indigo-solver-tool-binary
+indigo-solver-tool-binary:
+	$(MAKE) -C ../indigo_tools $(BUILD_BIN)/indigo_solver
+
+$(INTEGRATION_BUILD)/test_indigo_solver_tool: integration/test_indigo_solver_tool.c test_runner.h $(BUILD_DRIVERS)/indigo_agent_platesolver.a | indigo-solver-tool-binary $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -DINDIGO_SOLVER_EXECUTABLE='"$(BUILD_BIN)/indigo_solver"' -o $@ $< $(BUILD_DRIVERS)/indigo_agent_platesolver.a $(TEST_LDFLAGS) -lindigocat
+
+.PHONY: test-indigo-solver-tool
+test-indigo-solver-tool: check-lib $(INTEGRATION_BUILD)/test_indigo_solver_tool
+	$(INTEGRATION_BUILD)/test_indigo_solver_tool
+
+# The production Platesolver Agent with its native quad solver and the real Tycho-2 indexes, the Imager and
+# Guider agents and the CCD simulators: the Rosetta frame of the imager simulator and 120 simulation
+# setups of the guider simulator. Opt-in: the 2° and 5° indexes are taken from the persistent cache
+# $INDIGO_CACHE_BASE/solver (default ~/.indigo/solver) and downloaded there once when missing.
+SOLVER_SIMULATOR_ARCHIVES = $(BUILD_DRIVERS)/indigo_agent_platesolver.a $(BUILD_DRIVERS)/indigo_agent_imager.a $(BUILD_DRIVERS)/indigo_agent_guider.a $(BUILD_DRIVERS)/indigo_ccd_simulator.a
+
+$(INTEGRATION_BUILD)/test_agent_platesolver_simulator: integration/test_agent_platesolver_simulator.c test_runner.h $(SOLVER_SIMULATOR_ARCHIVES) | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(SOLVER_SIMULATOR_ARCHIVES) $(TEST_LDFLAGS) -lindigocat
+
+.PHONY: test-agent-platesolver-simulator
+test-agent-platesolver-simulator: check-lib $(INTEGRATION_BUILD)/test_agent_platesolver_simulator
+	$(INTEGRATION_BUILD)/test_agent_platesolver_simulator
 
 # The production Astrometry agent with the real astrometry.net solver, the Imager, Guider and Mount agents
 # and the CCD and mount simulators. Opt-in: it needs solve-field and image2xy installed and
@@ -2509,11 +2931,14 @@ test-ccd-atik2-hw: $(TEST_BUILD)/hardware/test_ccd_atik_hw
 	$(TEST_BUILD)/hardware/test_ccd_atik_hw --run $(BUILD_DRIVERS)/indigo_ccd_atik2.$(SOEXT) indigo_ccd_atik2
 
 PTP_SDK_TEST_SOURCES = indigo_ccd_ptp indigo_ptp indigo_ptp_canon indigo_ptp_nikon indigo_ptp_sony indigo_ptp_fuji indigo_ptp_olympus
-PTP_SDK_TEST_OBJECTS = $(addprefix $(INTEGRATION_BUILD)/ccd_ptp_sdk_,$(addsuffix .o,$(PTP_SDK_TEST_SOURCES)))
+PTP_SDK_TEST_OBJECTS = $(addprefix $(INTEGRATION_BUILD)/ccd_ptp_sdk_,$(addsuffix .o,$(PTP_SDK_TEST_SOURCES))) $(INTEGRATION_BUILD)/ccd_ptp_sdk_ccd_framework.o
 PTP_SDK_TEST_REPLACEMENTS = -Dlibusb_ref_device=ptp_test_ref -Dlibusb_unref_device=ptp_test_unref -Dlibusb_get_device_descriptor=ptp_test_descriptor -Dlibusb_open=ptp_test_open -Dlibusb_close=ptp_test_close -Dlibusb_kernel_driver_active=ptp_test_kernel -Dlibusb_detach_kernel_driver=ptp_test_detach_kernel -Dlibusb_claim_interface=ptp_test_claim -Dlibusb_get_config_descriptor=ptp_test_config -Dlibusb_free_config_descriptor=ptp_test_free_config -Dlibusb_bulk_transfer=ptp_test_bulk -Dlibusb_clear_halt=ptp_test_clear -Dlibusb_control_transfer=ptp_test_control -Dlibusb_hotplug_register_callback_sim=ptp_test_register -Dlibusb_hotplug_deregister_callback_poll=ptp_test_deregister -Dindigo_get_usb_path=ptp_test_path -Dindigo_start_usb_event_handler=ptp_test_usb_start -Dindigo_attach_device=ptp_test_attach -Dindigo_detach_device=ptp_test_detach
 
+$(INTEGRATION_BUILD)/ccd_ptp_sdk_ccd_framework.o: ../indigo_libs/indigo_ccd_driver.c Makefile | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -c $< -o $@
+
 $(INTEGRATION_BUILD)/ccd_ptp_sdk_%.o: ../indigo_drivers/ccd_ptp/%.c $(wildcard ../indigo_drivers/ccd_ptp/*.h) Makefile | $(INTEGRATION_BUILD)
-	$(CC) $(TEST_CFLAGS) $(PTP_SDK_TEST_REPLACEMENTS) -DPTP_CAPTURE_TIMEOUT=1 -DPTP_STOP_RETRY_LIMIT=5 -c $< -o $@
+	$(CC) $(TEST_CFLAGS) $(PTP_SDK_TEST_REPLACEMENTS) -DPTP_CAPTURE_TIMEOUT=1 -DPTP_STOP_RETRY_LIMIT=5 -DSONY_SHOT_CONFIRM_TIME=0.3 -DSONY_STALE_SHOT_TIME=8 -DSONY_OLD_API_VERIFY_TIMEOUT=4 -DSONY_OLD_API_REWRITE_DELAY=2.5 -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_ccd_ptp_sdk: integration/test_ccd_ptp_sdk.c integration/ccd_test_noise.h integration/simulator_test_common.h test_runner.h $(PTP_SDK_TEST_OBJECTS) | $(INTEGRATION_BUILD)
 	$(CC) $(TEST_CFLAGS) -DPTP_STOP_RETRY_LIMIT=5 $< $(PTP_SDK_TEST_OBJECTS) -o $@ $(TOUPTEK_SDK_TEST_LDFLAGS)
@@ -2522,12 +2947,15 @@ $(INTEGRATION_BUILD)/test_ccd_ptp_sdk: integration/test_ccd_ptp_sdk.c integratio
 test-ccd-ptp-sdk: $(INTEGRATION_BUILD)/test_ccd_ptp_sdk
 	$(INTEGRATION_BUILD)/test_ccd_ptp_sdk
 
-PTP_SANITIZE_OBJECTS = $(addprefix $(INTEGRATION_BUILD)/ccd_ptp_sanitize_,$(addsuffix .o,$(PTP_SDK_TEST_SOURCES)))
+PTP_SANITIZE_OBJECTS = $(addprefix $(INTEGRATION_BUILD)/ccd_ptp_sanitize_,$(addsuffix .o,$(PTP_SDK_TEST_SOURCES))) $(INTEGRATION_BUILD)/ccd_ptp_sanitize_ccd_framework.o
 PTP_SANITIZE_CFLAGS = $(if $(filter Darwin,$(OS_DETECTED)),$(filter-out -arch arm64 x86_64,$(TEST_CFLAGS)) -arch arm64,$(TEST_CFLAGS)) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
 PTP_SANITIZE_LDFLAGS = $(if $(filter Darwin,$(OS_DETECTED)),$(filter-out -arch arm64 x86_64,$(TOUPTEK_SDK_TEST_LDFLAGS)) -arch arm64,$(TOUPTEK_SDK_TEST_LDFLAGS)) -fsanitize=address,undefined
 
+$(INTEGRATION_BUILD)/ccd_ptp_sanitize_ccd_framework.o: ../indigo_libs/indigo_ccd_driver.c Makefile | $(INTEGRATION_BUILD)
+	$(CC) $(PTP_SANITIZE_CFLAGS) -c $< -o $@
+
 $(INTEGRATION_BUILD)/ccd_ptp_sanitize_%.o: ../indigo_drivers/ccd_ptp/%.c $(wildcard ../indigo_drivers/ccd_ptp/*.h) Makefile | $(INTEGRATION_BUILD)
-	$(CC) $(PTP_SANITIZE_CFLAGS) $(PTP_SDK_TEST_REPLACEMENTS) -DPTP_CAPTURE_TIMEOUT=1 -DPTP_STOP_RETRY_LIMIT=5 -c $< -o $@
+	$(CC) $(PTP_SANITIZE_CFLAGS) $(PTP_SDK_TEST_REPLACEMENTS) -DPTP_CAPTURE_TIMEOUT=1 -DPTP_STOP_RETRY_LIMIT=5 -DSONY_SHOT_CONFIRM_TIME=0.3 -DSONY_STALE_SHOT_TIME=8 -DSONY_OLD_API_VERIFY_TIMEOUT=4 -DSONY_OLD_API_REWRITE_DELAY=2.5 -c $< -o $@
 
 $(INTEGRATION_BUILD)/test_ccd_ptp_sdk_sanitize: integration/test_ccd_ptp_sdk.c integration/ccd_test_noise.h integration/simulator_test_common.h test_runner.h $(PTP_SANITIZE_OBJECTS) | $(INTEGRATION_BUILD)
 	$(CC) $(PTP_SANITIZE_CFLAGS) -DPTP_STOP_RETRY_LIMIT=5 $< $(PTP_SANITIZE_OBJECTS) -o $@ $(PTP_SANITIZE_LDFLAGS)
@@ -2755,6 +3183,443 @@ FOCUSER_FOCUSDREAMPRO_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_focusdre
 $(TEST_BUILD)/hardware/test_focuser_focusdreampro_hw: hardware/test_focuser_focusdreampro_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_focusdreampro.a | $(TEST_BUILD)/hardware
 	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_FOCUSDREAMPRO_HW_TEST_LDFLAGS)
 
+# Physical WeMacro Rail hardware is opt-in and excluded from normal integration tests.
+# THE RAIL MOVES: every move stays within WEMACRO_HW_TRAVEL steps (default 2000) and is moved back;
+# a move cut short by an abort or a disconnect is compensated from the measured step rate. The
+# shutter output fires. Set WEMACRO_HW_PORT to override the port the driver matched through its
+# CH340 pattern.
+.PHONY: test-focuser-wemacro-hw
+test-focuser-wemacro-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_wemacro_hw
+	$(TEST_BUILD)/hardware/test_focuser_wemacro_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_WEMACRO_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_wemacro.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_wemacro_hw: hardware/test_focuser_wemacro_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_wemacro.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_WEMACRO_HW_TEST_LDFLAGS)
+
+# A physical MJKZZ controller, or the Arduino sketch focuser_mjkzz_simulator.ino on a board, is
+# opt-in and excluded from normal integration tests. THE RAIL MOVES: every move stays within
+# MJKZZ_HW_TRAVEL steps (default 200) of the starting position and the run restores it. The driver
+# writes the motor power and micro step registers at connect. Set MJKZZ_HW_PORT to the port.
+.PHONY: test-focuser-mjkzz-hw
+test-focuser-mjkzz-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_mjkzz_hw
+	$(TEST_BUILD)/hardware/test_focuser_mjkzz_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_MJKZZ_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_mjkzz.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_mjkzz_hw: hardware/test_focuser_mjkzz_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_mjkzz.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_MJKZZ_HW_TEST_LDFLAGS)
+
+# A physical Xagyl filter wheel, or the Arduino sketch wheel_xagyl_simulator.ino on a board, is
+# opt-in and excluded from normal integration tests. THE WHEEL TURNS; the run restores the slot it
+# found. Set XAGYL_HW_PORT to the port.
+.PHONY: test-wheel-xagyl-hw
+test-wheel-xagyl-hw: check-lib $(TEST_BUILD)/hardware/test_wheel_xagyl_hw
+	$(TEST_BUILD)/hardware/test_wheel_xagyl_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+WHEEL_XAGYL_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_wheel_xagyl.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_wheel_xagyl_hw: hardware/test_wheel_xagyl_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_wheel_xagyl.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(WHEEL_XAGYL_HW_TEST_LDFLAGS)
+
+# A physical Trutek filter wheel, or the Arduino sketch wheel_trutek_simulator.ino on a board, is
+# opt-in and excluded from normal integration tests. THE WHEEL TURNS; the run restores the slot it
+# found. Set TRUTEK_HW_PORT to the port.
+.PHONY: test-wheel-trutek-hw
+test-wheel-trutek-hw: check-lib $(TEST_BUILD)/hardware/test_wheel_trutek_hw
+	$(TEST_BUILD)/hardware/test_wheel_trutek_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+WHEEL_TRUTEK_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_wheel_trutek.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_wheel_trutek_hw: hardware/test_wheel_trutek_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_wheel_trutek.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(WHEEL_TRUTEK_HW_TEST_LDFLAGS)
+
+# A physical Brightstar Quantum filter wheel, or the Arduino sketch wheel_quantum_simulator.ino on a
+# board, is opt-in and excluded from normal integration tests. THE WHEEL TURNS; the driver turns it to
+# slot 1 at every connect. Set QUANTUM_HW_PORT to the port.
+.PHONY: test-wheel-quantum-hw
+test-wheel-quantum-hw: check-lib $(TEST_BUILD)/hardware/test_wheel_quantum_hw
+	$(TEST_BUILD)/hardware/test_wheel_quantum_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+WHEEL_QUANTUM_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_wheel_quantum.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_wheel_quantum_hw: hardware/test_wheel_quantum_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_wheel_quantum.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(WHEEL_QUANTUM_HW_TEST_LDFLAGS)
+
+# A physical QHY CFW1, CFW2 or CFW3 filter wheel, or the Arduino sketch wheel_qhy_simulator.ino built
+# for one of them on a board, is opt-in and excluded from normal integration tests. THE WHEEL TURNS.
+# Set QHY_HW_PORT to the port and QHY_HW_MODEL to 1, 2 or 3 (default 3).
+.PHONY: test-wheel-qhy-hw
+test-wheel-qhy-hw: check-lib $(TEST_BUILD)/hardware/test_wheel_qhy_hw
+	$(TEST_BUILD)/hardware/test_wheel_qhy_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+WHEEL_QHY_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_wheel_qhy.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_wheel_qhy_hw: hardware/test_wheel_qhy_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_wheel_qhy.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(WHEEL_QHY_HW_TEST_LDFLAGS)
+
+# A physical Optec IFW filter wheel, or the Arduino sketch wheel_optec_simulator.ino on a board, is
+# opt-in and excluded from normal integration tests. THE WHEEL TURNS; the run restores the slot it
+# found. Set OPTEC_HW_PORT to the port.
+.PHONY: test-wheel-optec-hw
+test-wheel-optec-hw: check-lib $(TEST_BUILD)/hardware/test_wheel_optec_hw
+	$(TEST_BUILD)/hardware/test_wheel_optec_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+WHEEL_OPTEC_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_wheel_optec.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_wheel_optec_hw: hardware/test_wheel_optec_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_wheel_optec.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(WHEEL_OPTEC_HW_TEST_LDFLAGS)
+
+# A physical PegasusAstro Indigo filter wheel, or the Arduino sketch wheel_indigo_simulator.ino on a
+# board, is opt-in and excluded from normal integration tests. THE WHEEL TURNS; every connect turns
+# it to filter 1. Set INDIGO_WHEEL_HW_PORT to override the port the driver matched.
+.PHONY: test-wheel-indigo-hw
+test-wheel-indigo-hw: check-lib $(TEST_BUILD)/hardware/test_wheel_indigo_hw
+	$(TEST_BUILD)/hardware/test_wheel_indigo_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+WHEEL_INDIGO_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_wheel_indigo.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_wheel_indigo_hw: hardware/test_wheel_indigo_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_wheel_indigo.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(WHEEL_INDIGO_HW_TEST_LDFLAGS)
+
+# A physical Artesky Flat Box USB, or the Arduino sketch aux_arteskyflat_simulator.ino on a board, is
+# opt-in and excluded from normal integration tests. THE PANEL LIGHTS UP; the run leaves it off and
+# restores the intensity. Set ARTESKYFLAT_HW_PORT to the port.
+.PHONY: test-aux-arteskyflat-hw
+test-aux-arteskyflat-hw: check-lib $(TEST_BUILD)/hardware/test_aux_arteskyflat_hw
+	$(TEST_BUILD)/hardware/test_aux_arteskyflat_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+AUX_ARTESKYFLAT_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_arteskyflat.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_aux_arteskyflat_hw: hardware/test_aux_arteskyflat_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_arteskyflat.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(AUX_ARTESKYFLAT_HW_TEST_LDFLAGS)
+
+# A physical PrimaLuce Lab GIOTTO is opt-in and excluded from normal integration tests. THE PANEL LIGHTS UP; the
+# run restores the light, the brightness, the settings and the preset names it uses. Set GIOTTO_HW_PORT (or
+# 'run_driver_test.py aux_giotto --hw --port') to the port.
+.PHONY: test-aux-giotto-hw
+test-aux-giotto-hw: check-lib $(TEST_BUILD)/hardware/test_aux_giotto_hw
+	$(TEST_BUILD)/hardware/test_aux_giotto_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+AUX_GIOTTO_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_giotto.a $(PRIMALUCELIB) $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_aux_giotto_hw: hardware/test_aux_giotto_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_giotto.a $(PRIMALUCELIB) | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(AUX_GIOTTO_HW_TEST_LDFLAGS)
+
+# A physical PrimaLuce Lab ALTO is opt-in and excluded from normal integration tests. THE COVER MOVES over its whole
+# travel; the run restores the position, the LEDs and the preset it uses. Set ALTO_HW_PORT (or
+# 'run_driver_test.py aux_alto --hw --port') to the port. HW_HOTPLUG=1 ('run_driver_test.py aux_alto --hot-plug') adds the
+# USB unplug and replug case.
+.PHONY: test-aux-alto-hw
+test-aux-alto-hw: check-lib $(TEST_BUILD)/hardware/test_aux_alto_hw
+	$(TEST_BUILD)/hardware/test_aux_alto_hw --run $(if $(filter 1,$(HW_HOTPLUG)),--hotplug) $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+AUX_ALTO_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_alto.a $(PRIMALUCELIB) $(TEST_LDFLAGS) -lm
+
+$(TEST_BUILD)/hardware/test_aux_alto_hw: hardware/test_aux_alto_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_alto.a $(PRIMALUCELIB) | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(AUX_ALTO_HW_TEST_LDFLAGS)
+
+# A physical ASTROMECHANICS Light Pollution Meter PRO, or the Arduino sketch aux_astromechanics_simulator.ino
+# on a board, is opt-in and excluded from normal integration tests. Nothing is written to the meter. Set
+# ASTROMECHANICS_HW_PORT to the port.
+.PHONY: test-aux-astromechanics-hw
+test-aux-astromechanics-hw: check-lib $(TEST_BUILD)/hardware/test_aux_astromechanics_hw
+	$(TEST_BUILD)/hardware/test_aux_astromechanics_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+AUX_ASTROMECHANICS_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_astromechanics.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_aux_astromechanics_hw: hardware/test_aux_astromechanics_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_astromechanics.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(AUX_ASTROMECHANICS_HW_TEST_LDFLAGS)
+
+# A physical Lacerta FBC in SerialMode, or the Arduino sketch aux_fbc_simulator.ino on a board, is
+# opt-in and excluded from normal integration tests. THE PANEL LIGHTS UP AND THE SHUTTER OUTPUT FIRES.
+# Set FBC_HW_PORT to override the port the driver matched.
+.PHONY: test-aux-fbc-hw
+test-aux-fbc-hw: check-lib $(TEST_BUILD)/hardware/test_aux_fbc_hw
+	$(TEST_BUILD)/hardware/test_aux_fbc_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+AUX_FBC_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_fbc.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_aux_fbc_hw: hardware/test_aux_fbc_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_fbc.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(AUX_FBC_HW_TEST_LDFLAGS)
+
+# A physical PegasusAstro FlatMaster, or the Arduino sketch aux_flatmaster_simulator.ino on a board, is
+# opt-in and excluded from normal integration tests. THE PANEL LIGHTS UP; the run leaves it off and
+# restores the intensity. Set FLATMASTER_HW_PORT to override the port the driver matched.
+.PHONY: test-aux-flatmaster-hw
+test-aux-flatmaster-hw: check-lib $(TEST_BUILD)/hardware/test_aux_flatmaster_hw
+	$(TEST_BUILD)/hardware/test_aux_flatmaster_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+AUX_FLATMASTER_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_flatmaster.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_aux_flatmaster_hw: hardware/test_aux_flatmaster_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_flatmaster.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(AUX_FLATMASTER_HW_TEST_LDFLAGS)
+
+# A physical Alnitak Flip-Flat, Flat-Man or Flip-Mask, or the Arduino sketch aux_flipflat_simulator.ino on a
+# board, is opt-in and excluded from normal integration tests. THE COVER MOVES AND THE PANEL LIGHTS UP; the
+# run leaves the light off and the cover as found. Set FLIPFLAT_HW_PORT to the port.
+.PHONY: test-aux-flipflat-hw
+test-aux-flipflat-hw: check-lib $(TEST_BUILD)/hardware/test_aux_flipflat_hw
+	$(TEST_BUILD)/hardware/test_aux_flipflat_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+AUX_FLIPFLAT_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_flipflat.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_aux_flipflat_hw: hardware/test_aux_flipflat_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_flipflat.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(AUX_FLIPFLAT_HW_TEST_LDFLAGS)
+
+# A physical PegasusAstro Pocket Powerbox (PPB, Advance, Micro) or Saddle Powerbox, or the Arduino sketch
+# aux_ppb_simulator.ino on a board, is opt-in and excluded from normal integration tests. THE OUTLETS SWITCH
+# OFF AND ON, THE HEATERS RUN AND THE BOX REBOOTS; the run restores the states it found and stores them as
+# the power-on default. Set PPB_HW_PORT to the port.
+.PHONY: test-aux-ppb-hw
+test-aux-ppb-hw: check-lib $(TEST_BUILD)/hardware/test_aux_ppb_hw
+	$(TEST_BUILD)/hardware/test_aux_ppb_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+AUX_PPB_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_ppb.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_aux_ppb_hw: hardware/test_aux_ppb_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_ppb.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(AUX_PPB_HW_TEST_LDFLAGS)
+
+# A physical Interactive Astronomy SkyAlert, or the Arduino sketch aux_skyalert_simulator.ino on a board, is
+# opt-in and excluded from normal integration tests. Nothing is written to the device. Set SKYALERT_HW_PORT
+# to the port.
+.PHONY: test-aux-skyalert-hw
+test-aux-skyalert-hw: check-lib $(TEST_BUILD)/hardware/test_aux_skyalert_hw
+	$(TEST_BUILD)/hardware/test_aux_skyalert_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+AUX_SKYALERT_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_skyalert.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_aux_skyalert_hw: hardware/test_aux_skyalert_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_skyalert.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(AUX_SKYALERT_HW_TEST_LDFLAGS)
+
+# A physical Unihedron SQM-LU, or the Arduino sketch aux_sqm_simulator.ino on a board, is opt-in and
+# excluded from normal integration tests. The run changes the interval reporting period in RAM only and
+# restores it. Set SQM_HW_PORT to the port.
+.PHONY: test-aux-sqm-hw
+test-aux-sqm-hw: check-lib $(TEST_BUILD)/hardware/test_aux_sqm_hw
+	$(TEST_BUILD)/hardware/test_aux_sqm_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+AUX_SQM_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_sqm.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_aux_sqm_hw: hardware/test_aux_sqm_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_sqm.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(AUX_SQM_HW_TEST_LDFLAGS)
+
+# A physical USB_Dewpoint (v1 or v2), or the Arduino sketch aux_usbdp_simulator.ino on a board, is opt-in
+# and excluded from normal integration tests. THE HEATERS RUN; the run restores every v2 setting it found.
+# Set USBDP_HW_PORT to the port.
+.PHONY: test-aux-usbdp-hw
+test-aux-usbdp-hw: check-lib $(TEST_BUILD)/hardware/test_aux_usbdp_hw
+	$(TEST_BUILD)/hardware/test_aux_usbdp_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+AUX_USBDP_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_aux_usbdp.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_aux_usbdp_hw: hardware/test_aux_usbdp_hw.c hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_aux_usbdp.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(AUX_USBDP_HW_TEST_LDFLAGS)
+
+# A physical Baader Classic dome controller, or the Arduino sketch dome_baader_simulator.ino on a board, is
+# opt-in and excluded from normal integration tests. THE DOME ROTATES AND THE SHUTTER AND FLAP OPEN; the run
+# returns the dome to the state it found. Set BAADER_HW_PORT to the port.
+.PHONY: test-dome-baader-hw
+test-dome-baader-hw: check-lib $(TEST_BUILD)/hardware/test_dome_baader_hw
+	$(TEST_BUILD)/hardware/test_dome_baader_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+DOME_BAADER_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_dome_baader.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_dome_baader_hw: hardware/test_dome_baader_hw.c hardware/dome_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_dome_baader.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(DOME_BAADER_HW_TEST_LDFLAGS)
+
+# A physical NexDome rotation controller with firmware 1.x, or the Arduino sketch dome_nexdome_simulator.ino on
+# a board, is opt-in and excluded from normal integration tests. THE DOME ROTATES (A FULL TURN WHILE
+# CALIBRATING) AND THE SHUTTER OPENS; the run returns the dome to the state it found. Set NEXDOME_HW_PORT.
+.PHONY: test-dome-nexdome-hw
+test-dome-nexdome-hw: check-lib $(TEST_BUILD)/hardware/test_dome_nexdome_hw
+	$(TEST_BUILD)/hardware/test_dome_nexdome_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+DOME_NEXDOME_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_dome_nexdome.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_dome_nexdome_hw: hardware/test_dome_nexdome_hw.c hardware/dome_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_dome_nexdome.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(DOME_NEXDOME_HW_TEST_LDFLAGS)
+
+# A physical NexDome rotator with firmware 3.x, or the Arduino sketch dome_nexdome3_simulator.ino on a board,
+# is opt-in and excluded from normal integration tests. THE DOME ROTATES AND THE SHUTTER OPENS; the run returns
+# the dome to the state it found and saves the settings it found to EEPROM. Set NEXDOME3_HW_PORT.
+.PHONY: test-dome-nexdome3-hw
+test-dome-nexdome3-hw: check-lib $(TEST_BUILD)/hardware/test_dome_nexdome3_hw
+	$(TEST_BUILD)/hardware/test_dome_nexdome3_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+DOME_NEXDOME3_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_dome_nexdome3.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_dome_nexdome3_hw: hardware/test_dome_nexdome3_hw.c hardware/dome_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_dome_nexdome3.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(DOME_NEXDOME3_HW_TEST_LDFLAGS)
+
+# A physical Talon6 roll-off roof controller, or the Arduino sketch dome_talon6ror_simulator.ino on a board, is
+# opt-in and excluded from normal integration tests. THE ROOF MOVES; the run returns the roof to the state it
+# found and writes back the configuration it found. Set TALON6_HW_PORT.
+.PHONY: test-dome-talon6ror-hw
+test-dome-talon6ror-hw: check-lib $(TEST_BUILD)/hardware/test_dome_talon6ror_hw
+	$(TEST_BUILD)/hardware/test_dome_talon6ror_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+DOME_TALON6ROR_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_dome_talon6ror.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_dome_talon6ror_hw: hardware/test_dome_talon6ror_hw.c hardware/dome_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_dome_talon6ror.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(DOME_TALON6ROR_HW_TEST_LDFLAGS)
+
+# A physical Interactive Astronomy SkyRoof controller, or the Arduino sketch dome_skyroof_simulator.ino on a
+# board, is opt-in and excluded from normal integration tests. THE ROOF MOVES AND THE HEATER SWITCHES; the run
+# returns the roof to the state it found and leaves the heater off. Set SKYROOF_HW_PORT.
+.PHONY: test-dome-skyroof-hw
+test-dome-skyroof-hw: check-lib $(TEST_BUILD)/hardware/test_dome_skyroof_hw
+	$(TEST_BUILD)/hardware/test_dome_skyroof_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+DOME_SKYROOF_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_dome_skyroof.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_dome_skyroof_hw: hardware/test_dome_skyroof_hw.c hardware/dome_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_dome_skyroof.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(DOME_SKYROOF_HW_TEST_LDFLAGS)
+
+# A physical ASTROMECHANICS lens controller, or the Arduino sketch focuser_astromechanics_simulator.ino on a
+# board, is opt-in and excluded from normal integration tests. THE LENS FOCUS MOVES AND THE APERTURE CLOSES; the
+# run restores the position and aperture it found. Set ASTROMECHANICS_HW_PORT.
+.PHONY: test-focuser-astromechanics-hw
+test-focuser-astromechanics-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_astromechanics_hw
+	$(TEST_BUILD)/hardware/test_focuser_astromechanics_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_ASTROMECHANICS_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_astromechanics.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_astromechanics_hw: hardware/test_focuser_astromechanics_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_astromechanics.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_ASTROMECHANICS_HW_TEST_LDFLAGS)
+
+# A physical PlaneWave EFA or Celestron Focus Motor, or the Arduino sketch focuser_efa_simulator.ino on a board,
+# is opt-in and excluded from normal integration tests. THE FOCUSER MOVES; the run restores the position, encoder,
+# limits and fans it found, a Celestron calibration measures the travel anew. Set EFA_HW_PORT.
+.PHONY: test-focuser-efa-hw
+test-focuser-efa-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_efa_hw
+	$(TEST_BUILD)/hardware/test_focuser_efa_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_EFA_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_efa.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_efa_hw: hardware/test_focuser_efa_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_efa.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_EFA_HW_TEST_LDFLAGS)
+
+# A physical PegasusAstro DMFC, or the Arduino sketch focuser_dmfc_simulator.ino on a board, is opt-in and excluded
+# from normal integration tests. THE FOCUSER MOVES; speed, backlash and motor type are EEPROM settings, the run
+# writes back every setting and the position it found. Set DMFC_HW_PORT.
+.PHONY: test-focuser-dmfc-hw
+test-focuser-dmfc-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_dmfc_hw
+	$(TEST_BUILD)/hardware/test_focuser_dmfc_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_DMFC_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_dmfc.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_dmfc_hw: hardware/test_focuser_dmfc_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_dmfc.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_DMFC_HW_TEST_LDFLAGS)
+
+# A physical LakesideAstro focuser, or the Arduino sketch focuser_lakeside_simulator.ino on a board, is opt-in and
+# excluded from normal integration tests. THE FOCUSER MOVES; the run writes back the backlash and compensation it
+# found and returns to the position it found. Set LAKESIDE_HW_PORT.
+.PHONY: test-focuser-lakeside-hw
+test-focuser-lakeside-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_lakeside_hw
+	$(TEST_BUILD)/hardware/test_focuser_lakeside_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_LAKESIDE_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_lakeside.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_lakeside_hw: hardware/test_focuser_lakeside_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_lakeside.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_LAKESIDE_HW_TEST_LDFLAGS)
+
+# A physical MoonLite focuser (or a compatible controller), or the Arduino sketch focuser_moonlite_simulator.ino on a
+# board, is opt-in and excluded from normal integration tests. THE FOCUSER MOVES; the run writes back the settings
+# and the position it found. Set MOONLITE_HW_PORT.
+.PHONY: test-focuser-moonlite-hw
+test-focuser-moonlite-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_moonlite_hw
+	$(TEST_BUILD)/hardware/test_focuser_moonlite_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_MOONLITE_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_moonlite.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_moonlite_hw: hardware/test_focuser_moonlite_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_moonlite.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_MOONLITE_HW_TEST_LDFLAGS)
+
+# A physical Rigel Systems nFOCUS, or the Arduino sketch focuser_nfocus_simulator.ino on a board, is opt-in and
+# excluded from normal integration tests. THE FOCUSER MOVES; every move is paired with one back and the speed
+# found is written back. Set NFOCUS_HW_PORT.
+.PHONY: test-focuser-nfocus-hw
+test-focuser-nfocus-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_nfocus_hw
+	$(TEST_BUILD)/hardware/test_focuser_nfocus_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_NFOCUS_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_nfocus.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_nfocus_hw: hardware/test_focuser_nfocus_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_nfocus.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_NFOCUS_HW_TEST_LDFLAGS)
+
+# A physical Rigel Systems nSTEP, or the Arduino sketch focuser_nstep_simulator.ino on a board, is opt-in and
+# excluded from normal integration tests. THE FOCUSER MOVES; the run writes back the settings and steps back to
+# the position it found. Set NSTEP_HW_PORT.
+.PHONY: test-focuser-nstep-hw
+test-focuser-nstep-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_nstep_hw
+	$(TEST_BUILD)/hardware/test_focuser_nstep_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_NSTEP_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_nstep.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_nstep_hw: hardware/test_focuser_nstep_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_nstep.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_NSTEP_HW_TEST_LDFLAGS)
+
+# A physical Optec TCF-S/TCF-S3, or the Arduino sketch focuser_optec_simulator.ino on a board, is opt-in and
+# excluded from normal integration tests. THE FOCUSER MOVES; the run writes back the coefficient and steps back to
+# the position it found. Set OPTEC_HW_PORT.
+.PHONY: test-focuser-optec-hw
+test-focuser-optec-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_optec_hw
+	$(TEST_BUILD)/hardware/test_focuser_optec_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_OPTEC_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_optec.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_optec_hw: hardware/test_focuser_optec_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_optec.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_OPTEC_HW_TEST_LDFLAGS)
+
+# A physical Pegasus Astro Prodigy Microfocuser, or the Arduino sketch focuser_prodigy_simulator.ino on a board, is
+# opt-in and excluded from normal integration tests. THE FOCUSER MOVES AND THE PORTS SWITCH; the run writes back
+# the settings and port states and returns to the position it found. Set PRODIGY_HW_PORT.
+.PHONY: test-focuser-prodigy-hw
+test-focuser-prodigy-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_prodigy_hw
+	$(TEST_BUILD)/hardware/test_focuser_prodigy_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_PRODIGY_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_prodigy.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_prodigy_hw: hardware/test_focuser_prodigy_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_prodigy.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_PRODIGY_HW_TEST_LDFLAGS)
+
+# A physical RoboFocus, or the Arduino sketch focuser_robofocus_simulator.ino on a board, is opt-in and excluded from
+# normal integration tests. THE FOCUSER MOVES AND THE POWER CHANNELS SWITCH; the run writes back the settings and
+# returns to the position it found. Set ROBOFOCUS_HW_PORT.
+.PHONY: test-focuser-robofocus-hw
+test-focuser-robofocus-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_robofocus_hw
+	$(TEST_BUILD)/hardware/test_focuser_robofocus_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_ROBOFOCUS_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_robofocus.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_robofocus_hw: hardware/test_focuser_robofocus_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_robofocus.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_ROBOFOCUS_HW_TEST_LDFLAGS)
+
+# A physical Baader SteelDriveII, or the Arduino sketch focuser_steeldrive2_simulator.ino on a board, is opt-in and
+# excluded from normal integration tests. THE FOCUSER MOVES AND THE HEATER OUTPUT CHANGES; the run writes back the
+# settings and returns to the position it found (no factory reset). Set STEELDRIVE2_HW_PORT.
+.PHONY: test-focuser-steeldrive2-hw
+test-focuser-steeldrive2-hw: check-lib $(TEST_BUILD)/hardware/test_focuser_steeldrive2_hw
+	$(TEST_BUILD)/hardware/test_focuser_steeldrive2_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+FOCUSER_STEELDRIVE2_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_focuser_steeldrive2.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_focuser_steeldrive2_hw: hardware/test_focuser_steeldrive2_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_focuser_steeldrive2.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FOCUSER_STEELDRIVE2_HW_TEST_LDFLAGS)
+
+# A physical Optec Pyxis rotator, or the Arduino sketch rotator_optec_simulator.ino on a board, is opt-in and excluded
+# from normal integration tests. THE ROTATOR TURNS; the run writes back the direction and rate and returns to the
+# angle it found. Set PYXIS_HW_PORT.
+.PHONY: test-rotator-optec-hw
+test-rotator-optec-hw: check-lib $(TEST_BUILD)/hardware/test_rotator_optec_hw
+	$(TEST_BUILD)/hardware/test_rotator_optec_hw --run $(if $(filter 1,$(HW_DEBUG)),--debug)
+
+ROTATOR_OPTEC_HW_TEST_LDFLAGS = $(BUILD_DRIVERS)/indigo_rotator_optec.a $(TEST_LDFLAGS)
+
+$(TEST_BUILD)/hardware/test_rotator_optec_hw: hardware/test_rotator_optec_hw.c hardware/focuser_hw_common.h hardware/hardware_device_record.h hardware/hardware_test_common.h test_runner.h $(BUILD_DRIVERS)/indigo_rotator_optec.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(ROTATOR_OPTEC_HW_TEST_LDFLAGS)
+
 # The MLAstro RPA firmware on a bare ESP32 board is opt-in and excluded from normal integration tests.
 # NOTHING MOVES: without the TMC2209 motor drivers the firmware stays in ERROR and rejects every
 # motion command, which the suite asserts. Settings change only in controller memory and are
@@ -2886,3 +3751,209 @@ $(TEST_BUILD)/hardware/test_mount_nexstar_hw: hardware/test_mount_nexstar_hw.c h
 .PHONY: test-mount-nexstar-hw
 test-mount-nexstar-hw: check-lib $(TEST_BUILD)/hardware/test_mount_nexstar_hw
 	$(TEST_BUILD)/hardware/test_mount_nexstar_hw --run
+
+# Explicit security checks keep source-extracted management code outside unit tests.
+.PHONY: test-server-management-security test-server-management-security-sanitize test-agent-alpaca-cache
+
+test-server-management-security:
+	python3 security/run_server_management_security.py
+
+test-server-management-security-sanitize:
+	python3 security/run_server_management_security.py --sanitize
+
+$(INTEGRATION_BUILD)/test_agent_alpaca_cache: integration/test_agent_alpaca_cache.c test_runner.h $(BUILD_DRIVERS)/indigo_agent_alpaca.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_alpaca.a $(TEST_LDFLAGS) -lz
+
+test-agent-alpaca-cache: check-lib $(INTEGRATION_BUILD)/test_agent_alpaca_cache
+	$(INTEGRATION_BUILD)/test_agent_alpaca_cache
+
+$(UNIT_BUILD)/test_protocol_security: unit/test_protocol_security.c test_runner.h $(BUILD_LIB)/libindigo.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+
+# Build the repaired core units with instrumentation; the unchanged static archive
+# supplies remaining symbols. Small budgets and deadlines keep adversarial tests bounded.
+SECURITY_BUILD ?= $(TEST_BUILD)/security
+SECURITY_ASSERT_FLAGS ?=
+SECURITY_CFLAGS = $(filter-out -arch arm64 x86_64,$(TEST_CFLAGS)) $(SANITIZE_ARCH) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer $(SECURITY_ASSERT_FLAGS) -DINDIGO_BLOB_UPLOAD_LIMIT=64 -DINDIGO_BLOB_UPLOAD_BUDGET=128 -DINDIGO_BLOB_UPLOAD_PROGRESS_TIMEOUT=0.2 -DINDIGO_BLOB_UPLOAD_TOTAL_TIMEOUT=1.0 -DINDIGO_TCP_WORKER_LIMIT=8 -DINDIGO_SERVER_INITIAL_TIMEOUT=500000L -DINDIGO_HTTP_HEADER_PROGRESS_TIMEOUT=0.2 -DINDIGO_HTTP_HEADER_TOTAL_TIMEOUT=1.0
+SECURITY_OBJECTS = $(addprefix $(SECURITY_BUILD)/,indigo_bus.o indigo_xml.o indigo_json.o indigo_server_tcp.o indigo_uni_io.o)
+
+$(SECURITY_BUILD):
+	mkdir -p $@
+
+$(SECURITY_BUILD)/%.o: ../indigo_libs/%.c ../indigo_libs/indigo/indigo_bus.h Makefile | $(SECURITY_BUILD)
+	$(CC) $(SECURITY_CFLAGS) -c $< -o $@
+
+$(SECURITY_BUILD)/test_protocol_security: unit/test_protocol_security.c test_runner.h $(SECURITY_OBJECTS) $(BUILD_LIB)/libindigo.a | $(SECURITY_BUILD)
+	$(CC) $(SECURITY_CFLAGS) -o $@ $< $(SECURITY_OBJECTS) $(SERVER_WEBSOCKET_SANITIZE_LDFLAGS)
+
+$(SECURITY_BUILD)/test_transport_cache_security: unit/test_transport_cache_security.c test_runner.h $(SECURITY_OBJECTS) $(BUILD_LIB)/libindigo.a | $(SECURITY_BUILD)
+	$(CC) $(SECURITY_CFLAGS) -o $@ $< $(SECURITY_OBJECTS) $(SERVER_WEBSOCKET_SANITIZE_LDFLAGS)
+
+$(SECURITY_BUILD)/indigo_server_tcp_http.o: ../indigo_libs/indigo_server_tcp.c ../indigo_libs/indigo/indigo_bus.h Makefile | $(SECURITY_BUILD)
+	$(CC) $(SECURITY_CFLAGS) -Dindigo_uni_printf=http_test_printf -Dindigo_uni_open_file=http_test_open_file -Dindigo_uni_close=http_test_close -Dindigo_uni_read_available=http_test_read_available -Dindigo_uni_write=http_test_write -Dindigo_uni_compress=http_test_compress -c $< -o $@
+
+$(SECURITY_BUILD)/indigo_uni_io_http.o: ../indigo_libs/indigo_uni_io.c Makefile | $(SECURITY_BUILD)
+	$(CC) $(SECURITY_CFLAGS) -Dindigo_async=http_test_async -c $< -o $@
+
+HTTP_SECURITY_OBJECTS = $(filter-out $(SECURITY_BUILD)/indigo_server_tcp.o $(SECURITY_BUILD)/indigo_uni_io.o,$(SECURITY_OBJECTS)) $(SECURITY_BUILD)/indigo_server_tcp_http.o $(SECURITY_BUILD)/indigo_uni_io_http.o
+
+$(SECURITY_BUILD)/test_transport_http_security: integration/test_transport_http_security.c test_runner.h $(HTTP_SECURITY_OBJECTS) $(BUILD_LIB)/libindigo.a | $(SECURITY_BUILD)
+	$(CC) $(SECURITY_CFLAGS) -DINDIGO_HTTP_FAULT_INJECTION -o $@ $< $(HTTP_SECURITY_OBJECTS) $(SERVER_WEBSOCKET_SANITIZE_LDFLAGS)
+
+.PHONY: test-server-security-sanitize
+test-server-security-sanitize: check-lib $(SECURITY_BUILD)/test_protocol_security $(SECURITY_BUILD)/test_transport_cache_security $(SECURITY_BUILD)/test_transport_http_security $(SECURITY_BUILD)/test_transport_cache_alloc_failure
+	$(SECURITY_BUILD)/test_protocol_security
+	$(SECURITY_BUILD)/test_transport_cache_security
+	$(SECURITY_BUILD)/test_transport_http_security
+	$(SECURITY_BUILD)/test_transport_cache_alloc_failure
+
+$(UNIT_BUILD)/test_transport_cache_security: unit/test_transport_cache_security.c test_runner.h $(BUILD_LIB)/libindigo.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+
+$(SECURITY_BUILD)/indigo_bus_alloc_failure.o: ../indigo_libs/indigo_bus.c ../indigo_libs/indigo/indigo_bus.h Makefile | $(SECURITY_BUILD)
+	$(CC) $(SECURITY_CFLAGS) -Dmalloc=transport_test_malloc -c $< -o $@
+
+$(SECURITY_BUILD)/test_transport_cache_alloc_failure: unit/test_transport_cache_security.c test_runner.h $(SECURITY_BUILD)/indigo_bus_alloc_failure.o $(BUILD_LIB)/libindigo.a | $(SECURITY_BUILD)
+	$(CC) $(SECURITY_CFLAGS) -DINDIGO_TRANSPORT_ALLOC_FAILURE -o $@ $< $(SECURITY_BUILD)/indigo_bus_alloc_failure.o $(SERVER_WEBSOCKET_SANITIZE_LDFLAGS)
+
+# Compile both URL implementations with a synthetic resolver; no DNS or socket I/O.
+$(UNIT_BUILD)/test_network_url: unit/test_network_url.c test_runner.h ../indigo_libs/indigo_io.c ../indigo_libs/indigo_uni_io.c | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -DINDIGO_CLIENT -Dgetaddrinfo=indigo_test_getaddrinfo -o $@ $< ../indigo_libs/indigo_io.c ../indigo_libs/indigo_uni_io.c $(TEST_LDFLAGS) -lz
+
+$(UNIT_BUILD)/test_core_text_bounds: unit/test_core_text_bounds.c test_runner.h | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+
+$(INTEGRATION_BUILD)/test_ccd_file_names: integration/test_ccd_file_names.c test_runner.h | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS)
+
+# Fake IOKit enumeration exercises the macOS production path without real devices.
+ifeq ($(OS_DETECTED),Darwin)
+USB_ENUM_REPLACEMENTS = -DIOServiceMatching=usb_test_IOServiceMatching -DIOServiceGetMatchingServices=usb_test_IOServiceGetMatchingServices -DIOIteratorNext=usb_test_IOIteratorNext -DIOObjectRelease=usb_test_IOObjectRelease -DIORegistryEntryCreateIterator=usb_test_IORegistryEntryCreateIterator -DIORegistryEntryCreateCFProperty=usb_test_IORegistryEntryCreateCFProperty -DCFRelease=usb_test_CFRelease
+
+$(UNIT_BUILD)/usbserial_enumeration_macos.o: ../indigo_libs/indigo_usbserial_utils.c ../indigo_libs/indigo/indigo_usbserial_utils.h Makefile | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) $(USB_ENUM_REPLACEMENTS) -c $< -o $@
+
+$(UNIT_BUILD)/test_usbserial_enumeration_macos: unit/test_usbserial_enumeration_macos.c test_runner.h $(UNIT_BUILD)/usbserial_enumeration_macos.o | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(UNIT_BUILD)/usbserial_enumeration_macos.o $(TEST_LDFLAGS)
+endif
+
+.PHONY: test-shell-compliance-framework
+test-shell-compliance-framework:
+	python3 -B unit/test_shell_compliance.py
+
+.PHONY: test-gps-compliance-script test-omnisim-startup
+test-gps-compliance-script:
+	python3 -B unit/test_gps_compliance_script.py
+
+test-omnisim-startup:
+	python3 -B unit/test_omnisim_startup.py
+
+$(UNIT_BUILD)/test_image_math: unit/test_image_math.c test_runner.h $(BUILD_LIB)/libindigo.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(TEST_LDFLAGS)
+
+ifeq ($(OS_DETECTED),Darwin)
+$(UNIT_BUILD)/test_service_discovery: unit/test_service_discovery.c test_runner.h ../indigo_libs/indigo_service_discovery.c | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(TEST_LDFLAGS)
+endif
+
+$(INTEGRATION_BUILD)/test_agent_imager_numerics: integration/test_agent_imager_numerics.py ../indigo_drivers/agent_imager/indigo_agent_imager.c ../indigo_libs/indigo_platesolver.c ../indigo_libs/indigo_raw_utils.c ../indigo_libs/indigo/indigo_bus.h test_runner.h | $(INTEGRATION_BUILD)
+	CC="$(CC)" python3 $< $@
+
+$(UNIT_BUILD)/test_rgb48: unit/test_rgb48.c test_runner.h $(BUILD_LIB)/libindigo.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(TEST_LDFLAGS)
+
+$(UNIT_BUILD)/test_ccd_fits_header: unit/test_ccd_fits_header.c test_runner.h $(BUILD_LIB)/libindigo.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(TEST_LDFLAGS)
+
+$(UNIT_BUILD)/test_mount_alignment_load: unit/test_mount_alignment_load.c test_runner.h ../indigo_libs/indigo_mount_driver.c | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FRAMEWORK_TEST_LDFLAGS)
+
+$(UNIT_BUILD)/test_profile_selection: unit/test_profile_selection.c test_runner.h ../indigo_libs/indigo_driver.c | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) $< -o $@ $(FRAMEWORK_TEST_LDFLAGS)
+
+$(INTEGRATION_BUILD)/test_agent_imager_cleanup: integration/test_agent_imager_cleanup.py $(INTEGRATION_BUILD)/test_agent_imager_instances | $(INTEGRATION_BUILD)
+	cp $< $@
+	chmod +x $@
+
+$(INTEGRATION_BUILD)/test_agent_alpaca_mapping: integration/test_agent_alpaca_mapping.c ../indigo_drivers/agent_alpaca/indigo_agent_alpaca.c test_runner.h $(BUILD_DRIVERS)/indigo_agent_alpaca.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(BUILD_DRIVERS)/indigo_agent_alpaca.a $(TEST_LDFLAGS) -lz
+
+.PHONY: test-agent-alpaca-mapping
+test-agent-alpaca-mapping: check-lib $(INTEGRATION_BUILD)/test_agent_alpaca_mapping
+	$(INTEGRATION_BUILD)/test_agent_alpaca_mapping
+
+# Focused regressions for lifecycle ownership and image/astronomy helpers.
+$(UNIT_BUILD)/test_indigocat_corrections: unit/test_indigocat_corrections.c test_runner.h ../indigo_libs/indigocat/indigocat_nutation.c ../indigo_libs/indigocat/indigocat_sun.c $(BUILD_LIB)/libindigocat.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(LDFLAGS) $(BUILD_LIB)/libindigocat.a -lm -lpthread
+
+$(UNIT_BUILD)/test_indigocat_corrections_sanitize: unit/test_indigocat_corrections.c test_runner.h ../indigo_libs/indigocat/indigocat_nutation.c ../indigo_libs/indigocat/indigocat_sun.c $(BUILD_LIB)/libindigocat.a | $(UNIT_BUILD)
+	$(CC) $(SERVER_WEBSOCKET_SANITIZE_CFLAGS) -o $@ $< $(SERVER_WEBSOCKET_SANITIZE_LDFLAGS) $(BUILD_LIB)/libindigocat.a
+
+$(UNIT_BUILD)/test_dslr_raw_init: unit/test_dslr_raw_init.c test_runner.h ../indigo_libs/indigo_dslr_raw.c $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libraw.a | $(UNIT_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS) -lraw -lstdc++
+
+$(UNIT_BUILD)/test_dslr_raw_init_sanitize: unit/test_dslr_raw_init.c test_runner.h ../indigo_libs/indigo_dslr_raw.c $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libraw.a | $(UNIT_BUILD)
+	$(CC) $(SERVER_WEBSOCKET_SANITIZE_CFLAGS) -o $@ $< $(SERVER_WEBSOCKET_SANITIZE_LDFLAGS)
+
+$(INTEGRATION_BUILD)/test_additional_instances: integration/test_additional_instances.c test_runner.h ../indigo_libs/indigo_driver.c $(BUILD_LIB)/libindigo.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(FRAMEWORK_TEST_LDFLAGS)
+
+$(INTEGRATION_BUILD)/test_additional_instances_sanitize: integration/test_additional_instances.c test_runner.h ../indigo_libs/indigo_driver.c $(BUILD_LIB)/libindigo.a | $(INTEGRATION_BUILD)
+	$(CC) $(SERVER_WEBSOCKET_SANITIZE_CFLAGS) -o $@ $< $(SERVER_WEBSOCKET_SANITIZE_LDFLAGS)
+
+$(INTEGRATION_BUILD)/test_agent_guider_cleanup: integration/test_agent_guider_cleanup.c test_runner.h ../indigo_drivers/agent_guider/indigo_agent_guider.c $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libindigocat.a | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(TEST_LDFLAGS) -lindigocat
+
+$(INTEGRATION_BUILD)/test_agent_guider_cleanup_sanitize: integration/test_agent_guider_cleanup.c test_runner.h ../indigo_drivers/agent_guider/indigo_agent_guider.c $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libindigocat.a | $(INTEGRATION_BUILD)
+	$(CC) $(SERVER_WEBSOCKET_SANITIZE_CFLAGS) -o $@ $< $(SERVER_WEBSOCKET_SANITIZE_LDFLAGS) $(BUILD_LIB)/libindigocat.a
+
+.PHONY: test-audit-fixes test-audit-fixes-sanitize
+test-audit-fixes: check-lib $(UNIT_BUILD)/test_indigocat_corrections $(UNIT_BUILD)/test_dslr_raw_init $(INTEGRATION_BUILD)/test_additional_instances $(INTEGRATION_BUILD)/test_agent_guider_cleanup
+	$(UNIT_BUILD)/test_indigocat_corrections
+	$(UNIT_BUILD)/test_dslr_raw_init
+	$(INTEGRATION_BUILD)/test_additional_instances
+	$(INTEGRATION_BUILD)/test_agent_guider_cleanup
+
+test-audit-fixes-sanitize: check-lib $(UNIT_BUILD)/test_indigocat_corrections_sanitize $(UNIT_BUILD)/test_dslr_raw_init_sanitize $(INTEGRATION_BUILD)/test_additional_instances_sanitize $(INTEGRATION_BUILD)/test_agent_guider_cleanup_sanitize
+	UBSAN_OPTIONS=halt_on_error=1 $(UNIT_BUILD)/test_indigocat_corrections_sanitize
+	UBSAN_OPTIONS=halt_on_error=1 $(UNIT_BUILD)/test_dslr_raw_init_sanitize
+	UBSAN_OPTIONS=halt_on_error=1 $(INTEGRATION_BUILD)/test_additional_instances_sanitize
+	UBSAN_OPTIONS=halt_on_error=1 $(INTEGRATION_BUILD)/test_agent_guider_cleanup_sanitize
+
+# Pentax transport tests compile the production implementation with fake USB/time.
+PENTAX_DARWIN_SOURCE = ../indigo_libs/externals/libusb/libusb/os/darwin_usb.c
+PENTAX_DARWIN_CLAIM = $(INTEGRATION_BUILD)/pentax_darwin_claim.inc
+$(PENTAX_DARWIN_CLAIM): $(PENTAX_DARWIN_SOURCE) Makefile | $(INTEGRATION_BUILD)
+	python3 -c 'from pathlib import Path; s = Path("$(PENTAX_DARWIN_SOURCE)").read_text(); start = s.index("static int darwin_capture_claim_interface("); end = s.index("\nstatic int darwin_capture_release_interface(", start); Path("$@").write_text(s[start:end])'
+
+PENTAX_SANITIZE_CFLAGS = $(filter-out -arch arm64 x86_64,$(TEST_CFLAGS)) $(SANITIZE_ARCH) -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
+PENTAX_SANITIZE_LDFLAGS = $(filter-out -arch arm64 x86_64,$(FRAMEWORK_TEST_LDFLAGS)) $(SANITIZE_ARCH) -fsanitize=address,undefined
+$(INTEGRATION_BUILD)/test_ccd_pentax_usb: integration/test_ccd_pentax_usb.c ../indigo_drivers/ccd_pentax/indigo_ccd_pentax.c ../indigo_drivers/ccd_pentax/indigo_ccd_pentax.h test_runner.h Makefile $(PENTAX_DARWIN_CLAIM) | $(INTEGRATION_BUILD)
+	$(CC) $(TEST_CFLAGS) -I$(INTEGRATION_BUILD) $< -o $@ $(FRAMEWORK_TEST_LDFLAGS) -ljpeg
+
+$(INTEGRATION_BUILD)/test_ccd_pentax_usb_sanitize: integration/test_ccd_pentax_usb.c ../indigo_drivers/ccd_pentax/indigo_ccd_pentax.c ../indigo_drivers/ccd_pentax/indigo_ccd_pentax.h test_runner.h Makefile $(PENTAX_DARWIN_CLAIM) | $(INTEGRATION_BUILD)
+	$(CC) $(PENTAX_SANITIZE_CFLAGS) -I$(INTEGRATION_BUILD) $< -o $@ $(PENTAX_SANITIZE_LDFLAGS) -ljpeg
+
+# Pentax hardware acceptance remains opt-in and uses one short battery-conscious session.
+PENTAX_HW_ARGS ?= --run
+.PHONY: test-ccd-pentax-hw
+test-ccd-pentax-hw: check-lib $(TEST_BUILD)/hardware/test_ccd_pentax_hw
+	$(TEST_BUILD)/hardware/test_ccd_pentax_hw $(PENTAX_HW_ARGS)
+
+$(TEST_BUILD)/hardware/test_ccd_pentax_hw: hardware/test_ccd_pentax_hw.c hardware/hardware_device_record.h test_runner.h ../build/drivers/indigo_ccd_pentax.a | $(TEST_BUILD)/hardware
+	$(CC) $(TEST_CFLAGS) $< ../build/drivers/indigo_ccd_pentax.a -o $@ $(FRAMEWORK_TEST_LDFLAGS) -ljpeg -lraw -lstdc++
+
+.PHONY: test-harness-verdicts
+test-harness-verdicts: $(BUILD_LIB)/libindigo_client.a
+	python3 -B unit/test_harness_verdicts.py
+	python3 -B unit/test_custom_harness_integrity.py
+	python3 -B unit/test_generator_tokens.py
+
+.PHONY: test-selected-transport-tools
+test-selected-transport-tools:
+	python3 -B unit/test_tool_io_failures.py
+	python3 -B unit/test_focuser_wemacro_bt.py
+	python3 -B unit/test_focuser_mjkzz_bt.py
+	python3 -B unit/test_mount_temma_manual.py
+	python3 -B unit/test_ao_sx_simulator_options.py
+	python3 -B unit/test_focuser_lakeside_deadline.py

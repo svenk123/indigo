@@ -1,0 +1,1264 @@
+// Copyright (c) 2026 Rumen G. Bogdanovski
+// All rights reserved.
+//
+// You can use this software under the terms of 'INDIGO Astronomy
+// open-source license' (see LICENSE.md).
+//
+// THIS SOFTWARE IS PROVIDED BY THE AUTHORS 'AS IS' AND ANY EXPRESS
+// OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+// WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+// GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+// WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+// NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+// SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// version history
+// 3.0 by Rumen G. Bogdanovski <rumenastro@gmail.com>, shared library for all PrimaLuce Lab drivers;
+//     the protocol code comes from indigo_focuser_primaluce by Peter Polakovic <peter.polakovic@cloudmakers.eu>
+
+/** PrimaLuce Lab JSON protocol library
+ \file primalucelib.c
+ */
+
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// The jsmn implementation, compiled here with internal linkage; primalucelib.h includes only its types.
+#define JSMN_STATIC
+#define JSMN_STRICT
+#define JSMN_PARENT_LINKS
+#include <externals/jsmn/jsmn.h>
+
+#include "primalucelib.h"
+
+#pragma mark - Reply paths
+
+char *PRIMALUCE_REPLY_MODEL_NAME[] = { "res", "get", "MODNAME", NULL };
+char *PRIMALUCE_REPLY_SERIAL_NUMBER[] = { "res", "get", "SN", NULL };
+char *PRIMALUCE_REPLY_APPLICATION_FIRMWARE[] = { "res", "get", "SWVERS", "SWAPP", NULL };
+char *PRIMALUCE_REPLY_WEB_FIRMWARE[] = { "res", "get", "SWVERS", "SWWEB", NULL };
+char *PRIMALUCE_REPLY_GET_ERROR[] = { "res", "get", "ERROR", NULL };
+char *PRIMALUCE_REPLY_SET_ERROR[] = { "res", "set", "ERROR", NULL };
+char *PRIMALUCE_REPLY_CMD_ERROR[] = { "res", "cmd", "ERROR", NULL };
+char *PRIMALUCE_REPLY_EXTERNAL_TEMPERATURE[] = { "res", "get", "EXT_T", NULL };
+char *PRIMALUCE_REPLY_SUPPLY_VOLTAGE[] = { "res", "get", "VIN_12V", NULL };
+char *PRIMALUCE_REPLY_USB_VOLTAGE[] = { "res", "get", "VIN_USB", NULL };
+char *PRIMALUCE_REPLY_LEDS[] = { "res", "get", "DIMLEDS", NULL };
+char *PRIMALUCE_REPLY_LAN_CONFIG[] = { "res", "get", "LANCFG", NULL };
+char *PRIMALUCE_REPLY_LAN_CONFIG_ACK[] = { "res", "set", "LANCFG", NULL };
+char *PRIMALUCE_REPLY_ACCESS_POINT_STATUS[] = { "res", "get", "WIFIAP", "STATUS", NULL };
+char *PRIMALUCE_REPLY_ACCESS_POINT_SSID[] = { "res", "get", "WIFIAP", "SSID", NULL };
+char *PRIMALUCE_REPLY_ACCESS_POINT_PASSWORD[] = { "res", "get", "WIFIAP", "PWD", NULL };
+char *PRIMALUCE_REPLY_STATION_SSID[] = { "res", "get", "WIFISTA", "SSID", NULL };
+char *PRIMALUCE_REPLY_STATION_PASSWORD[] = { "res", "get", "WIFISTA", "PWD", NULL };
+char *PRIMALUCE_REPLY_STATION_IP[] = { "res", "get", "WIFISTA", "IP", NULL };
+char *PRIMALUCE_REPLY_ACCESS_POINT_IP[] = { "res", "get", "WIFIAP", "IP", NULL };
+char *PRIMALUCE_REPLY_LAN_CONNECTION[] = { "res", "get", "LANSTATUS", "LANCONN", NULL };
+char *PRIMALUCE_REPLY_RECOVERY_DELAY[] = { "res", "get", "RECOVER_DELAY", NULL };
+char *PRIMALUCE_REPLY_MODEL_SUBMODEL[] = { "res", "srv", "GET_MODEL_SUBMODEL", NULL };
+char *PRIMALUCE_REPLY_FIRST_STORED_POSITION[] = { "res", "get", "PRESET_1", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_CALIBRATION_RESTART[] = { "res", "get", "CALRESTART", "MOT1", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_ERROR[] = { "res", "get", "MOT1", "ERROR", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_POSITION_STEP[] = { "res", "get", "MOT1", "ABS_POS_STEP", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_POSITION_REGISTER[] = { "res", "get", "MOT1", "ABS_POS", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_MOTOR_STATE[] = { "res", "get", "MOT1", "STATUS", "MST", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_MOTOR_TEMPERATURE[] = { "res", "get", "MOT1", "NTC_T", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_CALIBRATION_MIN[] = { "res", "get", "MOT1", "CAL_MINPOS", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_CALIBRATION_MAX[] = { "res", "get", "MOT1", "CAL_MAXPOS", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_BACKLASH[] = { "res", "get", "MOT1", "BKLASH", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_SPEED[] = { "res", "get", "MOT1", "SPEED", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_HOLD_CURRENT_STATUS[] = { "res", "get", "MOT1", "HOLDCURR_STATUS", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_MOVE_ACK[] = { "res", "cmd", "MOT1", "STEP", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_GOTO_ACK[] = { "res", "cmd", "MOT1", "GOTO", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_ABORT_ACK[] = { "res", "cmd", "MOT1", "MOT_ABORT", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_STOP_ACK[] = { "res", "cmd", "MOT1", "MOT_STOP", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_FAST_INWARD_ACK[] = { "res", "cmd", "MOT1", "F_INW", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_FAST_OUTWARD_ACK[] = { "res", "cmd", "MOT1", "F_OUTW", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_BACKLASH_ACK[] = { "res", "set", "MOT1", "BKLASH", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_SPEED_ACK[] = { "res", "set", "MOT1", "SPEED", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_HOLD_CURRENT_ACK[] = { "res", "set", "MOT1", "HOLDCURR_STATUS", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_CALIBRATION_ACK[] = { "res", "cmd", "MOT1", "CAL_FOCUSER", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_CALIBRATION_DIR[] = { "res", "get", "MOT1", "CAL_DIR", NULL };
+char *PRIMALUCE_REPLY_FOCUSER_CALIBRATION_DIR_ACK[] = { "res", "set", "MOT1", "CAL_DIR", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_CALIBRATION_RESTART[] = { "res", "get", "CALRESTART", "MOT2", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_ERROR[] = { "res", "get", "MOT2", "ERROR", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_SERIAL_NUMBER[] = { "res", "get", "ARCO_SN", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_ENABLED[] = { "res", "get", "ARCO", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_POSITION_DEG[] = { "res", "get", "MOT2", "POSITION_DEG", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_ABS_POS_DEG[] = { "res", "get", "MOT2", "ABS_POS_DEG", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_ABS_POS_REGISTER[] = { "res", "get", "MOT2", "ABS_POS", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_MOTOR_STATE[] = { "res", "get", "MOT2", "STATUS", "MST", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_CALIBRATION_MIN[] = { "res", "get", "MOT2", "CAL_MINPOS", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_CALIBRATION_MAX[] = { "res", "get", "MOT2", "CAL_MAXPOS", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_CALIBRATION_STATUS[] = { "res", "get", "MOT2", "CAL_STATUS", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_CALIBRATION_ACK[] = { "res", "set", "MOT2", "CAL_STATUS", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_MOVE_ACK[] = { "res", "cmd", "MOT2", "STEP", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_MOVE_DEG_ACK[] = { "res", "cmd", "MOT2", "DEG", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_SYNC_ACK[] = { "res", "cmd", "MOT2", "SYNC_POS", NULL };
+char *PRIMALUCE_REPLY_ROTATOR_STOP_ACK[] = { "res", "cmd", "MOT2", "MOT_STOP", NULL };
+char *PRIMALUCE_REPLY_PANEL_MAX_BRIGHTNESS[] = { "res", "get", "MAX_BRIGHTNESS", NULL };
+char *PRIMALUCE_REPLY_PANEL_BRIGHTNESS[] = { "res", "get", "BRIGHTNESS", NULL };
+char *PRIMALUCE_REPLY_PANEL_BRIGHTNESS_ACK[] = { "res", "set", "BRIGHTNESS", NULL };
+char *PRIMALUCE_REPLY_PANEL_LIGHT[] = { "res", "get", "LIGHT", NULL };
+char *PRIMALUCE_REPLY_PANEL_LIGHT_ACK[] = { "res", "set", "LIGHT", NULL };
+char *PRIMALUCE_REPLY_PANEL_TEMPERATURE[] = { "res", "get", "NTC_T", NULL };
+char *PRIMALUCE_REPLY_PANEL_FADING[] = { "res", "get", "LIGHT_FADING", NULL };
+char *PRIMALUCE_REPLY_PANEL_FADING_ACK[] = { "res", "set", "LIGHT_FADING", NULL };
+char *PRIMALUCE_REPLY_PANEL_LIGHT_AT_POWER_ON[] = { "res", "get", "LIGHT_ATPWON", NULL };
+char *PRIMALUCE_REPLY_PANEL_LIGHT_AT_POWER_ON_ACK[] = { "res", "set", "LIGHT_ATPWON", NULL };
+char *PRIMALUCE_REPLY_PANEL_RECALL_PRESET_ACK[] = { "res", "cmd", "PRESET", NULL };
+char *PRIMALUCE_REPLY_PANEL_CALIBRATION_RESTART_CH1[] = { "res", "get", "CALRESTART", "CH1", NULL };
+char *PRIMALUCE_REPLY_PANEL_CALIBRATION_RESTART_CH2[] = { "res", "get", "CALRESTART", "CH2", NULL };
+char *PRIMALUCE_REPLY_COVER_POSITION[] = { "res", "get", "MOT1", "POSITION", NULL };
+char *PRIMALUCE_REPLY_COVER_POSITION_ACK[] = { "res", "set", "MOT1", "POSITION", NULL };
+char *PRIMALUCE_REPLY_COVER_MOTOR_STATE[] = { "res", "get", "MOT1", "STATUS", "MST", NULL };
+char *PRIMALUCE_REPLY_COVER_STOP_ACK[] = { "res", "cmd", "MOT1", "MOT_STOP", NULL };
+char *PRIMALUCE_REPLY_COVER_CALIBRATION_ACK[] = { "res", "cmd", "MOT1", "CAL_ALTO", NULL };
+
+#pragma mark - Link
+
+bool primalucelib_parse_http_url(const char *url, char *host, size_t host_size, int *port) {
+	const char *separator = strchr(url, ':');
+	if (separator == NULL || strncmp(separator, "://", 3)) {
+		return false;
+	}
+	const char *start = separator + 3;
+	size_t host_length = strcspn(start, ":/");
+	if (host_length == 0 || host_length >= host_size) {
+		return false;
+	}
+	memcpy(host, start, host_length);
+	host[host_length] = 0;
+	*port = start[host_length] == ':' ? atoi(start + host_length + 1) : PRIMALUCE_HTTP_DEFAULT_PORT;
+	return true;
+}
+
+bool primalucelib_open(primalucelib_link *link, const char *driver_name, const char *port, const char **error_message) {
+	link->driver_name = driver_name;
+	link->restarting = link->probing = false;
+	link->is_http = indigo_uni_is_url(port, "http");
+	if (link->is_http) {
+		// http://host[:port] or tcp://host[:port] reaches the controller on a WiFi network
+		if (!primalucelib_parse_http_url(port, link->http_host, sizeof(link->http_host), &link->http_port)) {
+			INDIGO_DRIVER_ERROR(link->driver_name, "Malformed URL '%s'", port);
+			link->is_http = false;
+			return false;
+		}
+		return true;
+	}
+	link->handle = indigo_uni_open_serial_with_speed2(port, PRIMALUCE_SERIAL_BAUDRATE, INDIGO_LOG_DEBUG, error_message);
+	return link->handle != NULL;
+}
+
+bool primalucelib_is_open(primalucelib_link *link) {
+	return link->handle != NULL || link->is_http;
+}
+
+bool primalucelib_is_http(primalucelib_link *link) {
+	return link->is_http;
+}
+
+void primalucelib_close(primalucelib_link *link) {
+	if (link->handle != NULL) {
+		indigo_uni_close(&link->handle);
+	}
+	link->is_http = false;
+}
+
+// Over the network the controller serves the same JSON requests as GET /ajax.php?jreq=<request>, one request per connection.
+static bool primalucelib_http_exchange(primalucelib_link *link, const char *request) {
+	char query[3 * PRIMALUCE_MAX_RESPONSE_SIZE + 1];
+	char *out = query;
+	for (const unsigned char *in = (const unsigned char *)request; *in && out < query + sizeof(query) - 4; in++) {
+		if (isalnum(*in) || strchr("-_.~", *in)) {
+			*out++ = *in;
+		} else {
+			out += sprintf(out, "%%%02X", *in);
+		}
+	}
+	*out = 0;
+	indigo_uni_handle *handle = indigo_uni_open_client_socket_with_timeout(link->http_host, link->http_port, SOCK_STREAM, INDIGO_DELAY(PRIMALUCE_HTTP_TIMEOUT), INDIGO_LOG_DEBUG);
+	if (handle == NULL) {
+		INDIGO_DRIVER_ERROR(link->driver_name, "Can't connect to %s:%d", link->http_host, link->http_port);
+		return false;
+	}
+	bool result = false;
+	char reply[PRIMALUCE_MAX_RESPONSE_SIZE + 1024];
+	long length = 0;
+	if (indigo_uni_printf(handle, "GET " PRIMALUCE_HTTP_REQUEST_PATH "%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", query, link->http_host) > 0) {
+		char *body = NULL;
+		long content_length = -1;
+		// The controller keeps the connection open after the reply, so Content-Length ends the read.
+		while (length < (long)sizeof(reply) - 1 && indigo_uni_wait_for_data(handle, INDIGO_DELAY(PRIMALUCE_HTTP_TIMEOUT)) > 0) {
+			long count = indigo_uni_read_available(handle, reply + length, sizeof(reply) - 1 - length);
+			if (count <= 0) {
+				break;
+			}
+			length += count;
+			reply[length] = 0;
+			if (body == NULL && (body = strstr(reply, "\r\n\r\n")) != NULL) {
+				char *field = strstr(reply, "\r\nContent-Length:");
+				if (field != NULL && field < body) {
+					content_length = atol(field + 17);
+				}
+			}
+			if (body != NULL && content_length >= 0 && length >= body + 4 - reply + content_length) {
+				break;
+			}
+		}
+		reply[length] = 0;
+		if (strncmp(reply, "HTTP/1.", 7) || strncmp(reply + 8, " 200 ", 5) || body == NULL) {
+			INDIGO_DRIVER_ERROR(link->driver_name, "Unexpected HTTP response: %.40s", reply);
+		} else if (strlen(body + 4) >= PRIMALUCE_MAX_RESPONSE_SIZE) {
+			INDIGO_DRIVER_ERROR(link->driver_name, "HTTP response too long");
+		} else {
+			strcpy(link->response, body + 4);
+			INDIGO_DRIVER_DEBUG(link->driver_name, "%s", link->response);
+			result = *link->response != 0;
+		}
+	}
+	indigo_uni_close(&handle);
+	return result;
+}
+
+// The verb of a request, "get", "set", "cmd" or "srv", from its {"req":{"<verb>": prefix.
+static bool primalucelib_request_verb(const char *request, char *verb, size_t size) {
+	const char *start = strstr(request, "{\"req\":{\"");
+	if (start == NULL) {
+		return false;
+	}
+	start += 9;
+	size_t length = strcspn(start, "\"");
+	if (length == 0 || length >= size || start[length] != '"') {
+		return false;
+	}
+	memcpy(verb, start, length);
+	verb[length] = 0;
+	return true;
+}
+
+// Decodes the JSON escapes of a NUL-terminated string in place: the controller escapes '"' and '\' in values it
+// reports (a station SSID 'Home "net"' reads back as "Home \"net\""). \uXXXX below 0x80 becomes the character; any
+// other \u sequence is kept as it is.
+static void primalucelib_unescape(char *text) {
+	char *out = text;
+	for (char *in = text; *in; in++) {
+		if (*in != '\\' || in[1] == 0) {
+			*out++ = *in;
+			continue;
+		}
+		char next = *++in;
+		unsigned int code;
+		if (next == 'u' && isxdigit((unsigned char)in[1]) && isxdigit((unsigned char)in[2]) && isxdigit((unsigned char)in[3]) && isxdigit((unsigned char)in[4]) && sscanf(in + 1, "%4x", &code) == 1 && code < 0x80) {
+			*out++ = (char)code;
+			in += 4;
+		} else if (next == 'u') {
+			*out++ = '\\';
+			*out++ = next;
+		} else {
+			*out++ = next == 'n' ? '\n' : next == 't' ? '\t' : next == 'r' ? '\r' : next == 'b' ? '\b' : next == 'f' ? '\f' : next;
+		}
+	}
+	*out = 0;
+}
+
+// Parses the response buffer and NUL-terminates its string tokens. False for a quoted string or a
+// reply that is not complete JSON.
+static bool primalucelib_parse_reply(primalucelib_link *link) {
+	// A SESTO SENSO 3 (firmware 1.0.9) sometimes prints debug text in front of the reply on the same line,
+	// e.g. "mJsonAPI_ParseCmdReq_Motor{"res":...}", so the reply starts at the first brace.
+	if (*link->response != '{' && *link->response != '"') {
+		char *start = strchr(link->response, '{');
+		if (start != NULL) {
+			memmove(link->response, start, strlen(start) + 1);
+		}
+	}
+	memset(link->tokens, 0, sizeof(link->tokens));
+	link->token_count = 0;
+	jsmn_init(&link->parser);
+	int count = *link->response == '"' ? 0 : jsmn_parse(&link->parser, link->response, PRIMALUCE_MAX_RESPONSE_SIZE, link->tokens, PRIMALUCE_MAX_TOKENS);
+	if (count <= 0) {
+		INDIGO_DRIVER_DEBUG(link->driver_name, "Failed to parse");
+		return false;
+	}
+	link->token_count = count;
+	for (int i = 0; i < link->token_count; i++) {
+		if (link->tokens[i].type == JSMN_STRING) {
+			link->response[link->tokens[i].end] = 0;
+			primalucelib_unescape(link->response + link->tokens[i].start);
+		}
+	}
+	return true;
+}
+
+// A reply answers a request when it carries the request verb or a refusal. Anything else is the
+// late answer to an earlier request.
+static bool primalucelib_reply_answers(primalucelib_link *link, char *verb) {
+	char *verb_path[] = { PRIMALUCE_KEY_RESPONSE, verb, NULL };
+	return primalucelib_reply_has(link, verb_path) || primalucelib_reply_has(link, PRIMALUCE_REPLY_CMD_ERROR) || primalucelib_reply_has(link, PRIMALUCE_REPLY_SET_ERROR) || primalucelib_reply_has(link, PRIMALUCE_REPLY_GET_ERROR);
+}
+
+bool primalucelib_vrequest(primalucelib_link *link, const char *format, va_list args) {
+	char request[PRIMALUCE_MAX_RESPONSE_SIZE];
+	char verb[16];
+	link->last_error[0] = 0;
+	if (link->restarting && !link->probing) {
+		INDIGO_COPY_VALUE(link->last_error, "The controller is restarting");
+		return false;
+	}
+	vsnprintf(request, sizeof(request), format, args);
+	if (link->is_http) {
+		if (!primalucelib_http_exchange(link, request)) {
+			link->link_failed = true;
+			return false;
+		}
+		// The controller answered, whatever the answer is.
+		link->link_failed = false;
+		if (!primalucelib_parse_reply(link)) {
+			return false;
+		}
+	} else {
+		// One request, one reply: anything still pending belongs to an earlier request, for example a
+		// reply that arrived after its read timed out, and would shift every following reply by one.
+		primalucelib_discard_input(link);
+		if (indigo_uni_write(link->handle, request, (long)strlen(request)) <= 0) {
+			link->link_failed = true;
+			return false;
+		}
+		bool has_verb = primalucelib_request_verb(request, verb, sizeof(verb));
+		int stale_replies = 0;
+		while (true) {
+			long result = indigo_uni_read_section(link->handle, link->response, PRIMALUCE_MAX_RESPONSE_SIZE - 1, "\n", "\r\n", link->probing ? INDIGO_DELAY(PRIMALUCE_RESTART_PROBE_TIMEOUT) : -1);
+			if (result < 1) {
+				link->link_failed = true;
+				return false;
+			}
+			// Diagnostic output of the controller, not a reply.
+			if (*link->response == '[') {
+				INDIGO_DRIVER_DEBUG(link->driver_name, "Ignored");
+				continue;
+			}
+			// The controller answered, whatever the answer is.
+			link->link_failed = false;
+			if (!primalucelib_parse_reply(link)) {
+				return false;
+			}
+			if (has_verb && !primalucelib_reply_answers(link, verb)) {
+				INDIGO_DRIVER_ERROR(link->driver_name, "Dropped a reply that answers another request");
+				if (++stale_replies < PRIMALUCE_MAX_STALE_REPLIES) {
+					continue;
+				}
+				return false;
+			}
+			break;
+		}
+	}
+	// A rejected request is answered as an ERROR under the request verb
+	char *error = primalucelib_reply_string(link, PRIMALUCE_REPLY_CMD_ERROR);
+	if (error == NULL) {
+		error = primalucelib_reply_string(link, PRIMALUCE_REPLY_SET_ERROR);
+	}
+	if (error == NULL) {
+		error = primalucelib_reply_string(link, PRIMALUCE_REPLY_GET_ERROR);
+	}
+	if (error != NULL) {
+		INDIGO_DRIVER_ERROR(link->driver_name, "Request rejected: %s", error);
+		INDIGO_COPY_VALUE(link->last_error, error);
+		return false;
+	}
+	return true;
+}
+
+bool primalucelib_request(primalucelib_link *link, const char *format, ...) {
+	va_list args;
+	va_start(args, format);
+	bool result = primalucelib_vrequest(link, format, args);
+	va_end(args);
+	return result;
+}
+
+void primalucelib_discard_input(primalucelib_link *link) {
+	indigo_uni_discard(link->handle);
+}
+
+bool primalucelib_link_failed(primalucelib_link *link) {
+	return link->link_failed;
+}
+
+const char *primalucelib_last_error(primalucelib_link *link) {
+	return link->last_error;
+}
+
+void primalucelib_clear_last_error(primalucelib_link *link) {
+	link->last_error[0] = 0;
+}
+
+#pragma mark - Reply access
+
+// Every token index stays below link->token_count: a reply that fills the whole token array has no empty token after
+// its last one to stop at.
+static int primalucelib_find_token(primalucelib_link *link, int start, char *path[]) {
+	if (start >= link->token_count || link->tokens[start].type != JSMN_OBJECT) {
+		return -1;
+	}
+	int count = link->tokens[start].size;
+	int index = start + 1;
+	char *name = *path;
+	for (int i = 0; i < count; i++) {
+		if (index >= link->token_count || link->tokens[index].type != JSMN_STRING) {
+			return -1;
+		}
+		char *n = link->response + link->tokens[index].start;
+		int l = link->tokens[index].end - link->tokens[index].start;
+		if (strlen(name) == (size_t)l && !strncmp(n, name, l)) {
+			if (++index >= link->token_count) {
+				return -1;
+			}
+			if (*++path == NULL) {
+				return index;
+			}
+			return primalucelib_find_token(link, index, path);
+		} else {
+			// Skip the value of this member, nested ones included, to the next member of the object.
+			while (true) {
+				if (++index >= link->token_count) {
+					return -1;
+				}
+				if (link->tokens[index].parent == start) {
+					break;
+				}
+			}
+		}
+	}
+	return -1;
+}
+
+int primalucelib_reply_token(primalucelib_link *link, char *path[]) {
+	return primalucelib_find_token(link, 0, path);
+}
+
+bool primalucelib_reply_has(primalucelib_link *link, char *path[]) {
+	return primalucelib_find_token(link, 0, path) != -1;
+}
+
+char *primalucelib_reply_string(primalucelib_link *link, char *path[]) {
+	int index = primalucelib_find_token(link, 0, path);
+	if (index == -1 || link->tokens[index].type != JSMN_STRING) {
+		return NULL;
+	}
+	return link->response + link->tokens[index].start;
+}
+
+double primalucelib_reply_number(primalucelib_link *link, char *path[]) {
+	int index = primalucelib_find_token(link, 0, path);
+	if (index == -1) {
+		return 0;
+	}
+	if (link->tokens[index].type == JSMN_PRIMITIVE || link->tokens[index].type == JSMN_STRING) {
+		return atof(link->response + link->tokens[index].start);
+	}
+	return 0;
+}
+
+bool primalucelib_reply_is_done(primalucelib_link *link, char *path[]) {
+	return primalucelib_is_done(primalucelib_reply_string(link, path));
+}
+
+bool primalucelib_reply_is_acknowledged(primalucelib_link *link, char *path[]) {
+	char *acknowledgement = primalucelib_reply_string(link, path);
+	if (primalucelib_is_done(acknowledgement)) {
+		return true;
+	}
+	// The controller reports a refusal in the field of the parameter, e.g. "Error: invalid parameter"
+	// (SESTO SENSO 3 protocol v1.0), and that text is the reason.
+	if (acknowledgement != NULL && *acknowledgement) {
+		INDIGO_DRIVER_ERROR(link->driver_name, "Request refused: %s", acknowledgement);
+		INDIGO_COPY_VALUE(link->last_error, acknowledgement);
+	}
+	return false;
+}
+
+#pragma mark - Values
+
+bool primalucelib_is_done(const char *acknowledgement) {
+	return acknowledgement != NULL && !strcmp(acknowledgement, PRIMALUCE_DONE);
+}
+
+bool primalucelib_is_power_supply_error(const char *acknowledgement) {
+	return acknowledgement != NULL && !strcmp(acknowledgement, PRIMALUCE_POWER_SUPPLY_ERROR);
+}
+
+bool primalucelib_is_motor_stopped(const char *motor_state) {
+	return motor_state != NULL && !strcmp(motor_state, PRIMALUCE_MOTOR_STOPPED);
+}
+
+bool primalucelib_is_rotator_calibration_finished(const char *calibration_status) {
+	return calibration_status != NULL && !strcmp(calibration_status, PRIMALUCE_ROTATOR_CALIBRATION_STOPPED);
+}
+
+bool primalucelib_is_no_probe_temperature(double temperature) {
+	return temperature <= PRIMALUCE_NO_PROBE_TEMPERATURE;
+}
+
+primalucelib_model primalucelib_model_from_name(const char *model_name) {
+	if (model_name == NULL) {
+		return PRIMALUCELIB_MODEL_UNKNOWN;
+	}
+	if (!strncmp(model_name, PRIMALUCE_MODEL_NAME_SESTOSENSO3, strlen(PRIMALUCE_MODEL_NAME_SESTOSENSO3))) {
+		return PRIMALUCELIB_MODEL_SESTOSENSO3;
+	}
+	if (!strncmp(model_name, PRIMALUCE_MODEL_NAME_SESTOSENSO, strlen(PRIMALUCE_MODEL_NAME_SESTOSENSO))) {
+		return PRIMALUCELIB_MODEL_SESTOSENSO;
+	}
+	if (!strncmp(model_name, PRIMALUCE_MODEL_NAME_ESATTO, strlen(PRIMALUCE_MODEL_NAME_ESATTO))) {
+		return PRIMALUCELIB_MODEL_ESATTO;
+	}
+	if (!strncmp(model_name, PRIMALUCE_MODEL_NAME_GIOTTO, strlen(PRIMALUCE_MODEL_NAME_GIOTTO))) {
+		return PRIMALUCELIB_MODEL_GIOTTO;
+	}
+	if (!strncmp(model_name, PRIMALUCE_MODEL_NAME_ALTO, strlen(PRIMALUCE_MODEL_NAME_ALTO))) {
+		return PRIMALUCELIB_MODEL_ALTO;
+	}
+	return PRIMALUCELIB_MODEL_UNKNOWN;
+}
+
+bool primalucelib_model_is_focuser(primalucelib_model model) {
+	return model == PRIMALUCELIB_MODEL_SESTOSENSO || model == PRIMALUCELIB_MODEL_SESTOSENSO3 || model == PRIMALUCELIB_MODEL_ESATTO;
+}
+
+bool primalucelib_model_is_sestosenso(primalucelib_model model) {
+	return model == PRIMALUCELIB_MODEL_SESTOSENSO || model == PRIMALUCELIB_MODEL_SESTOSENSO3;
+}
+
+#pragma mark - Controller
+
+bool primalucelib_get_state(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_GET_STATE);
+}
+
+char *primalucelib_get_model_name(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_GET_MODEL_NAME) ? primalucelib_reply_string(link, PRIMALUCE_REPLY_MODEL_NAME) : NULL;
+}
+
+char *primalucelib_get_firmware_version(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_GET_FIRMWARE_VERSION) ? primalucelib_reply_string(link, PRIMALUCE_REPLY_APPLICATION_FIRMWARE) : NULL;
+}
+
+bool primalucelib_disable_log_output(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_DISABLE_LOG_OUTPUT);
+}
+
+bool primalucelib_get_environment(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_GET_ENVIRONMENT) && primalucelib_reply_has(link, PRIMALUCE_REPLY_EXTERNAL_TEMPERATURE);
+}
+
+double primalucelib_reply_external_temperature(primalucelib_link *link) {
+	return primalucelib_reply_number(link, PRIMALUCE_REPLY_EXTERNAL_TEMPERATURE);
+}
+
+double primalucelib_reply_supply_voltage(primalucelib_link *link) {
+	return primalucelib_reply_number(link, PRIMALUCE_REPLY_SUPPLY_VOLTAGE);
+}
+
+double primalucelib_reply_usb_voltage(primalucelib_link *link) {
+	return primalucelib_reply_number(link, PRIMALUCE_REPLY_USB_VOLTAGE);
+}
+
+double primalucelib_reply_motor_temperature(primalucelib_link *link) {
+	return primalucelib_reply_number(link, PRIMALUCE_REPLY_FOCUSER_MOTOR_TEMPERATURE);
+}
+
+bool primalucelib_set_leds(primalucelib_link *link, const char *mode) {
+	char *acknowledgement[] = { "res", "cmd", PRIMALUCE_KEY_LEDS, NULL };
+	char *legacy_acknowledgement[] = { "res", "cmd", "cmd", NULL };
+	// GIOTTO and SESTO SENSO 3 acknowledge accepted DIMLEDS under "cmd"; a named refusal takes precedence.
+	return primalucelib_request(link, PRIMALUCE_REQUEST_SET_LEDS, mode) && primalucelib_reply_is_acknowledged(link, primalucelib_reply_has(link, acknowledgement) ? acknowledgement : legacy_acknowledgement);
+}
+
+char *primalucelib_get_lan_config(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_GET_LAN_CONFIG) ? primalucelib_reply_string(link, PRIMALUCE_REPLY_LAN_CONFIG) : NULL;
+}
+
+bool primalucelib_set_lan_config(primalucelib_link *link, const char *mode) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_SET_LAN_CONFIG, mode) && primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_LAN_CONFIG_ACK);
+}
+
+bool primalucelib_reboot(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_REBOOT);
+}
+
+bool primalucelib_wait_for_restart(primalucelib_link *link) {
+	// The restart prints a boot log on the serial line before the controller answers again.
+	for (int i = 0; i < PRIMALUCE_RESTART_POLLS; i++) {
+		indigo_usleep(INDIGO_DELAY(PRIMALUCE_RESTART_POLL_INTERVAL));
+		primalucelib_discard_input(link);
+		if (primalucelib_get_model_name(link) != NULL) {
+			return true;
+		}
+	}
+	INDIGO_DRIVER_ERROR(link->driver_name, "No answer after restart");
+	return false;
+}
+
+void primalucelib_begin_restart(primalucelib_link *link) {
+	link->restarting = true;
+}
+
+bool primalucelib_is_restarting(primalucelib_link *link) {
+	return link->restarting;
+}
+
+bool primalucelib_probe_restart(primalucelib_link *link) {
+	link->probing = true;
+	bool answered = primalucelib_get_model_name(link) != NULL;
+	if (answered && !link->is_http) {
+		// The controller keeps the requests it received while it restarted and answers all of them once it is
+		// back (a SESTO SENSO 3 answered 12 probes at once), which would outnumber PRIMALUCE_MAX_STALE_REPLIES for
+		// the next request; they are read away until the line is quiet.
+		for (int i = 0; i < PRIMALUCE_RESTART_POLLS && indigo_uni_read_section(link->handle, link->response, PRIMALUCE_MAX_RESPONSE_SIZE - 1, "\n", "\r\n", INDIGO_DELAY(PRIMALUCE_RESTART_PROBE_TIMEOUT)) > 0; i++) {
+			INDIGO_DRIVER_DEBUG(link->driver_name, "Dropped a late reply after the restart");
+		}
+	}
+	link->probing = false;
+	if (answered) {
+		link->restarting = false;
+	}
+	return answered;
+}
+
+void primalucelib_end_restart(primalucelib_link *link) {
+	link->restarting = false;
+}
+
+bool primalucelib_select_lan_config(primalucelib_link *link, const char *mode, bool *restarted) {
+	char *current;
+	*restarted = false;
+	if ((current = primalucelib_get_lan_config(link)) == NULL) {
+		return false;
+	}
+	if (!strcmp(current, mode)) {
+		return true;
+	}
+	if (!primalucelib_set_lan_config(link, mode) || !primalucelib_reboot(link)) {
+		return false;
+	}
+	*restarted = true;
+	return primalucelib_is_http(link) || primalucelib_wait_for_restart(link);
+}
+
+bool primalucelib_select_wifi(primalucelib_link *link, primalucelib_wifi_mode mode, bool *restarted) {
+	if (!primalucelib_select_lan_config(link, mode == PRIMALUCE_WIFI_STATION ? PRIMALUCE_LAN_STATION : PRIMALUCE_LAN_ACCESS_POINT, restarted)) {
+		return false;
+	}
+	if (mode == PRIMALUCE_WIFI_STATION) {
+		return true;
+	}
+	if (*restarted && primalucelib_is_http(link)) {
+		if (mode == PRIMALUCE_WIFI_OFF) {
+			INDIGO_COPY_VALUE(link->last_error, "The controller restarts with its access point on, switch it off when connected again");
+			return false;
+		}
+		return true;
+	}
+	return primalucelib_set_access_point(link, mode == PRIMALUCE_WIFI_ACCESS_POINT);
+}
+
+static void primalucelib_copy_reply_value(primalucelib_link *link, char *path[], char *target) {
+	char *text = primalucelib_reply_string(link, path);
+	if (text != NULL) {
+		INDIGO_COPY_VALUE(target, text);
+	}
+}
+
+bool primalucelib_reply_wifi_status(primalucelib_link *link, primalucelib_wifi_status *status) {
+	char *text;
+	memset(status, 0, sizeof(*status));
+	if ((text = primalucelib_reply_string(link, PRIMALUCE_REPLY_LAN_CONFIG)) == NULL) {
+		return false;
+	}
+	status->station = !strcmp(text, PRIMALUCE_LAN_STATION);
+	status->access_point = !status->station && (text = primalucelib_reply_string(link, PRIMALUCE_REPLY_ACCESS_POINT_STATUS)) != NULL && !strcmp(text, PRIMALUCE_ACCESS_POINT_ON);
+	if (status->station) {
+		if ((text = primalucelib_reply_string(link, PRIMALUCE_REPLY_STATION_IP)) != NULL) {
+			INDIGO_COPY_NAME(status->ip_address, text);
+		}
+		if ((text = primalucelib_reply_string(link, PRIMALUCE_REPLY_LAN_CONNECTION)) != NULL) {
+			INDIGO_COPY_NAME(status->connection, text);
+		}
+		status->reachable = *status->connection && strcmp(status->connection, PRIMALUCE_WIFI_CONNECTION_DISCONNECTED);
+	} else if (status->access_point) {
+		status->reachable = true;
+		if ((text = primalucelib_reply_string(link, PRIMALUCE_REPLY_ACCESS_POINT_IP)) != NULL) {
+			INDIGO_COPY_NAME(status->ip_address, text);
+		}
+		INDIGO_COPY_NAME(status->connection, PRIMALUCE_WIFI_CONNECTION_ACCESS_POINT);
+	} else {
+		INDIGO_COPY_NAME(status->connection, PRIMALUCE_WIFI_CONNECTION_OFF);
+	}
+	primalucelib_copy_reply_value(link, PRIMALUCE_REPLY_ACCESS_POINT_SSID, status->access_point_ssid);
+	primalucelib_copy_reply_value(link, PRIMALUCE_REPLY_ACCESS_POINT_PASSWORD, status->access_point_password);
+	primalucelib_copy_reply_value(link, PRIMALUCE_REPLY_STATION_SSID, status->station_ssid);
+	primalucelib_copy_reply_value(link, PRIMALUCE_REPLY_STATION_PASSWORD, status->station_password);
+	return true;
+}
+
+bool primalucelib_get_wifi_status(primalucelib_link *link, primalucelib_wifi_status *status) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_GET_WIFI_STATUS) && primalucelib_reply_wifi_status(link, status);
+}
+
+bool primalucelib_set_access_point(primalucelib_link *link, bool on) {
+	char *acknowledgement[] = { "res", "cmd", PRIMALUCE_KEY_SET_ACCESS_POINT_STATUS, NULL };
+	return primalucelib_request(link, PRIMALUCE_REQUEST_SET_ACCESS_POINT, on ? PRIMALUCE_ACCESS_POINT_ON : PRIMALUCE_ACCESS_POINT_OFF) && primalucelib_reply_is_acknowledged(link, acknowledgement);
+}
+
+static bool primalucelib_check_credentials(primalucelib_link *link, const char *ssid, const char *password, bool access_point) {
+	const char *error = NULL;
+	size_t password_length = strlen(password);
+	if (strlen(ssid) > PRIMALUCE_WIFI_SSID_MAX_LENGTH) {
+		error = "The SSID has more than 32 characters";
+	} else if (access_point && *ssid == 0) {
+		error = "The access point needs an SSID";
+	} else if (password_length > PRIMALUCE_WIFI_PASSWORD_MAX_LENGTH) {
+		error = "The password has more than 63 characters";
+	} else if (access_point && password_length < PRIMALUCE_WIFI_PASSWORD_MIN_LENGTH) {
+		error = "The access point password needs at least 8 characters";
+	}
+	if (error != NULL) {
+		INDIGO_DRIVER_ERROR(link->driver_name, "%s", error);
+		INDIGO_COPY_VALUE(link->last_error, error);
+		return false;
+	}
+	return true;
+}
+
+// Escape JSON string contents, leaving the surrounding quotes to the request template.
+static bool primalucelib_escape_string(const char *value, char *escaped, size_t size) {
+	static const char hex[] = "0123456789abcdef";
+	size_t used = 0;
+	if (value == NULL) {
+		return false;
+	}
+	for (const unsigned char *next = (const unsigned char *)value; *next; next++) {
+		size_t count = *next < 0x20 ? 6 : (*next == '"' || *next == '\\' ? 2 : 1);
+		if (count >= size - used) {
+			return false;
+		}
+		if (*next < 0x20) {
+			escaped[used++] = '\\';
+			escaped[used++] = 'u';
+			escaped[used++] = '0';
+			escaped[used++] = '0';
+			escaped[used++] = hex[*next >> 4];
+			escaped[used++] = hex[*next & 15];
+		} else {
+			if (count == 2) {
+				escaped[used++] = '\\';
+			}
+			escaped[used++] = *next;
+		}
+	}
+	escaped[used] = 0;
+	return true;
+}
+
+static bool primalucelib_set_credentials(primalucelib_link *link, const char *format, const char *ssid, const char *password) {
+	// Reserve room for both JSON strings and the fixed request envelope before transmission.
+	char escaped_ssid[6 * INDIGO_VALUE_SIZE];
+	char escaped_password[6 * INDIGO_VALUE_SIZE];
+	if (!primalucelib_escape_string(ssid, escaped_ssid, sizeof(escaped_ssid)) || !primalucelib_escape_string(password, escaped_password, sizeof(escaped_password)) || strlen(escaped_ssid) + strlen(escaped_password) + strlen(format) - 4 >= PRIMALUCE_MAX_RESPONSE_SIZE) {
+		INDIGO_COPY_VALUE(link->last_error, "WiFi credentials exceed the JSON request capacity");
+		return false;
+	}
+	return primalucelib_request(link, format, escaped_ssid, escaped_password);
+}
+
+bool primalucelib_set_access_point_credentials(primalucelib_link *link, const char *ssid, const char *password) {
+	return primalucelib_check_credentials(link, ssid, password, true) && primalucelib_set_credentials(link, PRIMALUCE_REQUEST_SET_ACCESS_POINT_CREDENTIALS, ssid, password);
+}
+
+bool primalucelib_set_station_credentials(primalucelib_link *link, const char *ssid, const char *password) {
+	return primalucelib_check_credentials(link, ssid, password, false) && primalucelib_set_credentials(link, PRIMALUCE_REQUEST_SET_STATION_CREDENTIALS, ssid, password);
+}
+
+bool primalucelib_get_submodel(primalucelib_link *link, char *submodel, size_t size) {
+	char *text;
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_GET_MODEL_SUBMODEL) || (text = primalucelib_reply_string(link, PRIMALUCE_REPLY_MODEL_SUBMODEL)) == NULL) {
+		return false;
+	}
+	// "Model = SESTOSENSO3, SubModel = SESTOSENSO3SC, ARCO = Not enabled"
+	char *start = strstr(text, "SubModel = ");
+	if (start == NULL || size == 0) {
+		return false;
+	}
+	start += 11;
+	size_t length = strcspn(start, ",");
+	if (length >= size) {
+		length = size - 1;
+	}
+	memcpy(submodel, start, length);
+	submodel[length] = 0;
+	return true;
+}
+
+bool primalucelib_get_recovery_delay(primalucelib_link *link, int *seconds) {
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_GET_RECOVERY_DELAY) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_RECOVERY_DELAY)) {
+		return false;
+	}
+	*seconds = (int)primalucelib_reply_number(link, PRIMALUCE_REPLY_RECOVERY_DELAY);
+	return true;
+}
+
+bool primalucelib_set_recovery_delay(primalucelib_link *link, int seconds) {
+	char *path[] = { PRIMALUCE_KEY_RESPONSE, PRIMALUCE_VERB_SET, PRIMALUCE_KEY_RECOVERY_DELAY, NULL };
+	return primalucelib_request(link, PRIMALUCE_REQUEST_SET_RECOVERY_DELAY, seconds) && primalucelib_reply_is_done(link, path);
+}
+
+#pragma mark - Focuser (MOT1)
+
+bool primalucelib_focuser_request_position(primalucelib_link *link, bool position_register) {
+	return primalucelib_request(link, position_register ? PRIMALUCE_REQUEST_FOCUSER_GET_POSITION_REGISTER : PRIMALUCE_REQUEST_FOCUSER_GET_POSITION_STEP);
+}
+
+bool primalucelib_reply_has_focuser_position(primalucelib_link *link, bool position_register) {
+	return primalucelib_reply_has(link, position_register ? PRIMALUCE_REPLY_FOCUSER_POSITION_REGISTER : PRIMALUCE_REPLY_FOCUSER_POSITION_STEP);
+}
+
+double primalucelib_reply_focuser_position(primalucelib_link *link, bool position_register) {
+	return primalucelib_reply_number(link, position_register ? PRIMALUCE_REPLY_FOCUSER_POSITION_REGISTER : PRIMALUCE_REPLY_FOCUSER_POSITION_STEP);
+}
+
+bool primalucelib_focuser_get_position(primalucelib_link *link, bool position_register, double *position) {
+	if (!primalucelib_focuser_request_position(link, position_register) || !primalucelib_reply_has_focuser_position(link, position_register)) {
+		return false;
+	}
+	*position = primalucelib_reply_focuser_position(link, position_register);
+	return true;
+}
+
+bool primalucelib_focuser_request_motor_state(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_GET_MOTOR_STATE);
+}
+
+char *primalucelib_reply_focuser_motor_state(primalucelib_link *link) {
+	return primalucelib_reply_string(link, PRIMALUCE_REPLY_FOCUSER_MOTOR_STATE);
+}
+
+bool primalucelib_focuser_move_to(primalucelib_link *link, bool use_goto, int position, char **acknowledgement) {
+	*acknowledgement = NULL;
+	if (!primalucelib_request(link, use_goto ? PRIMALUCE_REQUEST_FOCUSER_GOTO : PRIMALUCE_REQUEST_FOCUSER_MOVE_ABSOLUTE, position)) {
+		return false;
+	}
+	*acknowledgement = primalucelib_reply_string(link, use_goto ? PRIMALUCE_REPLY_FOCUSER_GOTO_ACK : PRIMALUCE_REPLY_FOCUSER_MOVE_ACK);
+	return true;
+}
+
+bool primalucelib_focuser_stop(primalucelib_link *link, char **reason) {
+	char *state = NULL;
+	*reason = NULL;
+	if (primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_ABORT) && (state = primalucelib_reply_string(link, PRIMALUCE_REPLY_FOCUSER_ABORT_ACK)) != NULL && primalucelib_is_done(state)) {
+		return true;
+	}
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_STOP)) {
+		return false;
+	}
+	state = primalucelib_reply_string(link, PRIMALUCE_REPLY_FOCUSER_STOP_ACK);
+	if (!primalucelib_is_done(state)) {
+		*reason = state;
+		return false;
+	}
+	return true;
+}
+
+bool primalucelib_focuser_fast_move(primalucelib_link *link, bool outward) {
+	return primalucelib_request(link, outward ? PRIMALUCE_REQUEST_FOCUSER_FAST_OUTWARD : PRIMALUCE_REQUEST_FOCUSER_FAST_INWARD) && primalucelib_reply_is_done(link, outward ? PRIMALUCE_REPLY_FOCUSER_FAST_OUTWARD_ACK : PRIMALUCE_REPLY_FOCUSER_FAST_INWARD_ACK);
+}
+
+bool primalucelib_focuser_set_backlash(primalucelib_link *link, int steps) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_SET_BACKLASH, steps) && primalucelib_reply_is_done(link, PRIMALUCE_REPLY_FOCUSER_BACKLASH_ACK);
+}
+
+bool primalucelib_focuser_set_speed(primalucelib_link *link, int speed) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_SET_SPEED, speed) && primalucelib_reply_is_done(link, PRIMALUCE_REPLY_FOCUSER_SPEED_ACK);
+}
+
+bool primalucelib_focuser_set_hold_current(primalucelib_link *link, bool on) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_SET_HOLD_CURRENT, on ? 1 : 0) && primalucelib_reply_is_done(link, PRIMALUCE_REPLY_FOCUSER_HOLD_CURRENT_ACK);
+}
+
+static bool primalucelib_focuser_settings_done(primalucelib_link *link, const char *keys[], int count) {
+	for (int i = 0; i < count; i++) {
+		char *path[] = { PRIMALUCE_KEY_RESPONSE, PRIMALUCE_VERB_SET, PRIMALUCE_KEY_FOCUSER_MOTOR, (char *)keys[i], NULL };
+		if (!primalucelib_reply_is_done(link, path)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool primalucelib_focuser_set_motor_rates(primalucelib_link *link, int acceleration, int deceleration, int run) {
+	const char *keys[] = { PRIMALUCE_KEY_ACCELERATION_SPEED, PRIMALUCE_KEY_DECELERATION_SPEED, PRIMALUCE_KEY_RUN_SPEED };
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_SET_MOTOR_RATES, acceleration, deceleration, run) && primalucelib_focuser_settings_done(link, keys, 3);
+}
+
+bool primalucelib_focuser_set_motor_currents(primalucelib_link *link, int acceleration, int deceleration, int run, int hold) {
+	const char *keys[] = { PRIMALUCE_KEY_ACCELERATION_CURRENT, PRIMALUCE_KEY_DECELERATION_CURRENT, PRIMALUCE_KEY_RUN_CURRENT, PRIMALUCE_KEY_HOLD_CURRENT };
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_SET_MOTOR_CURRENTS, acceleration, deceleration, run, hold) && primalucelib_focuser_settings_done(link, keys, 4);
+}
+
+bool primalucelib_focuser_get_motor_config(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_GET_MOTOR_CONFIG);
+}
+
+static double primalucelib_reply_member(primalucelib_link *link, const char *node, const char *key) {
+	char *path[] = { PRIMALUCE_KEY_RESPONSE, PRIMALUCE_VERB_GET, (char *)node, (char *)key, NULL };
+	return primalucelib_reply_number(link, path);
+}
+
+void primalucelib_reply_motor_config(primalucelib_link *link, primalucelib_run_config *config) {
+	config->acceleration_speed = primalucelib_reply_member(link, PRIMALUCE_KEY_FOCUSER_MOTOR, PRIMALUCE_KEY_ACCELERATION_SPEED);
+	config->run_speed = primalucelib_reply_member(link, PRIMALUCE_KEY_FOCUSER_MOTOR, PRIMALUCE_KEY_RUN_SPEED);
+	config->deceleration_speed = primalucelib_reply_member(link, PRIMALUCE_KEY_FOCUSER_MOTOR, PRIMALUCE_KEY_DECELERATION_SPEED);
+	config->acceleration_current = primalucelib_reply_member(link, PRIMALUCE_KEY_FOCUSER_MOTOR, PRIMALUCE_KEY_ACCELERATION_CURRENT);
+	config->run_current = primalucelib_reply_member(link, PRIMALUCE_KEY_FOCUSER_MOTOR, PRIMALUCE_KEY_RUN_CURRENT);
+	config->deceleration_current = primalucelib_reply_member(link, PRIMALUCE_KEY_FOCUSER_MOTOR, PRIMALUCE_KEY_DECELERATION_CURRENT);
+	config->hold_current = primalucelib_reply_member(link, PRIMALUCE_KEY_FOCUSER_MOTOR, PRIMALUCE_KEY_HOLD_CURRENT);
+}
+
+void primalucelib_reply_run_preset(primalucelib_link *link, const char *preset, primalucelib_run_config *config) {
+	config->acceleration_speed = primalucelib_reply_member(link, preset, PRIMALUCE_KEY_PRESET_ACCELERATION_SPEED);
+	config->run_speed = primalucelib_reply_member(link, preset, PRIMALUCE_KEY_PRESET_RUN_SPEED);
+	config->deceleration_speed = primalucelib_reply_member(link, preset, PRIMALUCE_KEY_PRESET_DECELERATION_SPEED);
+	config->acceleration_current = primalucelib_reply_member(link, preset, PRIMALUCE_KEY_PRESET_ACCELERATION_CURRENT);
+	config->run_current = primalucelib_reply_member(link, preset, PRIMALUCE_KEY_PRESET_RUN_CURRENT);
+	config->deceleration_current = primalucelib_reply_member(link, preset, PRIMALUCE_KEY_PRESET_DECELERATION_CURRENT);
+	config->hold_current = primalucelib_reply_member(link, preset, PRIMALUCE_KEY_PRESET_HOLD_CURRENT);
+}
+
+bool primalucelib_focuser_apply_run_preset(primalucelib_link *link, const char *name) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_APPLY_RUN_PRESET, name);
+}
+
+bool primalucelib_focuser_apply_user_run_preset(primalucelib_link *link, int index) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_APPLY_USER_RUN_PRESET, index);
+}
+
+bool primalucelib_focuser_set_user_run_preset(primalucelib_link *link, int index, const primalucelib_run_config *config) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_SET_USER_RUN_PRESET, index, (int)config->acceleration_speed, (int)config->deceleration_speed, (int)config->run_speed, (int)config->acceleration_current, (int)config->deceleration_current, (int)config->run_current, (int)config->hold_current);
+}
+
+bool primalucelib_focuser_set_stored_position(primalucelib_link *link, int index, int position) {
+	// The controller refuses a zero position, so it is never sent.
+	if (position <= 0) {
+		return false;
+	}
+	char key[16];
+	snprintf(key, sizeof(key), PRIMALUCE_KEY_STORED_POSITION_PREFIX "%d", index);
+	char *path[] = { PRIMALUCE_KEY_RESPONSE, PRIMALUCE_VERB_SET, key, PRIMALUCE_KEY_STORED_POSITION_STEPS, NULL };
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_SET_STORED_POSITION, index, position) && primalucelib_reply_is_done(link, path);
+}
+
+bool primalucelib_focuser_set_stored_position_name(primalucelib_link *link, int index, const char *name) {
+	// The name is sent inside a JSON string without escaping.
+	if (strchr(name, '"') != NULL || strchr(name, '\\') != NULL) {
+		return false;
+	}
+	char key[16];
+	snprintf(key, sizeof(key), PRIMALUCE_KEY_STORED_POSITION_PREFIX "%d", index);
+	char *path[] = { PRIMALUCE_KEY_RESPONSE, PRIMALUCE_VERB_SET, key, PRIMALUCE_KEY_STORED_POSITION_NAME, NULL };
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_SET_STORED_NAME, index, name) && primalucelib_reply_is_done(link, path);
+}
+
+double primalucelib_reply_stored_position(primalucelib_link *link, int index) {
+	char key[16];
+	snprintf(key, sizeof(key), PRIMALUCE_KEY_STORED_POSITION_PREFIX "%d", index);
+	return primalucelib_reply_member(link, key, PRIMALUCE_KEY_STORED_POSITION_STEPS);
+}
+
+char *primalucelib_reply_stored_position_name(primalucelib_link *link, int index) {
+	char key[16];
+	snprintf(key, sizeof(key), PRIMALUCE_KEY_STORED_POSITION_PREFIX "%d", index);
+	char *path[] = { PRIMALUCE_KEY_RESPONSE, PRIMALUCE_VERB_GET, key, PRIMALUCE_KEY_STORED_POSITION_NAME, NULL };
+	return primalucelib_reply_string(link, path);
+}
+
+bool primalucelib_focuser_calibration_step(primalucelib_link *link, const char *step) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_CALIBRATION_STEP, step) && primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_FOCUSER_CALIBRATION_ACK);
+}
+
+bool primalucelib_focuser_get_calibration(primalucelib_link *link, double *min_position, double *max_position) {
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_GET_CALIBRATION) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_FOCUSER_CALIBRATION_MAX)) {
+		return false;
+	}
+	*min_position = primalucelib_reply_number(link, PRIMALUCE_REPLY_FOCUSER_CALIBRATION_MIN);
+	*max_position = primalucelib_reply_number(link, PRIMALUCE_REPLY_FOCUSER_CALIBRATION_MAX);
+	return true;
+}
+
+char *primalucelib_focuser_get_calibration_direction(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_GET_CALIBRATION_DIR) ? primalucelib_reply_string(link, PRIMALUCE_REPLY_FOCUSER_CALIBRATION_DIR) : NULL;
+}
+
+bool primalucelib_focuser_set_calibration_direction(primalucelib_link *link, const char *direction) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_SET_CALIBRATION_DIR, direction) && primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_FOCUSER_CALIBRATION_DIR_ACK);
+}
+
+bool primalucelib_focuser_calibration_jog(primalucelib_link *link, int steps) {
+	char step[32];
+	snprintf(step, sizeof(step), steps < 0 ? "MoveIn-%d" : "MoveOut-%d", abs(steps));
+	return primalucelib_focuser_calibration_step(link, step);
+}
+
+#pragma mark - Rotator (ARCO, MOT2)
+
+bool primalucelib_rotator_enable(primalucelib_link *link, bool on) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_ROTATOR_ENABLE, on ? 1 : 0);
+}
+
+char *primalucelib_rotator_get_serial_number(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_ROTATOR_GET_SERIAL_NUMBER) ? primalucelib_reply_string(link, PRIMALUCE_REPLY_ROTATOR_SERIAL_NUMBER) : NULL;
+}
+
+primalucelib_angle_source primalucelib_rotator_angle_source(bool has_position_deg, bool has_abs_pos_register) {
+	return has_position_deg ? PRIMALUCELIB_ANGLE_POSITION_DEG : (has_abs_pos_register ? PRIMALUCELIB_ANGLE_ABS_POS_REGISTER : PRIMALUCELIB_ANGLE_ABS_POS_DEG);
+}
+
+double primalucelib_reply_rotator_angle(primalucelib_link *link, primalucelib_angle_source source) {
+	switch (source) {
+		case PRIMALUCELIB_ANGLE_POSITION_DEG:
+			return primalucelib_reply_number(link, PRIMALUCE_REPLY_ROTATOR_POSITION_DEG);
+		case PRIMALUCELIB_ANGLE_ABS_POS_REGISTER:
+			return primalucelib_reply_number(link, PRIMALUCE_REPLY_ROTATOR_ABS_POS_REGISTER);
+		default:
+			return primalucelib_reply_number(link, PRIMALUCE_REPLY_ROTATOR_ABS_POS_DEG);
+	}
+}
+
+bool primalucelib_rotator_get_angle(primalucelib_link *link, primalucelib_angle_source source, double *angle) {
+	bool result;
+	switch (source) {
+		case PRIMALUCELIB_ANGLE_POSITION_DEG:
+			result = primalucelib_request(link, PRIMALUCE_REQUEST_ROTATOR_GET_POSITION_DEG);
+			break;
+		case PRIMALUCELIB_ANGLE_ABS_POS_REGISTER:
+			result = primalucelib_request(link, PRIMALUCE_REQUEST_ROTATOR_GET_ABS_POS_REGISTER);
+			break;
+		default:
+			result = primalucelib_request(link, PRIMALUCE_REQUEST_ROTATOR_GET_ABS_POS_DEG);
+			break;
+	}
+	if (result) {
+		*angle = primalucelib_reply_rotator_angle(link, source);
+	}
+	return result;
+}
+
+char *primalucelib_reply_rotator_motor_state(primalucelib_link *link) {
+	return primalucelib_reply_string(link, PRIMALUCE_REPLY_ROTATOR_MOTOR_STATE);
+}
+
+bool primalucelib_rotator_move_to(primalucelib_link *link, double angle, char **acknowledgement) {
+	*acknowledgement = NULL;
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_ROTATOR_MOVE_ABSOLUTE, angle)) {
+		return false;
+	}
+	// A SESTO SENSO 2 acknowledges under STEP, a SESTO SENSO 3 (firmware 1.0.9) under DEG.
+	if ((*acknowledgement = primalucelib_reply_string(link, PRIMALUCE_REPLY_ROTATOR_MOVE_ACK)) == NULL) {
+		*acknowledgement = primalucelib_reply_string(link, PRIMALUCE_REPLY_ROTATOR_MOVE_DEG_ACK);
+	}
+	return true;
+}
+
+bool primalucelib_rotator_sync(primalucelib_link *link, double angle) {
+	// A SESTO SENSO 2 acknowledges under SYNC_POS, a SESTO SENSO 3 (firmware 1.0.9) under DEG.
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_ROTATOR_SYNC, angle)) {
+		return false;
+	}
+	return primalucelib_reply_has(link, PRIMALUCE_REPLY_ROTATOR_SYNC_ACK) ? primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_ROTATOR_SYNC_ACK) : primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_ROTATOR_MOVE_DEG_ACK);
+}
+
+bool primalucelib_rotator_stop(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_ROTATOR_STOP) && primalucelib_reply_is_done(link, PRIMALUCE_REPLY_ROTATOR_STOP_ACK);
+}
+
+bool primalucelib_rotator_start_calibration(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_ROTATOR_SET_CALIBRATION, PRIMALUCE_ROTATOR_CALIBRATION_RUNNING) && primalucelib_reply_is_done(link, PRIMALUCE_REPLY_ROTATOR_CALIBRATION_ACK);
+}
+
+bool primalucelib_rotator_stop_calibration(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_ROTATOR_SET_CALIBRATION, PRIMALUCE_ROTATOR_CALIBRATION_STOPPED);
+}
+
+char *primalucelib_rotator_get_calibration_status(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_ROTATOR_GET_CALIBRATION) ? primalucelib_reply_string(link, PRIMALUCE_REPLY_ROTATOR_CALIBRATION_STATUS) : NULL;
+}
+
+#pragma mark - Flat panel (GIOTTO)
+
+bool primalucelib_panel_get_max_brightness(primalucelib_link *link, int *brightness) {
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_PANEL_GET_MAX_BRIGHTNESS) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_PANEL_MAX_BRIGHTNESS)) {
+		return false;
+	}
+	*brightness = (int)primalucelib_reply_number(link, PRIMALUCE_REPLY_PANEL_MAX_BRIGHTNESS);
+	return true;
+}
+
+bool primalucelib_panel_get_brightness(primalucelib_link *link, int *brightness) {
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_PANEL_GET_BRIGHTNESS) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_PANEL_BRIGHTNESS)) {
+		return false;
+	}
+	*brightness = (int)primalucelib_reply_number(link, PRIMALUCE_REPLY_PANEL_BRIGHTNESS);
+	return true;
+}
+
+bool primalucelib_panel_set_brightness(primalucelib_link *link, int brightness) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_PANEL_SET_BRIGHTNESS, brightness) && primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_PANEL_BRIGHTNESS_ACK);
+}
+
+bool primalucelib_panel_get_light(primalucelib_link *link, bool *on) {
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_PANEL_GET_LIGHT) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_PANEL_LIGHT)) {
+		return false;
+	}
+	*on = primalucelib_reply_number(link, PRIMALUCE_REPLY_PANEL_LIGHT) == 1;
+	return true;
+}
+
+bool primalucelib_panel_set_light(primalucelib_link *link, bool on) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_PANEL_SET_LIGHT, on ? 1 : 0) && primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_PANEL_LIGHT_ACK);
+}
+
+bool primalucelib_panel_get_state(primalucelib_link *link, bool *on, int *brightness) {
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_PANEL_GET_STATE) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_PANEL_LIGHT) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_PANEL_BRIGHTNESS)) {
+		return false;
+	}
+	*on = primalucelib_reply_number(link, PRIMALUCE_REPLY_PANEL_LIGHT) == 1;
+	*brightness = (int)primalucelib_reply_number(link, PRIMALUCE_REPLY_PANEL_BRIGHTNESS);
+	return true;
+}
+
+bool primalucelib_panel_get_environment(primalucelib_link *link, double *temperature, double *supply, double *usb) {
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_PANEL_GET_ENVIRONMENT) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_PANEL_TEMPERATURE)) {
+		return false;
+	}
+	*temperature = primalucelib_reply_number(link, PRIMALUCE_REPLY_PANEL_TEMPERATURE);
+	*supply = primalucelib_reply_number(link, PRIMALUCE_REPLY_SUPPLY_VOLTAGE);
+	*usb = primalucelib_reply_number(link, PRIMALUCE_REPLY_USB_VOLTAGE);
+	return true;
+}
+
+bool primalucelib_panel_set_preset_brightness(primalucelib_link *link, int index, int brightness) {
+	char key[16];
+	snprintf(key, sizeof(key), PRIMALUCE_KEY_STORED_POSITION_PREFIX "%d", index);
+	char *path[] = { PRIMALUCE_KEY_RESPONSE, PRIMALUCE_VERB_SET, key, PRIMALUCE_KEY_BRIGHTNESS, NULL };
+	return primalucelib_request(link, PRIMALUCE_REQUEST_PANEL_SET_PRESET_BRIGHTNESS, index, brightness) && primalucelib_reply_is_acknowledged(link, path);
+}
+
+// PRESET_n NAME of a GIOTTO or an ALTO; a refusal keeps the controller's reason.
+static bool primalucelib_set_preset_name(primalucelib_link *link, int index, const char *name) {
+	// The name is sent inside a JSON string without escaping.
+	if (strchr(name, '"') != NULL || strchr(name, '\\') != NULL) {
+		return false;
+	}
+	char key[16];
+	snprintf(key, sizeof(key), PRIMALUCE_KEY_STORED_POSITION_PREFIX "%d", index);
+	char *path[] = { PRIMALUCE_KEY_RESPONSE, PRIMALUCE_VERB_SET, key, PRIMALUCE_KEY_STORED_POSITION_NAME, NULL };
+	return primalucelib_request(link, PRIMALUCE_REQUEST_FOCUSER_SET_STORED_NAME, index, name) && primalucelib_reply_is_acknowledged(link, path);
+}
+
+static bool primalucelib_recall_preset(primalucelib_link *link, int index) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_PANEL_RECALL_PRESET, index) && primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_PANEL_RECALL_PRESET_ACK);
+}
+
+bool primalucelib_panel_set_preset_name(primalucelib_link *link, int index, const char *name) {
+	return primalucelib_set_preset_name(link, index, name);
+}
+
+double primalucelib_reply_panel_preset_brightness(primalucelib_link *link, int index) {
+	char key[16];
+	snprintf(key, sizeof(key), PRIMALUCE_KEY_STORED_POSITION_PREFIX "%d", index);
+	return primalucelib_reply_member(link, key, PRIMALUCE_KEY_BRIGHTNESS);
+}
+
+bool primalucelib_panel_recall_preset(primalucelib_link *link, int index) {
+	return primalucelib_recall_preset(link, index);
+}
+
+bool primalucelib_panel_set_fading(primalucelib_link *link, bool enabled) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_PANEL_SET_FADING, enabled ? 1 : 0) && primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_PANEL_FADING_ACK);
+}
+
+bool primalucelib_panel_set_light_at_power_on(primalucelib_link *link, bool enabled) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_PANEL_SET_LIGHT_AT_POWER_ON, enabled ? 1 : 0) && primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_PANEL_LIGHT_AT_POWER_ON_ACK);
+}
+
+#pragma mark - Cover (ALTO)
+
+bool primalucelib_cover_get_position(primalucelib_link *link, int *position) {
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_COVER_GET_POSITION) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_COVER_POSITION)) {
+		return false;
+	}
+	*position = (int)primalucelib_reply_number(link, PRIMALUCE_REPLY_COVER_POSITION);
+	return true;
+}
+
+bool primalucelib_cover_set_position(primalucelib_link *link, int position) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_COVER_SET_POSITION, position) && primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_COVER_POSITION_ACK);
+}
+
+char *primalucelib_cover_get_motor_state(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_COVER_GET_MOTOR_STATE) ? primalucelib_reply_string(link, PRIMALUCE_REPLY_COVER_MOTOR_STATE) : NULL;
+}
+
+bool primalucelib_cover_get_motion(primalucelib_link *link, int *position, char **state) {
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_COVER_GET_MOTION) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_COVER_POSITION) || (*state = primalucelib_reply_string(link, PRIMALUCE_REPLY_COVER_MOTOR_STATE)) == NULL) {
+		return false;
+	}
+	*position = (int)primalucelib_reply_number(link, PRIMALUCE_REPLY_COVER_POSITION);
+	return true;
+}
+
+bool primalucelib_cover_get_environment(primalucelib_link *link, double *temperature, double *supply, double *usb) {
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_COVER_GET_ENVIRONMENT) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_FOCUSER_MOTOR_TEMPERATURE)) {
+		return false;
+	}
+	*temperature = primalucelib_reply_number(link, PRIMALUCE_REPLY_FOCUSER_MOTOR_TEMPERATURE);
+	*supply = primalucelib_reply_number(link, PRIMALUCE_REPLY_SUPPLY_VOLTAGE);
+	*usb = primalucelib_reply_number(link, PRIMALUCE_REPLY_USB_VOLTAGE);
+	return true;
+}
+
+bool primalucelib_cover_stop(primalucelib_link *link) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_COVER_STOP) && primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_COVER_STOP_ACK);
+}
+
+bool primalucelib_cover_calibration_step(primalucelib_link *link, const char *step) {
+	return primalucelib_request(link, PRIMALUCE_REQUEST_COVER_CALIBRATION_STEP, step) && primalucelib_reply_is_acknowledged(link, PRIMALUCE_REPLY_COVER_CALIBRATION_ACK);
+}
+
+bool primalucelib_cover_get_travel(primalucelib_link *link, int *travel) {
+	if (!primalucelib_request(link, PRIMALUCE_REQUEST_COVER_GET_TRAVEL) || !primalucelib_reply_has(link, PRIMALUCE_REPLY_FOCUSER_CALIBRATION_MAX)) {
+		return false;
+	}
+	*travel = (int)primalucelib_reply_number(link, PRIMALUCE_REPLY_FOCUSER_CALIBRATION_MAX);
+	return true;
+}
+
+bool primalucelib_cover_set_preset_position(primalucelib_link *link, int index, int steps) {
+	char key[16];
+	snprintf(key, sizeof(key), PRIMALUCE_KEY_STORED_POSITION_PREFIX "%d", index);
+	char *path[] = { PRIMALUCE_KEY_RESPONSE, PRIMALUCE_VERB_SET, key, PRIMALUCE_KEY_STORED_POSITION_STEPS, NULL };
+	return primalucelib_request(link, PRIMALUCE_REQUEST_COVER_SET_PRESET_POSITION, index, steps) && primalucelib_reply_is_acknowledged(link, path);
+}
+
+bool primalucelib_cover_set_preset_name(primalucelib_link *link, int index, const char *name) {
+	return primalucelib_set_preset_name(link, index, name);
+}
+
+bool primalucelib_cover_recall_preset(primalucelib_link *link, int index) {
+	return primalucelib_recall_preset(link, index);
+}

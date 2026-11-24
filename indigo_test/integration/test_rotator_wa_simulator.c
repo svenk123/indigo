@@ -154,10 +154,10 @@ static void wa_model_moves(const char *model, int steps) {
 	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 10, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(fabs(wa_position() - 10) < 0.002);
 	char command[32];
-	snprintf(command, sizeof(command), "%d", steps * 10);
+	snprintf(command, sizeof(command), "%d", steps * 10 + 1000000);
 	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, command));
 	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 0, INDIGO_OK_STATE));
-	snprintf(command, sizeof(command), "%d", -steps * 10);
+	snprintf(command, sizeof(command), "%d", -steps * 10 + 1000000);
 	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, command));
 	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, ROTATOR_RELATIVE_MOVE_ITEM_NAME, -3, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(fabs(wa_position() - 357) < 0.002);
@@ -188,21 +188,21 @@ static void wa_wrap_sync_offset_zero(void) {
 	SERIAL_CHECK_TRUE(wa_switch_change(ROTATOR_ON_POSITION_SET_PROPERTY_NAME, ROTATOR_ON_POSITION_SET_GOTO_ITEM_NAME, true, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wa_control(&simulator, "position:-1"));
 	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 1, INDIGO_OK_STATE));
-	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, "2284"));
+	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, "1002284"));
 	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 359, INDIGO_OK_STATE));
-	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, "-2284"));
+	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, "997716"));
 	SERIAL_CHECK_TRUE(wa_switch_change(ROTATOR_ON_POSITION_SET_PROPERTY_NAME, ROTATOR_ON_POSITION_SET_SYNC_ITEM_NAME, true, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 200, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(fabs(wa_position() - 200) < 0.002);
 	SERIAL_CHECK_TRUE(wa_switch_change(ROTATOR_ON_POSITION_SET_PROPERTY_NAME, ROTATOR_ON_POSITION_SET_GOTO_ITEM_NAME, true, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 190, INDIGO_OK_STATE));
-	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, "-11420"));
+	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, "988580"));
 	SERIAL_CHECK_TRUE(wa_switch_change(WA_SET_ZERO_POSITION_PROPERTY_NAME, WA_SET_ZERO_POSITION_ITEM_NAME, true, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(fabs(wa_position()) < 0.002);
 	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_POSITION_OFFSET_PROPERTY_NAME, ROTATOR_POSITION_OFFSET_ITEM_NAME, 20, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(fabs(wa_position() - 20) < 0.002);
 	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 350, INDIGO_OK_STATE));
-	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, "-34260"));
+	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, "965740"));
 cleanup:
 	if (context.driver_case == &wa_rotator) {
 		stop_serial_driver(&wa_rotator);
@@ -231,6 +231,81 @@ static void wa_noop_and_settings(void) {
 	disconnect_serial_device(&wa_rotator);
 	SERIAL_CHECK_TRUE(connect_serial_device(&wa_rotator, simulator.port));
 	SERIAL_CHECK_TRUE(find_cached_item(ROTATOR_BACKLASH_PROPERTY_NAME, ROTATOR_BACKLASH_ITEM_NAME)->number.value == 0);
+cleanup:
+	if (context.driver_case == &wa_rotator) {
+		stop_serial_driver(&wa_rotator);
+	}
+	stop_external_serial_simulator(&simulator);
+}
+
+// A stop takes the box a moment, during which it handles no command, and then it reports the interrupted move with
+// the usual completion feedback (angle rotated, position). That line arrives after the driver dropped stale input and
+// sent the status request, so it is the first line the status read gets; it must not fail the abort.
+static void wa_abort_with_stop_feedback(void) {
+	external_serial_simulator simulator = { 0 };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator(&simulator, ROTATOR_WA_SIMULATOR_EXECUTABLE));
+	SERIAL_CHECK_TRUE(start_serial_driver(&wa_rotator, simulator.port));
+	SERIAL_CHECK_TRUE(wa_switch_change(WA_SET_ZERO_POSITION_PROPERTY_NAME, WA_SET_ZERO_POSITION_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wa_control(&simulator, "stop_feedback:300"));
+	unsigned revision = property_revision(ROTATOR_POSITION_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, ROTATOR_RELATIVE_MOVE_ITEM_NAME, 120, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(wait_for_property_state_seen_after(ROTATOR_POSITION_PROPERTY_NAME, INDIGO_BUSY_STATE, revision));
+	indigo_usleep(500000);
+	SERIAL_CHECK_TRUE(wa_switch_change(ROTATOR_ABORT_MOTION_PROPERTY_NAME, ROTATOR_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_property_state(ROTATOR_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(wa_position() > 0 && wa_position() < 120);
+	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, ROTATOR_RELATIVE_MOVE_ITEM_NAME, 2, INDIGO_OK_STATE));
+cleanup:
+	if (context.driver_case == &wa_rotator) {
+		stop_serial_driver(&wa_rotator);
+	}
+	stop_external_serial_simulator(&simulator);
+}
+
+// GOTO is sent as steps + 1000000 (fast speed) and a relative move with plain steps, as the 3.0-7 driver (3.0.0.3) did;
+// the migrated driver sent GOTO with plain steps (regression, see 3dedba4cb:.factory/tasks/archive/20261027203747-a8d5-archive-refactor-notes/refactor/rotator_wa.md).
+static void wa_goto_uses_fast_speed(void) {
+	external_serial_simulator simulator = { 0 };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator(&simulator, ROTATOR_WA_SIMULATOR_EXECUTABLE));
+	SERIAL_CHECK_TRUE(start_serial_driver(&wa_rotator, simulator.port));
+	SERIAL_CHECK_TRUE(wa_switch_change(WA_SET_ZERO_POSITION_PROPERTY_NAME, WA_SET_ZERO_POSITION_ITEM_NAME, true, INDIGO_OK_STATE));
+	static const double targets[] = { 10, 30, 40, 20 };
+	for (int i = 0; i < 4; i++) {
+		SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, targets[i], INDIGO_OK_STATE));
+		SERIAL_CHECK_TRUE(fabs(wa_position() - targets[i]) < 0.01);
+	}
+	// 0 -> 10 and 30 -> 40 are +10 degrees, 10 -> 30 is +20, 40 -> 20 is -20 (1142 steps per degree)
+	SERIAL_CHECK_EQ_INT(2, wa_command_count(&simulator, "1011420"));
+	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, "1022840"));
+	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, "977160"));
+	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, ROTATOR_RELATIVE_MOVE_ITEM_NAME, 15, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(fabs(wa_position() - 35) < 0.01);
+	SERIAL_CHECK_EQ_INT(1, wa_command_count(&simulator, "17130"));
+cleanup:
+	if (context.driver_case == &wa_rotator) {
+		stop_serial_driver(&wa_rotator);
+	}
+	stop_external_serial_simulator(&simulator);
+}
+
+// The box may pause in the middle of the completion feedback (here 300 ms after the angle rotated). The 3.0-7 driver
+// read the line with no timeout between bytes and was not affected; a reader that gives up after 0.1 s of silence got
+// half a line, ended the move with ALERT "Rotator motion failed or was interrupted" and kept the old position.
+static void wa_completion_with_a_pause(void) {
+	external_serial_simulator simulator = { 0 };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator(&simulator, ROTATOR_WA_SIMULATOR_EXECUTABLE));
+	SERIAL_CHECK_TRUE(start_serial_driver(&wa_rotator, simulator.port));
+	SERIAL_CHECK_TRUE(wa_switch_change(WA_SET_ZERO_POSITION_PROPERTY_NAME, WA_SET_ZERO_POSITION_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wa_control(&simulator, "completion_gap:300"));
+	static const double targets[] = { 10, 30, 40 };
+	for (int i = 0; i < 3; i++) {
+		SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, targets[i], INDIGO_OK_STATE));
+		printf("GOTO %.0f with a paused completion ended at %.3f\n", targets[i], wa_position());
+		SERIAL_CHECK_TRUE(fabs(wa_position() - targets[i]) < 0.01);
+	}
+	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, ROTATOR_RELATIVE_MOVE_ITEM_NAME, -15, INDIGO_OK_STATE));
+	printf("Relative move of -15 with a paused completion ended at %.3f\n", wa_position());
+	SERIAL_CHECK_TRUE(fabs(wa_position() - 25) < 0.01);
 cleanup:
 	if (context.driver_case == &wa_rotator) {
 		stop_serial_driver(&wa_rotator);
@@ -418,13 +493,16 @@ cleanup:
 	stop_external_serial_simulator(&simulator);
 }
 
-static void wa_stop_failure(void) {
+// The box does not answer stop, so the status read after it is the only readback; when that reply is lost the abort
+// still ends OK (the stop was sent), the aborted move ends ALERT, and the next move works.
+static void wa_status_lost_after_stop(void) {
 	external_serial_simulator simulator = { 0 };
 	SERIAL_CHECK_TRUE(start_external_serial_simulator(&simulator, ROTATOR_WA_SIMULATOR_EXECUTABLE));
 	SERIAL_CHECK_TRUE(start_serial_driver(&wa_rotator, simulator.port));
 	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, ROTATOR_RELATIVE_MOVE_ITEM_NAME, 60, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(wa_control(&simulator, "ignore_stop"));
-	SERIAL_CHECK_TRUE(wa_switch_change(ROTATOR_ABORT_MOTION_PROPERTY_NAME, ROTATOR_ABORT_MOTION_ITEM_NAME, true, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(wa_switch_change(ROTATOR_ABORT_MOTION_PROPERTY_NAME, ROTATOR_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_property_state(ROTATOR_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE));
 	SERIAL_CHECK_TRUE(wa_switch_change(ROTATOR_ABORT_MOTION_PROPERTY_NAME, ROTATOR_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wa_number_change(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, ROTATOR_RELATIVE_MOVE_ITEM_NAME, 1, INDIGO_OK_STATE));
 cleanup:
@@ -579,6 +657,9 @@ int main(int argc, char *argv[]) {
 		{ "wa_wrap_sync_offset_zero", wa_wrap_sync_offset_zero },
 		{ "wa_noop_and_settings", wa_noop_and_settings },
 		{ "wa_busy_abort_recovery", wa_busy_abort_recovery },
+		{ "wa_goto_uses_fast_speed", wa_goto_uses_fast_speed },
+		{ "wa_completion_with_a_pause", wa_completion_with_a_pause },
+		{ "wa_abort_with_stop_feedback", wa_abort_with_stop_feedback },
 		{ "wa_disconnect_during_motion", wa_disconnect_during_motion },
 		{ "wa_bad_model", wa_bad_model },
 		{ "wa_bad_position", wa_bad_position },
@@ -599,7 +680,7 @@ int main(int argc, char *argv[]) {
 		{ "wa_completion_overlong", wa_completion_overlong },
 		{ "wa_timeout_recovery", wa_timeout_recovery },
 		{ "wa_setting_failures", wa_setting_failures },
-		{ "wa_stop_failure", wa_stop_failure },
+		{ "wa_status_lost_after_stop", wa_status_lost_after_stop },
 		{ "wa_split_frames", wa_split_frames },
 		{ "wa_transport_loss", wa_transport_loss },
 		{ "wa_abort_queued_start", wa_abort_queued_start },

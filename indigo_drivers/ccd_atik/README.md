@@ -29,11 +29,7 @@ Driver is developed and tested with:
 * Atik 11000
 * Atik Horizon
 
-## Generator migration
-
-The source of truth is `indigo_ccd_atik.driver`; regenerate the C, header and
-standalone main with `indigo_generator`. Migration progress, software acceptance
-and pending Titan/One/11000A/Horizon hardware tests are recorded in `REFACTOR.md`.
+## Notes
 
 Version 0x03000020 renames `ATIK_PRESETS` to `X_PRESETS` and
 `ATIK_WINDOW_HEATER` to `X_WINDOW_HEATER`; update client scripts accordingly.
@@ -41,13 +37,14 @@ Standard property and custom item names are unchanged.
 
 ## Testing
 
-2026-09-22 10:06 3.0.0.44 mac arm64 Atik One 1/1 OK
-2026-09-22 10:08 3.0.0.44 mac arm64 ArtemisCCD VS 1/1 OK
-2026-09-22 13:22 3.0.0.44 mac arm64 Atik Horizon 1/1 OK
-2026-09-22 14:31 3.0.0.45 mac arm64 Atik 11000 1/1 OK
-2026-09-26 17:43 3.0.0.46 linux arm64 fake SDK 43/43 OK
-2026-09-26 19:56 3.0.0.47 mac arm64 Atik Titan 1/1 OK
-2026-09-27 07:55 3.0.0.49 linux x64 fake SDK 44/44 OK
-2026-09-27 21:27 3.0.0.49 mac arm64 fake SDK 44/44 OK
-2026-09-30 19:06 3.0.0.49 linux arm64 Atik One 1/1 OK
-2026-09-30 19:12 3.0.0.49 linux arm64 Atik Titan 1/1 OK
+- 2026-09-22 13:22 3.0.0.44 mac arm64 Atik Horizon 1/1 OK
+- 2026-09-22 14:31 3.0.0.45 mac arm64 Atik 11000 1/1 OK
+- 2026-09-26 17:43 3.0.0.46 linux arm64 fake SDK 43/43 OK
+- 2026-09-27 07:55 3.0.0.49 linux x64 fake SDK 44/44 OK
+- 2026-09-30 19:06 3.0.0.49 linux arm64 Atik One 1/1 OK
+- 2026-10-06 22:19 3.0.0.50 mac arm64 Atik One 1/1 OK
+- 2026-10-06 22:24 3.0.0.50 mac arm64 ArtemisCCD VS 1/1 OK
+- 2026-10-06 22:27 3.0.0.50 mac arm64 Atik Titan 1/1 OK
+- 2026-10-07 07:15 3.0.0.50 linux arm64 Atik Titan 1/1 OK
+- 2026-11-23 21:07 3.0.0.51 linux arm64 ArtemisCCD VS 1/1 OK
+- 2026-11-23 22:20 3.0.0.51 mac arm64 fake SDK 47/47 OK

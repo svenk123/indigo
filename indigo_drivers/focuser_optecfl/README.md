@@ -30,4 +30,4 @@ indigo_server indigo_focuser_optecfl
 
 ## Testing
 
-2026-09-27 23:10 3.0.0.5 mac arm64 simulator 45/45 OK
+- 2026-10-10 13:51 3.0.0.9 mac arm64 simulator 51/51 OK

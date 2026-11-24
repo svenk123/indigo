@@ -29,4 +29,5 @@ Driver is developed and tested with the physical hardware.
 
 ## Testing
 
-2026-09-27 23:28 3.0.0.8 mac arm64 simulator 23/23 OK
+- 2026-10-08 19:03 3.0.0.10 linux arm64 WeMacro Rail controller 16/16 OK
+- 2026-10-08 19:36 3.0.0.10 mac arm64 simulator 27/27 OK

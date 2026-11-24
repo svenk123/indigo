@@ -26,9 +26,13 @@ driver falcon {
 	label = "PegasusAstro Falcon rotator";
 	author = "Peter Polakovic <peter.polakovic@cloudmakers.eu>";
 	copyright = "Copyright (c) 2023-2026 CloudMakers, s. r. o.";
-	version = 10;
+	version = 14;
 	multi_device_support = true;
 	serial {
+		pattern {
+			vid = 0x303a;
+			pid = 0x9002;
+		}
 		pattern {
 			product = "FalconRotator";
 			vendor = "Pegasus Astro";
@@ -36,7 +40,8 @@ driver falcon {
 	}
 	data {
 		char response[128];
-		bool abort;
+		double move_deadline;
+		bool reversed;
 	}
 	code {
 		static bool falcon_command(indigo_device *device, char *command, ...) {
@@ -53,8 +58,8 @@ driver falcon {
 			return result > 0;
 		}
 
-		static bool falcon_open(indigo_device *device) {
-			PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 9600, INDIGO_LOG_DEBUG);
+		static bool falcon_open(indigo_device *device, const char **error_message) {
+			PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 9600, INDIGO_LOG_DEBUG, error_message);
 			if (PRIVATE_DATA->handle != NULL) {
 				if (falcon_command(device, "F#") && !strncmp(PRIVATE_DATA->response, "FR_OK", 5)) {
 					INDIGO_COPY_VALUE(INFO_DEVICE_MODEL_ITEM->text.value ,"Falcon Rotator");
@@ -65,7 +70,7 @@ driver falcon {
 					return true;
 				} else {
 					indigo_uni_close(&PRIVATE_DATA->handle);
-					PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 115200, INDIGO_LOG_DEBUG);
+					PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 115200, INDIGO_LOG_DEBUG, error_message);
 					if (falcon_command(device, "F#") && !strncmp(PRIVATE_DATA->response, "F2R_", 4)) {
 						INDIGO_COPY_VALUE(INFO_DEVICE_MODEL_ITEM->text.value, "Falcon Rotator v2");
 						if (falcon_command(device, "FV") && !strncmp(PRIVATE_DATA->response, "FV:", 3)) {
@@ -91,6 +96,7 @@ driver falcon {
 		name = "Pegasus Falcon rotator";
 		additional_instances = true;
 		on_connect {
+			PRIVATE_DATA->reversed = ROTATOR_DIRECTION_REVERSED_ITEM->sw.value;
 			falcon_command(device, "FH");
 			falcon_command(device, "DR:0");
 			if (falcon_command(device, "FA")) {
@@ -107,6 +113,7 @@ driver falcon {
 					token = strtok_r(NULL, ":", &pnt); // do_derotation
 					token = strtok_r(NULL, ":", &pnt); // motor_reverse
 					if (token) {
+						PRIVATE_DATA->reversed = *token != '0';
 						if (*token == '0') {
 							indigo_set_switch(ROTATOR_DIRECTION_PROPERTY, ROTATOR_DIRECTION_NORMAL_ITEM, true);
 						} else {
@@ -125,6 +132,7 @@ driver falcon {
 					token = strtok_r(NULL, ":", &pnt); // microsteps
 					token = strtok_r(NULL, ":", &pnt); // direction
 					if (token) {
+						PRIVATE_DATA->reversed = *token != '0';
 						if (*token == '0') {
 							indigo_set_switch(ROTATOR_DIRECTION_PROPERTY, ROTATOR_DIRECTION_NORMAL_ITEM, true);
 						} else {
@@ -132,6 +140,12 @@ driver falcon {
 						}
 					}
 				}
+			}
+		}
+		on_disconnect {
+			if (ROTATOR_POSITION_PROPERTY->state == INDIGO_BUSY_STATE) {
+				falcon_command(device, "FH");
+				falcon_finish_motion(device, INDIGO_ALERT_STATE);
 			}
 		}
 		on_attach {
@@ -148,37 +162,40 @@ driver falcon {
 			#define POLL_DELAY		0.1
 			#define MOVE_TIMEOUT		120
 
-			static void falcon_move(indigo_device *device) {
-				PRIVATE_DATA->abort = false;
-				if (!(falcon_command(device, "MD:%0.2f", ROTATOR_POSITION_ITEM->number.target) && !strncmp(PRIVATE_DATA->response, "MD:", 3))) {
-					ROTATOR_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
-					return;
-				}
-				indigo_sleep(SETTLE_DELAY);
-				ROTATOR_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
-				time_t deadline = time(NULL) + MOVE_TIMEOUT;
-				while (true) {
-					if (PRIVATE_DATA->abort) {
-						falcon_command(device, "FH");
-						break;
-					}
-					if (falcon_command(device, "FD") && !strncmp(PRIVATE_DATA->response, "FD:", 3)) {
-						ROTATOR_POSITION_ITEM->number.value = indigo_atod(PRIVATE_DATA->response + 3);
-						indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
-					}
-					if (falcon_command(device, "FR") && !strcmp(PRIVATE_DATA->response, "FR:0")) {
-						ROTATOR_POSITION_PROPERTY->state = INDIGO_OK_STATE;
-						break;
-					}
-					if (time(NULL) >= deadline) {
-						INDIGO_DRIVER_ERROR(DRIVER_NAME, "Rotator failed to reach %.2f in %d seconds", ROTATOR_POSITION_ITEM->number.target, MOVE_TIMEOUT);
-						break;
-					}
-					indigo_sleep(POLL_DELAY);
-				}
+			static void falcon_finish_motion(indigo_device *device, indigo_property_state state) {
 				if (falcon_command(device, "FD") && !strncmp(PRIVATE_DATA->response, "FD:", 3)) {
 					ROTATOR_POSITION_ITEM->number.value = indigo_atod(PRIVATE_DATA->response + 3);
 				}
+				INDIGO_UPDATE_PROPERTY_STATE(ROTATOR_POSITION_PROPERTY, state, NULL);
+				if (ROTATOR_RELATIVE_MOVE_PROPERTY->state == INDIGO_BUSY_STATE) {
+					INDIGO_UPDATE_PROPERTY_STATE(ROTATOR_RELATIVE_MOVE_PROPERTY, state, NULL);
+				}
+			}
+
+			static void falcon_move_finalizer(indigo_device *device) {
+				if (falcon_command(device, "FD") && !strncmp(PRIVATE_DATA->response, "FD:", 3)) {
+					ROTATOR_POSITION_ITEM->number.value = indigo_atod(PRIVATE_DATA->response + 3);
+					indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
+				}
+				if (falcon_command(device, "FR") && !strcmp(PRIVATE_DATA->response, "FR:0")) {
+					falcon_finish_motion(device, INDIGO_OK_STATE);
+				} else if (indigo_monotonic_time() >= PRIVATE_DATA->move_deadline) {
+					falcon_command(device, "FH");
+					falcon_finish_motion(device, INDIGO_ALERT_STATE);
+					INDIGO_DRIVER_ERROR(DRIVER_NAME, "Rotator failed to reach %.2f in %d seconds", ROTATOR_POSITION_ITEM->number.target, MOVE_TIMEOUT);
+				} else {
+					indigo_execute_handler_in(device, POLL_DELAY, falcon_move_finalizer);
+				}
+			}
+
+			static void falcon_move(indigo_device *device) {
+				if (!(falcon_command(device, "MD:%0.2f", ROTATOR_POSITION_ITEM->number.target) && !strncmp(PRIVATE_DATA->response, "MD:", 3))) {
+					falcon_finish_motion(device, INDIGO_ALERT_STATE);
+					return;
+				}
+				PRIVATE_DATA->move_deadline = indigo_monotonic_time() + SETTLE_DELAY + MOVE_TIMEOUT;
+				INDIGO_UPDATE_PROPERTY_STATE(ROTATOR_POSITION_PROPERTY, INDIGO_BUSY_STATE, NULL);
+				indigo_execute_handler_in(device, SETTLE_DELAY, falcon_move_finalizer);
 			}
 
 			static void falcon_sync(indigo_device *device) {
@@ -215,16 +232,27 @@ driver falcon {
 		}
 		inherited ROTATOR_DIRECTION {
 			on_change {
-				if (!falcon_command(device, "FN:%d", ROTATOR_DIRECTION_NORMAL_ITEM->sw.value ? 0 : 1) && !strncmp(PRIVATE_DATA->response, "FN:", 3)) {
+				// The rotator echoes an accepted FN:<n>; anything else leaves it with the flag it had.
+				bool reversed = ROTATOR_DIRECTION_REVERSED_ITEM->sw.value;
+				char acknowledgement[8];
+				snprintf(acknowledgement, sizeof(acknowledgement), "FN:%d", reversed ? 1 : 0);
+				if (falcon_command(device, "FN:%d", reversed ? 1 : 0) && !strcmp(PRIVATE_DATA->response, acknowledgement)) {
+					PRIVATE_DATA->reversed = reversed;
+				} else {
+					indigo_set_switch(ROTATOR_DIRECTION_PROPERTY, PRIVATE_DATA->reversed ? ROTATOR_DIRECTION_REVERSED_ITEM : ROTATOR_DIRECTION_NORMAL_ITEM, true);
 					ROTATOR_DIRECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 				}
 			}
 		}
 		inherited ROTATOR_ABORT_MOTION {
-			asynchronous_change = false;
 			on_change {
-				PRIVATE_DATA->abort = true;
+				indigo_cancel_pending_handler(device, falcon_move_finalizer);
+				if (ROTATOR_POSITION_PROPERTY->state == INDIGO_BUSY_STATE) {
+					falcon_command(device, "FH");
+					falcon_finish_motion(device, INDIGO_ALERT_STATE);
+				}
 				ROTATOR_ABORT_MOTION_ITEM->sw.value = false;
+				INDIGO_UPDATE_PROPERTY_STATE(ROTATOR_ABORT_MOTION_PROPERTY, INDIGO_OK_STATE, NULL);
 			}
 		}
 		inherited ROTATOR_RELATIVE_MOVE {
@@ -245,7 +273,9 @@ driver falcon {
 				indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
 				falcon_move(device);
 				indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
-				ROTATOR_RELATIVE_MOVE_PROPERTY->state = ROTATOR_POSITION_PROPERTY->state;
+				if (ROTATOR_POSITION_PROPERTY->state != INDIGO_BUSY_STATE) {
+					ROTATOR_RELATIVE_MOVE_PROPERTY->state = ROTATOR_POSITION_PROPERTY->state;
+				}
 			}
 		}
 	}

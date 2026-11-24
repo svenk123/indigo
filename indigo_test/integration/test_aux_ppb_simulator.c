@@ -113,7 +113,7 @@ static void ppb_model_inventory(void) {
 	assert_property_has_item("X_AUX_REBOOT", "REBOOT");
 	assert_property_has_item(AUX_SAVE_OUTLET_STATES_AS_DEFAULT_PROPERTY_NAME, AUX_SAVE_OUTLET_STATES_AS_DEFAULT_ITEM_NAME);
 	indigo_item *model = find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_MODEL_ITEM_NAME);
-	SERIAL_CHECK_TRUE(model != NULL && strstr(model->text.value, "PPB") != NULL);
+	SERIAL_CHECK_TRUE(model != NULL && !strcmp(model->text.value, "PegasusAstro PPB"));
 cleanup:
 	stop_serial_driver(&aux);
 	stop_external_serial_simulator(&simulator);
@@ -131,7 +131,7 @@ static void ppba_model_inventory(void) {
 	assert_property_has_item(AUX_DSLR_POWER_PROPERTY_NAME, "9");
 	assert_property_has_item(AUX_DSLR_POWER_PROPERTY_NAME, "12");
 	indigo_item *model = find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_MODEL_ITEM_NAME);
-	SERIAL_CHECK_TRUE(model != NULL && strstr(model->text.value, "PPBA") != NULL);
+	SERIAL_CHECK_TRUE(model != NULL && !strcmp(model->text.value, "PegasusAstro PPBA"));
 cleanup:
 	stop_serial_driver(&aux);
 	stop_external_serial_simulator(&simulator);
@@ -145,7 +145,7 @@ static void ppbm_model_inventory(void) {
 	assert_property_has_item(AUX_POWER_OUTLET_STATE_PROPERTY_NAME, AUX_POWER_OUTLET_STATE_1_ITEM_NAME);
 	assert_property_has_item(AUX_DSLR_POWER_PROPERTY_NAME, "5");
 	indigo_item *model = find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_MODEL_ITEM_NAME);
-	SERIAL_CHECK_TRUE(model != NULL && strstr(model->text.value, "PPBM") != NULL);
+	SERIAL_CHECK_TRUE(model != NULL && !strcmp(model->text.value, "PegasusAstro PPBM"));
 cleanup:
 	stop_serial_driver(&aux);
 	stop_external_serial_simulator(&simulator);
@@ -159,7 +159,22 @@ static void spb_model_inventory(void) {
 	SERIAL_CHECK_TRUE(!has_defined_property(AUX_DSLR_POWER_PROPERTY_NAME));
 	SERIAL_CHECK_TRUE(!has_defined_property(AUX_POWER_OUTLET_STATE_PROPERTY_NAME));
 	indigo_item *model = find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_MODEL_ITEM_NAME);
-	SERIAL_CHECK_TRUE(model != NULL && strstr(model->text.value, "SPB") != NULL);
+	SERIAL_CHECK_TRUE(model != NULL && !strcmp(model->text.value, "PegasusAstro SPB"));
+cleanup:
+	stop_serial_driver(&aux);
+	stop_external_serial_simulator(&simulator);
+}
+
+// No command table of the Saddle box is published and INDI accepts any identity containing
+// "SPB", so an answer that only starts with the model name identifies the box as well.
+static void spb_identity_is_matched_by_its_prefix(void) {
+	external_serial_simulator simulator = { 0 };
+	const char *arguments[] = { "--model", "spb", "--identity", "SPB_OK", NULL };
+	SERIAL_CHECK_TRUE(start_ppb(&simulator, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&aux, simulator.port));
+	SERIAL_CHECK_EQ_INT(1, property_count(AUX_POWER_OUTLET_PROPERTY_NAME));
+	indigo_item *model = find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_MODEL_ITEM_NAME);
+	SERIAL_CHECK_TRUE(model != NULL && !strcmp(model->text.value, "PegasusAstro SPB"));
 cleanup:
 	stop_serial_driver(&aux);
 	stop_external_serial_simulator(&simulator);
@@ -283,6 +298,28 @@ cleanup:
 	stop_external_serial_simulator(&simulator);
 }
 
+// On the Advance a voltage only selects the setpoint of the adjustable output; the outlet
+// switch stays where it is, so a selection made while the output is off keeps it off.
+static void dslr_voltage_leaves_the_outlet_switch_alone(void) {
+	external_serial_simulator simulator = { 0 };
+	SERIAL_CHECK_TRUE(start_model(&simulator, "ppba"));
+	SERIAL_CHECK_TRUE(set_switch(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_2_ITEM_NAME, false));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_2_ITEM_NAME, false));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_DSLR_POWER_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(set_switch(AUX_DSLR_POWER_PROPERTY_NAME, "12", true));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_DSLR_POWER_PROPERTY_NAME, "12", true));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_DSLR_POWER_PROPERTY_NAME, INDIGO_OK_STATE));
+	// Two status polls later the box still reports the output off.
+	indigo_usleep(4500000);
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_2_ITEM_NAME, false));
+	SERIAL_CHECK_TRUE(set_switch(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_2_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_2_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_DSLR_POWER_PROPERTY_NAME, "12", true));
+cleanup:
+	stop_serial_driver(&aux);
+	stop_external_serial_simulator(&simulator);
+}
+
 static void dslr_voltage_is_adopted_from_the_device(void) {
 	external_serial_simulator simulator = { 0 };
 	const char *arguments[] = { "--model", "ppba", "--dslr", "9", NULL };
@@ -393,6 +430,33 @@ static void saving_outlet_states_is_momentary(void) {
 	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_SAVE_OUTLET_STATES_AS_DEFAULT_PROPERTY_NAME, AUX_SAVE_OUTLET_STATES_AS_DEFAULT_ITEM_NAME, false));
 	// The mask written to the device is what the outlets currently are.
 	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_1_ITEM_NAME, false));
+cleanup:
+	stop_serial_driver(&aux);
+	stop_external_serial_simulator(&simulator);
+}
+
+// The firmware uses only the last two digits of PE (12 V outputs, then the DSLR output), so the
+// stored states are what the outlets come back in after a reboot.
+static void saved_outlet_states_return_after_a_reboot(void) {
+	external_serial_simulator simulator = { 0 };
+	SERIAL_CHECK_TRUE(start_model(&simulator, "ppba"));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_POWER_OUTLET_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(set_switch(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_1_ITEM_NAME, false));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_1_ITEM_NAME, false));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_POWER_OUTLET_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(set_switch(AUX_SAVE_OUTLET_STATES_AS_DEFAULT_PROPERTY_NAME, AUX_SAVE_OUTLET_STATES_AS_DEFAULT_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_SAVE_OUTLET_STATES_AS_DEFAULT_PROPERTY_NAME, AUX_SAVE_OUTLET_STATES_AS_DEFAULT_ITEM_NAME, false));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_SAVE_OUTLET_STATES_AS_DEFAULT_PROPERTY_NAME, INDIGO_OK_STATE));
+	// Storing the default switches nothing; the outlets are then turned the other way.
+	SERIAL_CHECK_TRUE(set_switch(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_1_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_1_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_POWER_OUTLET_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(set_switch(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_2_ITEM_NAME, false));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_2_ITEM_NAME, false));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_POWER_OUTLET_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(set_switch("X_AUX_REBOOT", "REBOOT", true));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_1_ITEM_NAME, false));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_POWER_OUTLET_PROPERTY_NAME, AUX_POWER_OUTLET_2_ITEM_NAME, true));
 cleanup:
 	stop_serial_driver(&aux);
 	stop_external_serial_simulator(&simulator);
@@ -618,6 +682,7 @@ int main(void) {
 		{ "ppba_model_inventory", ppba_model_inventory },
 		{ "ppbm_model_inventory", ppbm_model_inventory },
 		{ "spb_model_inventory", spb_model_inventory },
+		{ "spb_identity_is_matched_by_its_prefix", spb_identity_is_matched_by_its_prefix },
 		{ "firmware_version_reaches_info", firmware_version_reaches_info },
 		{ "status_frame_populates_every_sensor", status_frame_populates_every_sensor },
 		{ "current_falls_to_zero_without_a_load", current_falls_to_zero_without_a_load },
@@ -626,6 +691,7 @@ int main(void) {
 		{ "outlet_state_reports_the_power_alert", outlet_state_reports_the_power_alert },
 		{ "outlet_state_is_clear_without_an_alert", outlet_state_is_clear_without_an_alert },
 		{ "dslr_voltage_round_trips", dslr_voltage_round_trips },
+		{ "dslr_voltage_leaves_the_outlet_switch_alone", dslr_voltage_leaves_the_outlet_switch_alone },
 		{ "dslr_voltage_is_adopted_from_the_device", dslr_voltage_is_adopted_from_the_device },
 		{ "heaters_hold_independent_duty_cycles", heaters_hold_independent_duty_cycles },
 		{ "dew_control_round_trips", dew_control_round_trips },
@@ -633,6 +699,7 @@ int main(void) {
 		{ "outlet_names_relabel_the_heaters", outlet_names_relabel_the_heaters },
 		{ "reboot_is_momentary", reboot_is_momentary },
 		{ "saving_outlet_states_is_momentary", saving_outlet_states_is_momentary },
+		{ "saved_outlet_states_return_after_a_reboot", saved_outlet_states_return_after_a_reboot },
 		{ "reconnect_resumes_polling", reconnect_resumes_polling },
 		{ "repeated_disconnect_is_tolerated", repeated_disconnect_is_tolerated },
 		{ "shutdown_is_refused_while_connected", shutdown_is_refused_while_connected },

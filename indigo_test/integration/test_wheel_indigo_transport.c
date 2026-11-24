@@ -30,7 +30,7 @@ static atomic_int opens, closes, invalid_io, fail_open, fail_write, fail_read, b
 static char command[64];
 static const char *bad_command;
 
-indigo_uni_handle *wheel_test_open(const char *port, int speed, int level) {
+indigo_uni_handle *wheel_test_open(const char *port, int speed, int level, const char **error_message) {
 	if (speed != 9600) {
 		invalid_io++;
 	}
@@ -117,8 +117,13 @@ cleanup:
 	ASSERT_EQ_INT(0, invalid_io);
 }
 
+// The connect sends WI and keeps WHEEL_SLOT BUSY until WF reports filter 1.
+static bool start_and_settle(void) {
+	return start_serial_driver(&wheel, "fake") && wait_for_property_state(WHEEL_SLOT_PROPERTY_NAME, INDIGO_OK_STATE);
+}
+
 static void lost_echo_and_poll_recovery(void) {
-	SERIAL_CHECK_TRUE(start_serial_driver(&wheel, "fake"));
+	SERIAL_CHECK_TRUE(start_and_settle());
 	for (int mode = 0; mode < 3; mode++) {
 		if (mode == 0) {
 			fail_read = 1;
@@ -141,7 +146,7 @@ cleanup:
 }
 
 static void failed_write_timeout_and_recovery(void) {
-	SERIAL_CHECK_TRUE(start_serial_driver(&wheel, "fake"));
+	SERIAL_CHECK_TRUE(start_and_settle());
 	fail_write = 1;
 	int before = polls;
 	indigo_change_number_property_1(&simulator_test_client, wheel.device_name, WHEEL_SLOT_PROPERTY_NAME, WHEEL_SLOT_ITEM_NAME, 7);

@@ -70,7 +70,7 @@ typedef struct {
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x0300000A
+#define DRIVER_VERSION       0x03000010
 #define DRIVER_NAME          "indigo_focuser_qhy"
 #define DRIVER_LABEL         "QHY Q-Focuser"
 #define FOCUSER_DEVICE_NAME  "Q-Focuser"
@@ -95,7 +95,7 @@ typedef struct {
 	char response[QHY_BUFFER_SIZE];
 	int current_position, target_position, last_position, speed;
 	double motion_deadline, previous_temperature;
-	bool reverse, moving, motion_uncertain, disconnect_pending, temperature_valid;
+	bool reverse, moving, motion_uncertain, disconnect_pending, temperature_valid, external, poll_failed, automatic;
 	qhy_temperature_buffer temperature_buffer;
 	//- data
 } qhy_private_data;
@@ -134,7 +134,7 @@ static bool qhy_parse_json(const char *json, qhy_json_field *fields, int capacit
 		}
 		const char *key = cursor;
 		while (*cursor && *cursor != '"') {
-			if (*cursor == '\\') {
+			if (*cursor == '\\' && !*++cursor) {
 				return false;
 			}
 			cursor++;
@@ -161,8 +161,9 @@ static bool qhy_parse_json(const char *json, qhy_json_field *fields, int capacit
 		}
 		const char *value = cursor;
 		if (fields[count].quoted) {
+			// An escape sequence (the firmware sends "id":"@\u0019SC8HP\u0006TH2A") belongs to the string; it is kept as received.
 			while (*cursor && *cursor != '"') {
-				if (*cursor == '\\') {
+				if (*cursor == '\\' && !*++cursor) {
 					return false;
 				}
 				cursor++;
@@ -240,9 +241,10 @@ static bool qhy_json_number(const qhy_json_field *fields, int count, const char 
 	return true;
 }
 
-static bool qhy_json_string(const qhy_json_field *fields, int count, const char *key, char *value, size_t size) {
+// The text of a field, quoted or not: firmware 20231207 sends "version":20231207,"bv":108 as numbers.
+static bool qhy_json_text(const qhy_json_field *fields, int count, const char *key, char *value, size_t size) {
 	const qhy_json_field *field = qhy_field(fields, count, key);
-	if (!field || !field->quoted || !field->value[0] || strlen(field->value) >= size) {
+	if (!field || !field->value[0] || strlen(field->value) >= size) {
 		return false;
 	}
 	snprintf(value, size, "%s", field->value);
@@ -257,7 +259,7 @@ static bool qhy_parse_response(const char *response, qhy_response *parsed) {
 		return false;
 	}
 	if (parsed->idx == 1) {
-		return qhy_json_string(fields, count, "version", parsed->version, sizeof(parsed->version)) && qhy_json_string(fields, count, "bv", parsed->board_version, sizeof(parsed->board_version));
+		return qhy_json_text(fields, count, "version", parsed->version, sizeof(parsed->version)) && qhy_json_text(fields, count, "bv", parsed->board_version, sizeof(parsed->board_version));
 	}
 	if (parsed->idx == 4) {
 		double outside, chip, voltage;
@@ -276,7 +278,8 @@ static bool qhy_parse_response(const char *response, qhy_response *parsed) {
 	return parsed->idx == -1 || parsed->idx == 2 || parsed->idx == 3 || parsed->idx == 6 || parsed->idx == 7 || parsed->idx == 11 || parsed->idx == 13 || parsed->idx == 16;
 }
 
-static void qhy_network_disconnection(indigo_device *device) {
+// Runs the regular disconnection and then publishes ALERT for the lost connection.
+static void qhy_connection_lost(indigo_device *device) {
 	if (IS_CONNECTED) {
 		indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		focuser_connection_handler(device);
@@ -285,8 +288,31 @@ static void qhy_network_disconnection(indigo_device *device) {
 	}
 }
 
+// Checks the port before every command and after a failed one: a lost connection (indigo_uni_is_connection_lost():
+// a serial device that is gone, an error left on the port, a connection reset or closed by the focuser)
+// disconnects a connected device once; during connect the failing command is enough. A missing or garbled
+// reply is not a loss, it only fails its command.
+static bool qhy_port_valid(indigo_device *device) {
+	if (PRIVATE_DATA->handle == NULL || PRIVATE_DATA->disconnect_pending) {
+		return false;
+	}
+	if (!indigo_uni_is_connection_lost(PRIVATE_DATA->handle)) {
+		return true;
+	}
+	if (IS_CONNECTED) {
+		PRIVATE_DATA->disconnect_pending = true;
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Unexpected disconnection from %s", DEVICE_PORT_ITEM->text.value);
+		indigo_execute_handler(device, qhy_connection_lost);
+	}
+	return false;
+}
+
 static bool qhy_command(indigo_device *device, qhy_response *parsed, const char *format, ...) {
-	if (!PRIVATE_DATA->handle || indigo_uni_discard(PRIVATE_DATA->handle) < 0) {
+	if (!qhy_port_valid(device)) {
+		return false;
+	}
+	if (indigo_uni_discard(PRIVATE_DATA->handle) < 0) {
+		qhy_port_valid(device);
 		return false;
 	}
 	va_list args, copy;
@@ -298,9 +324,8 @@ static bool qhy_command(indigo_device *device, qhy_response *parsed, const char 
 	va_end(args);
 	long count = written == length ? indigo_uni_read_section2(PRIVATE_DATA->handle, PRIVATE_DATA->response, sizeof(PRIVATE_DATA->response) - 1, "\x7D", "", INDIGO_DELAY(3), INDIGO_DELAY(0.1)) : -1;
 	bool result = count > 0 && PRIVATE_DATA->response[count - 1] == 0x7D && (long)strlen(PRIVATE_DATA->response) == count && qhy_parse_response(PRIVATE_DATA->response, parsed);
-	if (!result && PRIVATE_DATA->handle && PRIVATE_DATA->handle->type == INDIGO_TCP_HANDLE && IS_CONNECTED && !PRIVATE_DATA->disconnect_pending) {
-		PRIVATE_DATA->disconnect_pending = true;
-		indigo_execute_handler(device, qhy_network_disconnection);
+	if (!result) {
+		qhy_port_valid(device);
 	}
 	return result;
 }
@@ -409,7 +434,9 @@ static void qhy_motion_state(indigo_device *device, indigo_property_state state)
 	FOCUSER_POSITION_PROPERTY->state = state;
 	FOCUSER_STEPS_PROPERTY->state = state;
 	indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
-	indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+	if (FOCUSER_STEPS_PROPERTY->defined) {
+		indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+	}
 }
 
 static void motion_finalizer(indigo_device *device) {
@@ -418,8 +445,15 @@ static void motion_finalizer(indigo_device *device) {
 	}
 	int position = 0;
 	if (!qhy_get_position(device, &position)) {
+		// Stop the focuser before releasing the operation; the position is confirmed only by a stop and a readback.
+		bool recovered = qhy_abort(device) && qhy_get_position(device, &position);
 		PRIVATE_DATA->moving = false;
-		PRIVATE_DATA->motion_uncertain = true;
+		PRIVATE_DATA->motion_uncertain = !recovered;
+		if (recovered) {
+			// The failed move ends at the stopped position and keeps the requested target.
+			PRIVATE_DATA->current_position = PRIVATE_DATA->last_position = position;
+			FOCUSER_POSITION_ITEM->number.value = position;
+		}
 		qhy_motion_state(device, INDIGO_ALERT_STATE);
 		return;
 	}
@@ -439,8 +473,9 @@ static void motion_finalizer(indigo_device *device) {
 		PRIVATE_DATA->moving = false;
 		PRIVATE_DATA->motion_uncertain = !recovered;
 		if (recovered) {
+			// The stalled move ends at the stopped position and keeps the requested target.
 			PRIVATE_DATA->current_position = position;
-			FOCUSER_POSITION_ITEM->number.value = FOCUSER_POSITION_ITEM->number.target = position;
+			FOCUSER_POSITION_ITEM->number.value = position;
 		}
 		qhy_motion_state(device, INDIGO_ALERT_STATE);
 		return;
@@ -470,7 +505,7 @@ static bool qhy_start_motion(indigo_device *device, int target) {
 	PRIVATE_DATA->last_position = PRIVATE_DATA->current_position;
 	PRIVATE_DATA->motion_deadline = indigo_monotonic_time() + QHY_STALL_TIMEOUT;
 	PRIVATE_DATA->moving = true;
-	PRIVATE_DATA->motion_uncertain = false;
+	PRIVATE_DATA->motion_uncertain = PRIVATE_DATA->external = false;
 	FOCUSER_POSITION_ITEM->number.target = target;
 	qhy_motion_state(device, INDIGO_BUSY_STATE);
 	return true;
@@ -486,25 +521,39 @@ static void qhy_compensate(indigo_device *device, double temperature) {
 		return;
 	}
 	double difference = temperature - PRIVATE_DATA->previous_temperature;
-	if (PRIVATE_DATA->moving || PRIVATE_DATA->motion_uncertain || FOCUSER_POSITION_PROPERTY->state != INDIGO_OK_STATE || fabs(difference) < FOCUSER_COMPENSATION_THRESHOLD_ITEM->number.value || fabs(difference) >= 100) {
+	if (PRIVATE_DATA->moving || PRIVATE_DATA->external || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || fabs(difference) < FOCUSER_COMPENSATION_THRESHOLD_ITEM->number.value || fabs(difference) >= 100) {
 		return;
 	}
 	int correction = (int)lround(difference * FOCUSER_COMPENSATION_ITEM->number.value);
-	PRIVATE_DATA->previous_temperature = temperature;
-	if (correction != 0) {
-		qhy_start_motion(device, PRIVATE_DATA->current_position + correction);
+	if (correction == 0) {
+		PRIVATE_DATA->previous_temperature = temperature;
+		return;
+	}
+	if (PRIVATE_DATA->motion_uncertain) {
+		// A failed move left the focuser state unknown: stop it and read the position before the retry.
+		int position = 0;
+		if (!(qhy_abort(device) && qhy_get_position(device, &position))) {
+			return;
+		}
+		PRIVATE_DATA->motion_uncertain = false;
+		PRIVATE_DATA->current_position = PRIVATE_DATA->target_position = PRIVATE_DATA->last_position = position;
+		FOCUSER_POSITION_ITEM->number.value = position;
+	}
+	// The reference moves on only with a started correction, a failed one is retried from the kept reference.
+	if (qhy_start_motion(device, PRIVATE_DATA->current_position + correction)) {
+		PRIVATE_DATA->previous_temperature = temperature;
 		if (PRIVATE_DATA->moving) {
 			indigo_execute_handler_in(device, 0.2, motion_finalizer);
 		}
 	}
 }
 
-static bool qhy_open(indigo_device *device) {
+static bool qhy_open(indigo_device *device, const char **error_message) {
 	char *name = DEVICE_PORT_ITEM->text.value;
 	if (indigo_uni_is_url(name, "qfocuser")) {
 		PRIVATE_DATA->handle = indigo_uni_open_url(name, 8080, INDIGO_TCP_HANDLE, INDIGO_LOG_DEBUG);
 	} else {
-		PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(name, atoi(DEVICE_BAUDRATE_ITEM->text.value), INDIGO_LOG_DEBUG);
+		PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(name, atoi(DEVICE_BAUDRATE_ITEM->text.value), INDIGO_LOG_DEBUG, error_message);
 		if (PRIVATE_DATA->handle) {
 			indigo_usleep(ONE_SECOND_DELAY);
 		}
@@ -549,16 +598,36 @@ static void focuser_timer_callback(indigo_device *device) {
 	//+ focuser.on_timer
 	if (!PRIVATE_DATA->moving && !PRIVATE_DATA->motion_uncertain) {
 		int position = 0;
-		indigo_property_state state = INDIGO_ALERT_STATE;
-		if (qhy_get_position(device, &position) && position >= 0 && position <= QHY_MAX_POSITION) {
+		bool valid = qhy_get_position(device, &position) && position >= 0 && position <= QHY_MAX_POSITION;
+		bool changed = valid && position != PRIVATE_DATA->current_position;
+		if (valid) {
 			PRIVATE_DATA->current_position = PRIVATE_DATA->target_position = PRIVATE_DATA->last_position = position;
 			// The target belongs to FOCUSER_POSITION requests, one may be copied while the position is read.
 			FOCUSER_POSITION_ITEM->number.value = position;
-			state = INDIGO_OK_STATE;
 		}
 		// A pending FOCUSER_POSITION request owns the state, its handler reads the target and publishes the result.
-		if (FOCUSER_POSITION_PROPERTY->state != INDIGO_BUSY_STATE) {
-			FOCUSER_POSITION_PROPERTY->state = state;
+		if (FOCUSER_POSITION_PROPERTY->state != INDIGO_BUSY_STATE || PRIVATE_DATA->external) {
+			if (!valid) {
+				PRIVATE_DATA->poll_failed = true;
+				PRIVATE_DATA->external = false;
+				FOCUSER_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
+			} else {
+				if (PRIVATE_DATA->poll_failed) {
+					// A good poll restores only the state a failed poll took away; a failed or aborted move stays ALERT.
+					PRIVATE_DATA->poll_failed = false;
+					FOCUSER_POSITION_PROPERTY->state = INDIGO_OK_STATE;
+				}
+				if (changed && FOCUSER_POSITION_PROPERTY->state != INDIGO_ALERT_STATE) {
+					// Motion the driver did not command (another client, running at connect): BUSY until it settles.
+					PRIVATE_DATA->external = true;
+					FOCUSER_POSITION_ITEM->number.target = position;
+					FOCUSER_POSITION_PROPERTY->state = INDIGO_BUSY_STATE;
+				} else if (!changed && PRIVATE_DATA->external) {
+					PRIVATE_DATA->external = false;
+					FOCUSER_POSITION_ITEM->number.target = position;
+					FOCUSER_POSITION_PROPERTY->state = INDIGO_OK_STATE;
+				}
+			}
 			indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
 		}
 	}
@@ -573,9 +642,13 @@ static void focuser_timer_callback(indigo_device *device) {
 			indigo_update_property(device, FOCUSER_TEMPERATURE_PROPERTY, NULL);
 			qhy_compensate(device, temperature);
 		} else {
+			// No sensor reading: IDLE, published once rather than on every poll.
+			bool changed = FOCUSER_TEMPERATURE_PROPERTY->state != INDIGO_IDLE_STATE;
 			FOCUSER_TEMPERATURE_PROPERTY->state = INDIGO_IDLE_STATE;
 			PRIVATE_DATA->temperature_valid = false;
-			indigo_update_property(device, FOCUSER_TEMPERATURE_PROPERTY, "No valid temperature reading");
+			if (changed) {
+				indigo_update_property(device, FOCUSER_TEMPERATURE_PROPERTY, "No valid temperature reading");
+			}
 		}
 	} else {
 		FOCUSER_TEMPERATURE_PROPERTY->state = INDIGO_ALERT_STATE;
@@ -589,10 +662,14 @@ static void focuser_timer_callback(indigo_device *device) {
 static void focuser_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = qhy_open(device);
+		const char *error_message = NULL;
+		connection_result = qhy_open(device, &error_message);
 		if (connection_result) {
 			//+ focuser.on_connect
-			PRIVATE_DATA->moving = PRIVATE_DATA->motion_uncertain = PRIVATE_DATA->disconnect_pending = false;
+			PRIVATE_DATA->moving = PRIVATE_DATA->motion_uncertain = PRIVATE_DATA->disconnect_pending = PRIVATE_DATA->external = PRIVATE_DATA->poll_failed = false;
+			PRIVATE_DATA->automatic = FOCUSER_MODE_AUTOMATIC_ITEM->sw.value;
+			FOCUSER_POSITION_ITEM->number.min = FOCUSER_LIMITS_MIN_POSITION_ITEM->number.value;
+			FOCUSER_POSITION_ITEM->number.max = FOCUSER_STEPS_ITEM->number.max = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value;
 			PRIVATE_DATA->temperature_valid = false;
 			PRIVATE_DATA->previous_temperature = QHY_NO_TEMPERATURE;
 			qhy_temperature_clear(device);
@@ -605,7 +682,11 @@ static void focuser_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -613,13 +694,13 @@ static void focuser_connection_handler(indigo_device *device) {
 		indigo_cancel_pending_handlers(device);
 		//+ focuser.on_disconnect
 		indigo_cancel_pending_handler(device, motion_finalizer);
-		if (PRIVATE_DATA->moving || PRIVATE_DATA->motion_uncertain) {
+		if (PRIVATE_DATA->moving || PRIVATE_DATA->motion_uncertain || PRIVATE_DATA->external) {
 			qhy_abort(device);
 			if (FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE) {
 				qhy_motion_state(device, INDIGO_ALERT_STATE);
 			}
 		}
-		PRIVATE_DATA->moving = PRIVATE_DATA->motion_uncertain = false;
+		PRIVATE_DATA->moving = PRIVATE_DATA->motion_uncertain = PRIVATE_DATA->external = false;
 		FOCUSER_ABORT_MOTION_ITEM->sw.value = false;
 		//- focuser.on_disconnect
 		// Cancelled change handlers must not leave properties BUSY: a new session starts in a clean state.
@@ -656,8 +737,28 @@ static void focuser_connection_handler(indigo_device *device) {
 static void focuser_limits_handler(indigo_device *device) {
 	FOCUSER_LIMITS_PROPERTY->state = INDIGO_OK_STATE;
 	//+ focuser.FOCUSER_LIMITS.on_change
-	FOCUSER_LIMITS_MIN_POSITION_ITEM->number.value = FOCUSER_LIMITS_MIN_POSITION_ITEM->number.target;
-	FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target;
+	int minimum = (int)FOCUSER_LIMITS_MIN_POSITION_ITEM->number.target, maximum = (int)FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target;
+	bool motion = PRIVATE_DATA->moving || PRIVATE_DATA->external || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE;
+	if (IS_CONNECTED && (motion || PRIVATE_DATA->current_position < minimum || PRIVATE_DATA->current_position > maximum)) {
+		// A limit change during motion or one that excludes the current position keeps the old limits.
+		FOCUSER_LIMITS_MIN_POSITION_ITEM->number.target = FOCUSER_LIMITS_MIN_POSITION_ITEM->number.value;
+		FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value;
+		FOCUSER_LIMITS_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else {
+		FOCUSER_LIMITS_MIN_POSITION_ITEM->number.value = minimum;
+		FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value = maximum;
+		FOCUSER_POSITION_ITEM->number.min = minimum;
+		FOCUSER_POSITION_ITEM->number.max = FOCUSER_STEPS_ITEM->number.max = maximum;
+		if (IS_CONNECTED) {
+			// The ranges change, so the motion properties are defined again.
+			indigo_delete_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+			indigo_define_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+			if (FOCUSER_MODE_MANUAL_ITEM->sw.value) {
+				indigo_delete_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+				indigo_define_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+			}
+		}
+	}
 	//- focuser.FOCUSER_LIMITS.on_change
 	indigo_update_property(device, FOCUSER_LIMITS_PROPERTY, NULL);
 }
@@ -679,8 +780,13 @@ static void focuser_speed_handler(indigo_device *device) {
 static void focuser_mode_handler(indigo_device *device) {
 	FOCUSER_MODE_PROPERTY->state = INDIGO_OK_STATE;
 	//+ focuser.FOCUSER_MODE.on_change
-	PRIVATE_DATA->previous_temperature = QHY_NO_TEMPERATURE;
-	if (FOCUSER_MODE_MANUAL_ITEM->sw.value) {
+	if (PRIVATE_DATA->moving || PRIVATE_DATA->external || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE) {
+		// A mode change during motion keeps the current mode.
+		indigo_set_switch(FOCUSER_MODE_PROPERTY, PRIVATE_DATA->automatic ? FOCUSER_MODE_AUTOMATIC_ITEM : FOCUSER_MODE_MANUAL_ITEM, true);
+		FOCUSER_MODE_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else if (FOCUSER_MODE_MANUAL_ITEM->sw.value) {
+		PRIVATE_DATA->automatic = false;
+		PRIVATE_DATA->previous_temperature = QHY_NO_TEMPERATURE;
 		indigo_define_property(device, FOCUSER_ON_POSITION_SET_PROPERTY, NULL);
 		indigo_define_property(device, FOCUSER_SPEED_PROPERTY, NULL);
 		indigo_define_property(device, FOCUSER_REVERSE_MOTION_PROPERTY, NULL);
@@ -691,6 +797,8 @@ static void focuser_mode_handler(indigo_device *device) {
 		FOCUSER_POSITION_PROPERTY->perm = INDIGO_RW_PERM;
 		indigo_define_property(device, FOCUSER_POSITION_PROPERTY, NULL);
 	} else {
+		PRIVATE_DATA->automatic = true;
+		PRIVATE_DATA->previous_temperature = QHY_NO_TEMPERATURE;
 		indigo_delete_property(device, FOCUSER_ON_POSITION_SET_PROPERTY, NULL);
 		indigo_delete_property(device, FOCUSER_SPEED_PROPERTY, NULL);
 		indigo_delete_property(device, FOCUSER_REVERSE_MOTION_PROPERTY, NULL);
@@ -708,8 +816,17 @@ static void focuser_mode_handler(indigo_device *device) {
 static void focuser_compensation_handler(indigo_device *device) {
 	FOCUSER_COMPENSATION_PROPERTY->state = INDIGO_OK_STATE;
 	//+ focuser.FOCUSER_COMPENSATION.on_change
+	bool motion = PRIVATE_DATA->moving || PRIVATE_DATA->external || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE;
 	for (int i = 0; i < FOCUSER_COMPENSATION_PROPERTY->count; i++) {
-		FOCUSER_COMPENSATION_PROPERTY->items[i].number.value = FOCUSER_COMPENSATION_PROPERTY->items[i].number.target;
+		// A compensation change during motion keeps the current values.
+		if (motion) {
+			FOCUSER_COMPENSATION_PROPERTY->items[i].number.target = FOCUSER_COMPENSATION_PROPERTY->items[i].number.value;
+		} else {
+			FOCUSER_COMPENSATION_PROPERTY->items[i].number.value = FOCUSER_COMPENSATION_PROPERTY->items[i].number.target;
+		}
+	}
+	if (motion) {
+		FOCUSER_COMPENSATION_PROPERTY->state = INDIGO_ALERT_STATE;
 	}
 	//- focuser.FOCUSER_COMPENSATION.on_change
 	indigo_update_property(device, FOCUSER_COMPENSATION_PROPERTY, NULL);
@@ -771,19 +888,25 @@ static void focuser_abort_motion_handler(indigo_device *device) {
 	//+ focuser.FOCUSER_ABORT_MOTION.on_change
 	FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
 	if (FOCUSER_ABORT_MOTION_ITEM->sw.value) {
-		bool pending = PRIVATE_DATA->moving || PRIVATE_DATA->motion_uncertain || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE;
+		bool pending = PRIVATE_DATA->moving || PRIVATE_DATA->motion_uncertain || PRIVATE_DATA->external || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE;
 		indigo_cancel_pending_handler(device, focuser_position_handler);
 		indigo_cancel_pending_handler(device, focuser_steps_handler);
 		indigo_cancel_pending_handler(device, motion_finalizer);
 		if (pending) {
 			int position = 0;
 			bool recovered = IS_CONNECTED && qhy_abort(device) && qhy_get_position(device, &position);
-			PRIVATE_DATA->moving = false;
+			bool external = PRIVATE_DATA->external;
+			PRIVATE_DATA->moving = PRIVATE_DATA->external = false;
 			PRIVATE_DATA->motion_uncertain = !recovered;
 			if (recovered) {
 				PRIVATE_DATA->current_position = PRIVATE_DATA->target_position = PRIVATE_DATA->last_position = position;
-				FOCUSER_POSITION_ITEM->number.value = FOCUSER_POSITION_ITEM->number.target = position;
-				qhy_motion_state(device, INDIGO_OK_STATE);
+				FOCUSER_POSITION_ITEM->number.value = position;
+				if (external) {
+					// Motion the driver did not command has no requested target.
+					FOCUSER_POSITION_ITEM->number.target = position;
+				}
+				// An aborted move ends ALERT at the stopped position and keeps the requested target.
+				qhy_motion_state(device, INDIGO_ALERT_STATE);
 			} else {
 				FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
 				qhy_motion_state(device, INDIGO_ALERT_STATE);

@@ -492,6 +492,42 @@ cleanup:
 	stop_external_serial_simulator(&simulator);
 }
 
+// A box that keeps reporting the old angle for a while after it accepted 1001 / 1000 (the servo has not started yet)
+// must not end the move: the frames still show the cover at the side it is leaving, and that side is not the one
+// asked for. The first result after each request has to be OK with the requested side, published once the servo
+// has reached it. The simulator holds the servo for 3 s, longer than the handler's 1 s pause plus one frame.
+static void cover_move_ends_at_the_requested_side(void) {
+	external_serial_simulator simulator = { 0 };
+	bool online = false;
+	const char *arguments[] = { "--move-start-delay", "3000", NULL };
+	SERIAL_CHECK_TRUE(start_wcv4ec(&simulator, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&wcv4ec_aux, simulator.port));
+	online = true;
+	SERIAL_CHECK_TRUE(wait_for_first_poll());
+	SERIAL_CHECK_TRUE(set_positions(80, 20));
+	SERIAL_CHECK_TRUE(wait_for_confirmed_number(AUX_SET_OPEN_CLOSE_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, 80, .01));
+	simulator_test_client.update_property = cover_watch_update;
+	static const char *sides[] = { AUX_COVER_OPEN_ITEM_NAME, AUX_COVER_CLOSE_ITEM_NAME };
+	for (int side = 0; side < 2; side++) {
+		atomic_store(&cover_results, 0);
+		atomic_store(&cover_watch_on, true);
+		SERIAL_CHECK_TRUE(set_switch(AUX_COVER_PROPERTY_NAME, sides[side], true));
+		for (int i = 0; i < 3000 && atomic_load(&cover_results) == 0; i++) {
+			indigo_usleep(10000);
+		}
+		atomic_store(&cover_watch_on, false);
+		printf("First cover result after the %s request: state %d, open %d, close %d\n", sides[side], atomic_load(&cover_first_state), atomic_load(&cover_first_open), atomic_load(&cover_first_close));
+		SERIAL_CHECK_TRUE(atomic_load(&cover_results) > 0);
+		SERIAL_CHECK_EQ_INT(INDIGO_OK_STATE, atomic_load(&cover_first_state));
+		SERIAL_CHECK_TRUE(atomic_load(&cover_first_open) == (side == 0) && atomic_load(&cover_first_close) == (side == 1));
+	}
+cleanup:
+	atomic_store(&cover_watch_on, false);
+	simulator_test_client.update_property = simulator_client_update_property;
+	if (online) { stop_serial_driver(&wcv4ec_aux); }
+	stop_external_serial_simulator(&simulator);
+}
+
 // TGT-D04: an autodetection refused because the cover is moving has to be reported on the detection property itself,
 // with the momentary trigger released, and must leave the configured angles alone.
 static void detection_refused_while_the_cover_moves(void) {
@@ -520,6 +556,37 @@ cleanup:
 	stop_external_serial_simulator(&simulator);
 }
 
+// Regression against 3.0-7, which waited for OpenSet / CloseSet without a limit: the detection can take the box longer
+// than ten status frames (here the reply comes after 15 s while the frames go on every second); it must end OK with the
+// angle taught, not ALERT "Autodetect open/close not confirmed".
+static void slow_detection_is_confirmed(void) {
+	external_serial_simulator simulator = { 0 };
+	bool online = false;
+	const char *arguments[] = { "--detect-reply-delay", "15000", NULL };
+	SERIAL_CHECK_TRUE(start_wcv4ec(&simulator, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&wcv4ec_aux, simulator.port));
+	online = true;
+	SERIAL_CHECK_TRUE(wait_for_first_poll());
+	unsigned int revision = property_revision(AUX_DETECT_OPEN_CLOSE_PROPERTY_NAME);
+	double sent = indigo_monotonic_time();
+	SERIAL_CHECK_TRUE(set_switch(AUX_DETECT_OPEN_CLOSE_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, true));
+	indigo_property_state state = INDIGO_IDLE_STATE;
+	for (int i = 0; i < 400; i++) {
+		indigo_property *property = find_cached_property(AUX_DETECT_OPEN_CLOSE_PROPERTY_NAME);
+		if (property != NULL && property_revision(AUX_DETECT_OPEN_CLOSE_PROPERTY_NAME) > revision && property->state != INDIGO_BUSY_STATE) {
+			state = property->state;
+			break;
+		}
+		indigo_usleep(100000);
+	}
+	printf("Slow detection ended with state %d after %.1f s\n", state, indigo_monotonic_time() - sent);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK_STATE, state);
+	SERIAL_CHECK_TRUE(wait_for_confirmed_number(AUX_SET_OPEN_CLOSE_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, SIMULATED_CLOSE_POSITION, .01));
+cleanup:
+	if (online) { stop_serial_driver(&wcv4ec_aux); }
+	stop_external_serial_simulator(&simulator);
+}
+
 // TGT-D04: the box confirms an autodetection with OpenSet / CloseSet between its status frames. When that reply is
 // lost the detection has to end with ALERT after a bounded wait instead of holding the device queue, so a later
 // request is still served.
@@ -533,7 +600,8 @@ static void lost_detection_reply_does_not_block_the_queue(void) {
 	SERIAL_CHECK_TRUE(wait_for_first_poll());
 	unsigned int revision = property_revision(AUX_DETECT_OPEN_CLOSE_PROPERTY_NAME);
 	SERIAL_CHECK_TRUE(set_switch(AUX_DETECT_OPEN_CLOSE_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, true));
-	SERIAL_CHECK_TRUE(wait_for_state_after(AUX_DETECT_OPEN_CLOSE_PROPERTY_NAME, INDIGO_ALERT_STATE, revision, 30));
+	// the reply is given up after the 120 s detection limit
+	SERIAL_CHECK_TRUE(wait_for_state_after(AUX_DETECT_OPEN_CLOSE_PROPERTY_NAME, INDIGO_ALERT_STATE, revision, 135));
 	assert_switch_item_value(AUX_DETECT_OPEN_CLOSE_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, false);
 	// The queue is free again: a heater request is served and the status frames are read again, showing the angle the
 	// box taught itself although its confirmation never arrived.
@@ -664,6 +732,79 @@ cleanup:
 	stop_external_serial_simulator(&simulator);
 }
 
+// The result of a request: the first state other than BUSY the property publishes after the given revision.
+static bool wait_for_result_after(const char *property_name, unsigned int revision, int seconds, indigo_property_state *state) {
+	for (int i = 0; i < seconds * 100; i++) {
+		indigo_property *property = find_cached_property(property_name);
+		if (property != NULL && property_revision(property_name) > revision && property->state != INDIGO_BUSY_STATE) {
+			*state = property->state;
+			return true;
+		}
+		indigo_usleep(10000);
+	}
+	return false;
+}
+
+// The box applies a brightness some time after the command (0.5 s here), so a light request ends with OK a second
+// after it was written, not at once.
+static void light_change_ends_a_second_later(void) {
+	external_serial_simulator simulator = { 0 };
+	bool online = false;
+	const char *arguments[] = { "--light-delay", "500", NULL };
+	indigo_property_state state = INDIGO_IDLE_STATE;
+	SERIAL_CHECK_TRUE(start_wcv4ec(&simulator, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&wcv4ec_aux, simulator.port));
+	online = true;
+	SERIAL_CHECK_TRUE(wait_for_first_poll());
+	unsigned int revision = property_revision(AUX_LIGHT_SWITCH_PROPERTY_NAME);
+	double sent = indigo_monotonic_time();
+	SERIAL_CHECK_TRUE(set_switch(AUX_LIGHT_SWITCH_PROPERTY_NAME, AUX_LIGHT_SWITCH_ON_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_result_after(AUX_LIGHT_SWITCH_PROPERTY_NAME, revision, 15, &state));
+	printf("Light on: state %d after %.1f s\n", state, indigo_monotonic_time() - sent);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK_STATE, state);
+	SERIAL_CHECK_TRUE(indigo_monotonic_time() - sent >= 0.9);
+	revision = property_revision(AUX_LIGHT_INTENSITY_PROPERTY_NAME);
+	sent = indigo_monotonic_time();
+	SERIAL_CHECK_TRUE(set_number(AUX_LIGHT_INTENSITY_PROPERTY_NAME, AUX_LIGHT_INTENSITY_ITEM_NAME, 40));
+	SERIAL_CHECK_TRUE(wait_for_result_after(AUX_LIGHT_INTENSITY_PROPERTY_NAME, revision, 15, &state));
+	printf("Light dimmed: state %d after %.1f s\n", state, indigo_monotonic_time() - sent);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK_STATE, state);
+	SERIAL_CHECK_TRUE(indigo_monotonic_time() - sent >= 0.9);
+	revision = property_revision(AUX_LIGHT_SWITCH_PROPERTY_NAME);
+	sent = indigo_monotonic_time();
+	SERIAL_CHECK_TRUE(set_switch(AUX_LIGHT_SWITCH_PROPERTY_NAME, AUX_LIGHT_SWITCH_OFF_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_result_after(AUX_LIGHT_SWITCH_PROPERTY_NAME, revision, 15, &state));
+	printf("Light off: state %d after %.1f s\n", state, indigo_monotonic_time() - sent);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK_STATE, state);
+	SERIAL_CHECK_TRUE(indigo_monotonic_time() - sent >= 0.9);
+cleanup:
+	if (online) { stop_serial_driver(&wcv4ec_aux); }
+	stop_external_serial_simulator(&simulator);
+}
+
+// Firmware older than 20240618 sends a status frame without the brightness field; the driver connects to it and
+// serves a light request the same way.
+static void light_change_without_brightness_report(void) {
+	external_serial_simulator simulator = { 0 };
+	bool online = false;
+	const char *arguments[] = { "--firmware", "20231225", NULL };
+	indigo_property_state state = INDIGO_IDLE_STATE;
+	SERIAL_CHECK_TRUE(start_wcv4ec(&simulator, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&wcv4ec_aux, simulator.port));
+	online = true;
+	SERIAL_CHECK_TRUE(wait_for_first_poll());
+	unsigned int revision = property_revision(AUX_LIGHT_SWITCH_PROPERTY_NAME);
+	double sent = indigo_monotonic_time();
+	SERIAL_CHECK_TRUE(set_switch(AUX_LIGHT_SWITCH_PROPERTY_NAME, AUX_LIGHT_SWITCH_ON_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_result_after(AUX_LIGHT_SWITCH_PROPERTY_NAME, revision, 15, &state));
+	printf("Light on without brightness report: state %d after %.1f s\n", state, indigo_monotonic_time() - sent);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK_STATE, state);
+	SERIAL_CHECK_TRUE(indigo_monotonic_time() - sent < 3);
+cleanup:
+	if (online) { stop_serial_driver(&wcv4ec_aux); }
+	stop_external_serial_simulator(&simulator);
+}
+
 static void heater_levels_are_exclusive(void) {
 	static const char *levels[] = { AUX_HEATER_LOW_ITEM_NAME, AUX_HEATER_HIGH_ITEM_NAME, AUX_HEATER_MAX_ITEM_NAME, AUX_HEATER_OFF_ITEM_NAME };
 	external_serial_simulator simulator = { 0 };
@@ -713,6 +854,50 @@ cleanup:
 	stop_external_serial_simulator(&simulator);
 }
 
+// At connect the cover switch shows the side the first status frame reports (the simulator boots closed), and a move a
+// disconnect interrupted is not followed any more, so a request sent right after the reconnect is served, not refused
+// as "Operation in progress". The open move takes 4 s at the simulated 15 degrees per second, longer than the reconnect.
+static void connect_shows_the_cover_side(void) {
+	external_serial_simulator simulator = { 0 };
+	bool online = false;
+	SERIAL_CHECK_TRUE(start_wcv4ec(&simulator, NULL));
+	SERIAL_CHECK_TRUE(start_serial_driver(&wcv4ec_aux, simulator.port));
+	online = true;
+	assert_switch_item_value(AUX_COVER_PROPERTY_NAME, AUX_COVER_CLOSE_ITEM_NAME, true);
+	assert_switch_item_value(AUX_COVER_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, false);
+	SERIAL_CHECK_TRUE(wait_for_first_poll());
+	SERIAL_CHECK_TRUE(set_positions(80, 20));
+	SERIAL_CHECK_TRUE(wait_for_confirmed_number(AUX_SET_OPEN_CLOSE_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, 80, .01));
+	SERIAL_CHECK_TRUE(set_switch(AUX_COVER_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_cover(AUX_COVER_OPEN_ITEM_NAME));
+	disconnect_serial_device(&wcv4ec_aux);
+	SERIAL_CHECK_TRUE(connect_serial_device(&wcv4ec_aux, simulator.port));
+	assert_switch_item_value(AUX_COVER_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, true);
+	assert_switch_item_value(AUX_COVER_PROPERTY_NAME, AUX_COVER_CLOSE_ITEM_NAME, false);
+	// close and disconnect while the cover moves
+	SERIAL_CHECK_TRUE(set_switch(AUX_COVER_PROPERTY_NAME, AUX_COVER_CLOSE_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_COVER_PROPERTY_NAME, INDIGO_BUSY_STATE));
+	disconnect_serial_device(&wcv4ec_aux);
+	SERIAL_CHECK_TRUE(connect_serial_device(&wcv4ec_aux, simulator.port));
+	simulator_test_client.update_property = cover_watch_update;
+	atomic_store(&cover_results, 0);
+	atomic_store(&cover_watch_on, true);
+	SERIAL_CHECK_TRUE(set_switch(AUX_COVER_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, true));
+	for (int i = 0; i < 3000 && atomic_load(&cover_results) == 0; i++) {
+		indigo_usleep(10000);
+	}
+	atomic_store(&cover_watch_on, false);
+	printf("First cover result after the reconnect: state %d, open %d, close %d\n", atomic_load(&cover_first_state), atomic_load(&cover_first_open), atomic_load(&cover_first_close));
+	SERIAL_CHECK_TRUE(atomic_load(&cover_results) > 0);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK_STATE, atomic_load(&cover_first_state));
+	SERIAL_CHECK_TRUE(atomic_load(&cover_first_open) && !atomic_load(&cover_first_close));
+cleanup:
+	atomic_store(&cover_watch_on, false);
+	simulator_test_client.update_property = simulator_client_update_property;
+	if (online) { stop_serial_driver(&wcv4ec_aux); }
+	stop_external_serial_simulator(&simulator);
+}
+
 static void repeated_disconnect_is_tolerated(void) {
 	external_serial_simulator simulator = { 0 };
 	bool online = false;
@@ -756,13 +941,18 @@ int main(void) {
 		{ "reconfiguring_the_travel_is_refused_while_the_cover_moves", reconfiguring_the_travel_is_refused_while_the_cover_moves },
 		{ "autodetect_adopts_the_current_position", autodetect_adopts_the_current_position },
 		{ "cover_request_survives_detection_end", cover_request_survives_detection_end },
+		{ "cover_move_ends_at_the_requested_side", cover_move_ends_at_the_requested_side },
 		{ "detection_refused_while_the_cover_moves", detection_refused_while_the_cover_moves },
+		{ "slow_detection_is_confirmed", slow_detection_is_confirmed },
 		{ "lost_detection_reply_does_not_block_the_queue", lost_detection_reply_does_not_block_the_queue },
 		{ "fast_detection_reply_is_not_discarded", fast_detection_reply_is_not_discarded },
 		{ "stalled_status_frame_does_not_hold_the_queue", stalled_status_frame_does_not_hold_the_queue },
 		{ "light_switches_and_dims", light_switches_and_dims },
+		{ "light_change_ends_a_second_later", light_change_ends_a_second_later },
+		{ "light_change_without_brightness_report", light_change_without_brightness_report },
 		{ "heater_levels_are_exclusive", heater_levels_are_exclusive },
 		{ "reconnect_resumes_polling", reconnect_resumes_polling },
+		{ "connect_shows_the_cover_side", connect_shows_the_cover_side },
 		{ "repeated_disconnect_is_tolerated", repeated_disconnect_is_tolerated },
 		{ "vanished_port_is_refused", vanished_port_is_refused }
 	};

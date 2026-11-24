@@ -27,6 +27,7 @@
 
 //+ include
 
+#include <limits.h>
 #include <math.h>
 #include <indigo/indigo_align.h>
 #include <indigo/indigo_mount_driver.h>
@@ -53,7 +54,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x0300002B
+#define DRIVER_VERSION       0x0300002E
 #define DRIVER_NAME          "indigo_ccd_simulator"
 #define DRIVER_LABEL         "Camera Simulator"
 #define IMAGER_CCD_DEVICE_NAME "CCD Imager Simulator"
@@ -692,10 +693,18 @@ static void create_frame(indigo_device *device) {
 		bool light_frame = CCD_FRAME_TYPE_LIGHT_ITEM->sw.value || CCD_FRAME_TYPE_FLAT_ITEM->sw.value;
 
 		if (device == PRIVATE_DATA->imager && light_frame) {
+			// a binned pixel is the mean of its bin block, as a camera binning in software does, so the stars keep their profile and the frame its range
 			for (int j = 0; j < frame_height; j++) {
 				int jj = (frame_top + j) * vertical_bin;
 				for (int i = 0; i < frame_width; i++) {
-					raw[j * frame_width + i] = indigo_ccd_simulator_raw_image[jj * IMAGER_WIDTH + (frame_left + i) * horizontal_bin];
+					int ii = (frame_left + i) * horizontal_bin;
+					unsigned sum = 0;
+					for (int bj = 0; bj < vertical_bin; bj++) {
+						for (int bi = 0; bi < horizontal_bin; bi++) {
+							sum += indigo_ccd_simulator_raw_image[(jj + bj) * IMAGER_WIDTH + ii + bi];
+						}
+					}
+					raw[j * frame_width + i] = (uint16_t)(sum / (horizontal_bin * vertical_bin));
 				}
 			}
 		} else if (device == PRIVATE_DATA->guider_camera) {
@@ -757,15 +766,16 @@ static void create_frame(indigo_device *device) {
 							continue;
 						}
 						int yw = y * frame_width;
-						double yy = center_y - y;
+						// the profile is rendered in unbinned pixels, so a binned star is the unbinned one scaled down, like the imager's mean of the bin block
+						double yy = (center_y - y) * vertical_bin;
 						for (int x = xMax - 16 / horizontal_bin; x <= xMax; x++) {
 							if (x < 0 || x >= frame_width) {
 								continue;
 							}
-						double xx = center_x - x;
-						double v = a * exp(-(xx * xx / 4 + yy * yy / 4));
-						double value = raw[yw + x] + v;
-						raw[yw + x] = value > 65535 ? 65535 : (uint16_t)value;
+							double xx = (center_x - x) * horizontal_bin;
+							double v = a * exp(-(xx * xx / 4 + yy * yy / 4));
+							double value = raw[yw + x] + v;
+							raw[yw + x] = value > 65535 ? 65535 : (uint16_t)value;
 						}
 					}
 				}
@@ -844,7 +854,7 @@ static void create_frame(indigo_device *device) {
 		for (int i = 0; i <= IMAGE_HOTPIXELS_ITEM->number.target; i++) {
 			int x = PRIVATE_DATA->hotpixel_x[i] / horizontal_bin - frame_left;
 			int y = PRIVATE_DATA->hotpixel_y[i] / vertical_bin - frame_top;
-			if (x < 0 || x >= frame_width || y < 0 || y > frame_height) {
+			if (x < 0 || x >= frame_width || y < 0 || y >= frame_height) {
 				continue;
 			}
 			if (i) {
@@ -977,14 +987,15 @@ static bool open_file_image(indigo_device *device) {
 		return false;
 	}
 	indigo_raw_header header = { 0 };
-	bool result = indigo_uni_read(handle, (char *)&header, sizeof(header));
+	// indigo_uni_read() returns the count read before the end of the file, only the full count is a complete header or image.
+	bool result = indigo_uni_read(handle, (char *)&header, sizeof(header)) == (long)sizeof(header);
 	int bytes = header.signature == INDIGO_RAW_MONO8 ? 1 : header.signature == INDIGO_RAW_MONO16 ? 2 : header.signature == INDIGO_RAW_RGB24 ? 3 : header.signature == INDIGO_RAW_RGB48 ? 6 : 0;
 	bool valid_size = bytes > 0 && header.width > 0 && header.height > 0 && (size_t)header.width <= SIZE_MAX / (size_t)header.height / (size_t)bytes;
 	size_t size = valid_size ? (size_t)header.width * (size_t)header.height * (size_t)bytes : 0;
-	char *raw_image = result && size > 0 && size <= SIZE_MAX - FITS_HEADER_SIZE ? indigo_alloc_blob_buffer(size + FITS_HEADER_SIZE) : NULL;
+	char *raw_image = result && size > 0 && size <= LONG_MAX && size <= SIZE_MAX - FITS_HEADER_SIZE ? indigo_alloc_blob_buffer(size + FITS_HEADER_SIZE) : NULL;
 	char *image = raw_image != NULL ? indigo_alloc_blob_buffer(size + FITS_HEADER_SIZE) : NULL;
 	if (raw_image != NULL && image != NULL) {
-		result = indigo_uni_read(handle, raw_image + FITS_HEADER_SIZE, size);
+		result = indigo_uni_read(handle, raw_image + FITS_HEADER_SIZE, (long)size) == (long)size;
 	}
 	indigo_uni_close(&handle);
 	if (!result || raw_image == NULL || image == NULL) {

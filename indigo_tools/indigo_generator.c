@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <libgen.h>
 #include <limits.h>
+#include <stdint.h>
 
 #pragma mark - typedefs
 
@@ -88,9 +89,9 @@ typedef struct hid_type {
 } hid_type;
 
 typedef struct sdk_type {
-	bool hotplug;
+	bool hotplug, usb;
 	char pid[128],vid[128], discovery_retries[128];
-	code_type *plug, *unplug, *unplug_match;
+	code_type *plug, *unplug, *unplug_match, *discover;
 } sdk_type;
 
 typedef struct pattern_type {
@@ -133,15 +134,77 @@ property_type *property = NULL;
 definition_type *defs = NULL;
 code_type *todos = NULL;
 driver_type driver;
+
+static bool sdk_without_usb(void) {
+	return driver.sdk && !driver.sdk->usb;
+}
+
 int indentation = 0;
 int line = 1, column = 1;
 
 #pragma mark - helpers
 
-void *allocate(int size) {
+static void resource_error(const char *operation) {
+	fprintf(stderr, "Generator resource failure: %s%s%s\n", operation, errno ? ": " : "", errno ? strerror(errno) : "");
+	exit(EXIT_FAILURE);
+}
+
+void *allocate(size_t size) {
 	void *result = malloc(size);
+	if (result == NULL) {
+		resource_error("allocation");
+	}
 	memset(result, 0, size);
 	return result;
+}
+
+static void *resize_buffer(void *old, size_t size) {
+	void *replacement = realloc(old, size);
+	if (replacement == NULL) {
+		resource_error("buffer growth");
+	}
+	return replacement;
+}
+
+static FILE *generated_output;
+
+static FILE *output_stream(void) {
+	return generated_output != NULL ? generated_output : stdout;
+}
+
+static void finish_output(void) {
+	FILE *output = output_stream();
+	if (ferror(output) || fflush(output) != 0) {
+		resource_error("writing output");
+	}
+}
+
+static void redirect_stream(const char *path, const char *mode, FILE *stream) {
+	if (stream == stdout) {
+		if (generated_output != NULL) {
+			finish_output();
+			if (fclose(generated_output) != 0) {
+				resource_error("closing output");
+			}
+		}
+		generated_output = fopen(path, mode);
+		if (generated_output == NULL) {
+			resource_error(path);
+		}
+	} else if (freopen(path, mode, stream) == NULL) {
+		resource_error(path);
+	}
+}
+
+static void checked_path(char *path, size_t capacity, const char *format, ...) {
+	va_list args;
+	va_start(args, format);
+	int length = vsnprintf(path, capacity, format, args);
+	va_end(args);
+	if (length < 0 || (size_t)length >= capacity) {
+		errno = ENAMETOOLONG;
+		resource_error("file path");
+	}
 }
 
 void make_upper_case(char *name) {
@@ -376,11 +439,11 @@ bool get_token(void) {
 				FORWARD(1);
 				last_token = TOKEN_STRING;
 				return true;
-			} else if (strncmp(current, "true", 4) == 0) {
+			} else if (strncmp(current, "true", 4) == 0 && !isalnum((unsigned char)current[4]) && current[4] != '_') {
 				FORWARD(4);
 				last_token = TOKEN_TRUE;
 				return true;
-			} else if (strncmp(current, "false", 5) == 0) {
+			} else if (strncmp(current, "false", 5) == 0 && !isalnum((unsigned char)current[5]) && current[5] != '_') {
 				FORWARD(5);
 				last_token = TOKEN_FALSE;
 				return true;
@@ -402,6 +465,9 @@ bool get_token(void) {
 				end = current;
 				last_token = TOKEN_NUMBER;
 				return true;
+			} else {
+				report_error("Unsupported byte 0x%02X", (unsigned char)*current);
+				return false;
 			}
 		}
 	}
@@ -418,7 +484,7 @@ bool match(token_type token, char *value) {
 		return false;
 	}
 	if (value != NULL) {
-		bool result = strncmp(value, begin, strlen(value)) == 0;
+		bool result = (size_t)(end - begin) == strlen(value) && strncmp(value, begin, strlen(value)) == 0;
 		if (result) {
 			last_token = TOKEN_NONE;
 		}
@@ -998,6 +1064,7 @@ bool parse_sdk_block(driver_type *driver) {
 	}
 	sdk_type *sdk = allocate(sizeof(sdk_type));
 	sdk->hotplug = true;
+	sdk->usb = true;
 	if (match(TOKEN_LBRACE, NULL)) {
 		debug(0, "{");
 		while (!match(TOKEN_RBRACE, NULL)) {
@@ -1005,6 +1072,12 @@ bool parse_sdk_block(driver_type *driver) {
 				continue;
 			}
 			if (parse_bool_attribute("hotplug", &sdk->hotplug)) {
+				continue;
+			}
+			if (parse_bool_attribute("usb", &sdk->usb)) {
+				continue;
+			}
+			if (parse_code_block("discover", &sdk->discover)) {
 				continue;
 			}
 			if (parse_expression_attribute("pid", sdk->pid, sizeof(sdk->pid))) {
@@ -1031,6 +1104,19 @@ bool parse_sdk_block(driver_type *driver) {
 	} else {
 		report_error("Missing '{'");
 		return false;
+	}
+	if (!sdk->usb) {
+		// Devices an SDK enumerates by itself, with no USB device behind them (CSI cameras, for
+		// example): the discover block replaces the USB inventory and passes an SDK handle to
+		// the plug handler. Hot-plug, USB filtering and retries depend on libusb events.
+		if (sdk->hotplug || *sdk->vid || *sdk->pid || *sdk->discovery_retries || sdk->discover == NULL) {
+			// A false return from a block parser only means "not this block" to parse_driver_block().
+			report_error("'usb = false' requires 'hotplug = false', a 'discover' block and no vid, pid or discovery_retries");
+			exit(1);
+		}
+	} else if (sdk->discover) {
+		report_error("'discover' requires 'usb = false'");
+		exit(1);
 	}
 	driver->sdk = sdk;
 	return true;
@@ -1208,16 +1294,23 @@ bool parse_driver_block(void) {
 #pragma mark - code generator
 
 void read_definition_source(void) {
-	int max_size = 16 * 1024;
+	size_t max_size = 16 * 1024;
 	current = definition_source = allocate(max_size);
 	int c;
 	while ((c = getchar()) != -1) {
 		*current++ = c;
-		long size = current - definition_source;
+		size_t size = (size_t)(current - definition_source);
 		if (size == max_size - 1) {
-			definition_source = realloc(definition_source, max_size *= 2);
+			if (max_size > INT_MAX / 2) {
+				resource_error("definition is too large");
+			}
+			max_size *= 2;
+			definition_source = resize_buffer(definition_source, max_size);
 			current = definition_source + size;
 		}
+	}
+	if (ferror(stdin)) {
+		resource_error("reading definition");
 	}
 	*current = 0;
 	current = definition_source;
@@ -1232,8 +1325,8 @@ void write_line(const char *format, ...) {
 	}
 	va_list args;
 	va_start(args, format);
-	vprintf(format, args);
-	putchar('\n');
+	vfprintf(output_stream(), format, args);
+	fputc('\n', output_stream());
 	va_end(args);
 	empty_line = *format == 0;
 }
@@ -1304,7 +1397,7 @@ void write_code_block(code_type *code, int indentation) {
 					while (*pnt && *pnt != ' ' && *pnt != '\t' && *pnt != '\n') {
 						pnt++;
 					}
-					printf("#define %-20.*s ", (int)(pnt - name), name);
+					fprintf(output_stream(), "#define %-20.*s ", (int)(pnt - name), name);
 					while (*pnt && (*pnt == ' ' || *pnt == '\t')) {
 						pnt++;
 					}
@@ -1317,23 +1410,23 @@ void write_code_block(code_type *code, int indentation) {
 				}
 			} else {
 				for (int i = 0; i < indentation; i++) {
-					putchar('\t');
+					fputc('\t', output_stream());
 				}
 			}
 			if (c) {
-				putchar(c);
+				fputc(c, output_stream());
 			}
 			while (pnt - text < size) {
-				putchar(c = *pnt++);
+				fputc(c = *pnt++, output_stream());
 				if (c == '\n') {
 					break;
 				}
 			}
 		} else {
-			putchar(c);
+			fputc(c, output_stream());
 		}
 	}
-	putchar('\n');
+	fputc('\n', output_stream());
 }
 
 void write_c_code_blocks(code_type *code, int indentation, char *format, ...) {
@@ -1554,6 +1647,9 @@ void write_c_private_data_section(void) {
 	if (driver.serial || driver.hid) {
 		write_line("\tindigo_uni_handle *handle;");
 		some_content = true;
+	} else if (sdk_without_usb()) {
+		write_line("\tvoid *sdkdev;");
+		some_content = true;
 	} else if (driver.libusb || driver.sdk) {
 		write_line("\tlibusb_device *usbdev;");
 		some_content = true;
@@ -1685,20 +1781,16 @@ void write_c_connection_change_handler(device_type *device) {
 		}
 	} else {
 		write_line("\t\tbool connection_result = true;");
+		const char *open_arguments = is_master_device ? "device" : "device->master_device";
+		if (driver.serial) {
+			write_line("\t\tconst char *error_message = NULL;");
+		}
 		if (is_multi_device) {
 			write_line("\t\tif (PRIVATE_DATA->count == 0) {");
-			if (is_master_device) {
-				write_line("\t\t\tconnection_result = %s_open(device);", driver.name);
-			} else {
-				write_line("\t\t\tconnection_result = %s_open(device->master_device);", driver.name);
-			}
+			write_line("\t\t\tconnection_result = %s_open(%s%s);", driver.name, open_arguments, driver.serial ? ", &error_message" : "");
 			write_line("\t\t}");
 		} else {
-			if (is_master_device) {
-				write_line("\t\tconnection_result = %s_open(device);", driver.name);
-			} else {
-				write_line("\t\tconnection_result = %s_open(device->master_device);", driver.name);
-			}
+			write_line("\t\tconnection_result = %s_open(%s%s);", driver.name, open_arguments, driver.serial ? ", &error_message" : "");
 		}
 		if (is_multi_device) {
 			write_line("\t\tif (connection_result) {");
@@ -1724,7 +1816,11 @@ void write_c_connection_change_handler(device_type *device) {
 		}
 		write_line("\t\t} else {");
 		if (driver.serial) {
-			write_line("\t\t\tindigo_send_message(device, ALERT_PROPERTY, \"Failed to connect to %%s on %%s\", %s, DEVICE_PORT_ITEM->text.value);", device->handle);
+			write_line("\t\t\tif (error_message != NULL) {");
+			write_line("\t\t\t\tindigo_send_message(device, ALERT_PROPERTY, \"Failed to connect to %%s on %%s (%%s)\", %s, DEVICE_PORT_ITEM->text.value, error_message);", device->handle);
+			write_line("\t\t\t} else {");
+			write_line("\t\t\t\tindigo_send_message(device, ALERT_PROPERTY, \"Failed to connect to %%s on %%s\", %s, DEVICE_PORT_ITEM->text.value);", device->handle);
+			write_line("\t\t\t}");
 		} else {
 			write_line("\t\t\tindigo_send_message(device, ALERT_PROPERTY, \"Failed to connect to %%s\", device->name);");
 		}
@@ -1791,8 +1887,13 @@ void write_c_property_change_handler(device_type *device, property_type *propert
 	// flips when the park request is copied, so re-reading it here keeps the axes still.
 	if (!strcmp(property->id, "MOUNT_EQUATORIAL_COORDINATES") || !strcmp(property->id, "MOUNT_MOTION_DEC") || !strcmp(property->id, "MOUNT_MOTION_RA") || !strcmp(property->id, "MOUNT_TRACKING")) {
 		write_line("\tif (!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value) {");
-		write_line("\t\tindigo_send_message(device, %s, \"Mount is parked!\");", property->handle);
-		write_line("\t\tINDIGO_UPDATE_PROPERTY_STATE(%s, INDIGO_ALERT_STATE, NULL);", property->handle);
+		if (!strcmp(property->id, "MOUNT_EQUATORIAL_COORDINATES")) {
+			// the refusal of the admitted request is kept, the next poll must not publish it as success
+			write_line("\t\tindigo_reject_coordinates_change(device, \"Mount is parked!\");");
+		} else {
+			write_line("\t\tindigo_send_message(device, %s, \"Mount is parked!\");", property->handle);
+			write_line("\t\tINDIGO_UPDATE_PROPERTY_STATE(%s, INDIGO_ALERT_STATE, NULL);", property->handle);
+		}
 		if (commits_motion) {
 			write_line("\t\tindigo_mount_commit_motion_client(device, %s);", property->handle);
 		}
@@ -1800,7 +1901,9 @@ void write_c_property_change_handler(device_type *device, property_type *propert
 		write_line("\t}");
 	}
 	bool has_finalizer = property->on_change != NULL && memmem(property->on_change->text, property->on_change->size, "_finalizer", sizeof "_finalizer" - 1);
-	if (!has_finalizer && !c_code_starts_with(property->on_change, "%s->state = ", property->handle)) {
+	// The coordinates stay BUSY from the admission of the request until on_change sets its result: the admission refuses
+	// a request while they are BUSY, so an OK written here would let a second request in while this one is handled.
+	if (!has_finalizer && !c_code_starts_with(property->on_change, "%s->state = ", property->handle) && strcmp(property->id, "MOUNT_EQUATORIAL_COORDINATES")) {
 		write_line("\t%s->state = INDIGO_OK_STATE;", property->handle);
 	}
 	write_c_code_blocks(property->on_change, 1, "%s.%s.on_change", device->id, property->id);
@@ -1998,11 +2101,20 @@ void write_c_change_property(device_type *device) {
 				// property; a refused request must leave the driver's own state untouched. The
 				// handler keeps its own copy of the check for a request admitted just before a
 				// park request was accepted.
+				bool coordinates = !strcmp(property->id, "MOUNT_EQUATORIAL_COORDINATES");
 				if (!strcmp(property->id, "MOUNT_EQUATORIAL_COORDINATES") || !strcmp(property->id, "MOUNT_MOTION_DEC") || !strcmp(property->id, "MOUNT_MOTION_RA") || !strcmp(property->id, "MOUNT_TRACKING")) {
-					write_line("\t\tINDIGO_REJECT_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, %s, \"Mount is parked!\");", property->handle);
+					if (coordinates) {
+						write_line("\t\tINDIGO_REJECT_COORDINATES_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, \"Mount is parked!\");");
+					} else {
+						write_line("\t\tINDIGO_REJECT_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, %s, \"Mount is parked!\");", property->handle);
+					}
 				}
 				for (reject_type *reject = property->rejects; reject; reject = reject->next) {
-					write_line("\t\tINDIGO_REJECT_CHANGE_IF(%s, %s, \"%s\");", reject->condition, property->handle, reject->message);
+					if (coordinates) {
+						write_line("\t\tINDIGO_REJECT_COORDINATES_CHANGE_IF(%s, \"%s\");", reject->condition, reject->message);
+					} else {
+						write_line("\t\tINDIGO_REJECT_CHANGE_IF(%s, %s, \"%s\");", reject->condition, property->handle, reject->message);
+					}
 				}
 				write_c_code_blocks(property->on_change_request, 2, "%s.%s.on_change_request", device->id, property->id);
 				// Manual motion runs until the client releases it. The client of an admitted request is
@@ -2021,6 +2133,10 @@ void write_c_change_property(device_type *device) {
 				} else if (property->asynchronous_change) {
 						if (!strcmp(property->id, "CCD_ABORT_EXPOSURE") || !strcmp(property->id, "FOCUSER_ABORT_MOTION") || !strcmp(property->id, "ROTATOR_ABORT_MOTION") || !strcmp(property->id, "MOUNT_ABORT_MOTION") || !strcmp(property->id, "DOME_ABORT_MOTION") || !strcmp(property->id, "POLARALIGN_ABORT_MOTION")) {
 							write_line("\t\tINDIGO_COPY_VALUES_PROCESS_URGENT_CHANGE(%s, %s);", property->handle, property->handler);
+						} else if (!strcmp(property->id, "MOUNT_EQUATORIAL_COORDINATES")) {
+							// The BUSY of the request is published through indigo_update_coordinates() like every other
+							// publication of the equatorial coordinates, so the mount base class sees it.
+							write_line("\t\tINDIGO_COPY_%s_PROCESS_COORDINATES_CHANGE(%s);", property->preserve_values ? "TARGETS" : "VALUES", property->handler);
 						} else if (property->preserve_values) {
 							write_line("\t\tINDIGO_COPY_TARGETS_PROCESS_CHANGE(%s, %s);", property->handle, property->handler);
 						} else if (!strncmp(property->id, "MOUNT_MOTION", 12)) {
@@ -2206,7 +2322,11 @@ void write_c_hotplug_section(void) {
 	}
 	write_line("static void process_plug_event_handler(indigo_device *device, void *data) {");
 	write_line("\tindigo_set_handler_max_run_time(1);");
-	write_line("\tlibusb_device *dev = (libusb_device *)data;");
+	if (sdk_without_usb()) {
+		write_line("\tvoid *dev = data;");
+	} else {
+		write_line("\tlibusb_device *dev = (libusb_device *)data;");
+	}
 	if (driver.sdk && driver.sdk->hotplug && *driver.sdk->discovery_retries) {
 		write_line("\tif (sdk_discovery_stopping) {");
 		write_line("\t\tlibusb_unref_device(dev);");
@@ -2265,19 +2385,23 @@ void write_c_hotplug_section(void) {
 			write_line("\tbool plug_result = true;");
 			write_line("\tchar name[INDIGO_NAME_SIZE] = DRIVER_LABEL;");
 			write_line("\tprivate_data = (%s_private_data *)indigo_safe_malloc(sizeof(%s_private_data));", driver.name, driver.name);
-			write_line("\tprivate_data->usbdev = dev;");
-			write_line("\tstruct libusb_device_descriptor descriptor;");
-			if (*driver.sdk->vid && *driver.sdk->pid) {
-				write_line("\tif (!(libusb_get_device_descriptor(dev, &descriptor) == LIBUSB_SUCCESS && descriptor.idVendor == %s && descriptor.idProduct == %s)) {", driver.sdk->vid, driver.sdk->pid);
-			} else if (*driver.sdk->vid) {
-				write_line("\tif (!(libusb_get_device_descriptor(dev, &descriptor) == LIBUSB_SUCCESS && descriptor.idVendor == %s)) {", driver.sdk->vid);
-			} else if (*driver.sdk->pid) {
-				write_line("\tif (!(libusb_get_device_descriptor(dev, &descriptor) == LIBUSB_SUCCESS && descriptor.idProduct == %s)) {", driver.sdk->pid);
+			if (sdk_without_usb()) {
+				write_line("\tprivate_data->sdkdev = dev;");
 			} else {
-				write_line("\tif (libusb_get_device_descriptor(dev, &descriptor) != LIBUSB_SUCCESS) {");
+				write_line("\tprivate_data->usbdev = dev;");
+				write_line("\tstruct libusb_device_descriptor descriptor;");
+				if (*driver.sdk->vid && *driver.sdk->pid) {
+					write_line("\tif (!(libusb_get_device_descriptor(dev, &descriptor) == LIBUSB_SUCCESS && descriptor.idVendor == %s && descriptor.idProduct == %s)) {", driver.sdk->vid, driver.sdk->pid);
+				} else if (*driver.sdk->vid) {
+					write_line("\tif (!(libusb_get_device_descriptor(dev, &descriptor) == LIBUSB_SUCCESS && descriptor.idVendor == %s)) {", driver.sdk->vid);
+				} else if (*driver.sdk->pid) {
+					write_line("\tif (!(libusb_get_device_descriptor(dev, &descriptor) == LIBUSB_SUCCESS && descriptor.idProduct == %s)) {", driver.sdk->pid);
+				} else {
+					write_line("\tif (libusb_get_device_descriptor(dev, &descriptor) != LIBUSB_SUCCESS) {");
+				}
+				write_line("\t\tplug_result = false;");
+				write_line("\t}");
 			}
-			write_line("\t\tplug_result = false;");
-			write_line("\t}");
 			if (*driver.sdk->discovery_retries) {
 				write_line("\tbool discovery_eligible = plug_result;");
 			}
@@ -2350,7 +2474,9 @@ void write_c_hotplug_section(void) {
 		}
 		write_line("\tif (!dev_ref_transferred) {");
 		write_line("\t\tindigo_safe_free(private_data);");
-		write_line("\t\tlibusb_unref_device(dev);");
+		if (!sdk_without_usb()) {
+			write_line("\t\tlibusb_unref_device(dev);");
+		}
 		write_line("\t}");
 	} else {
 		write_line("\tlibusb_unref_device(dev);");
@@ -2358,7 +2484,11 @@ void write_c_hotplug_section(void) {
 	write_line("}");
 	write_line("");
 	write_line("static void process_unplug_event_handler(indigo_device *device, void *data) {");
-	write_line("\tlibusb_device *dev = (libusb_device *)data;");
+	if (sdk_without_usb()) {
+		write_line("\tvoid *dev = data;");
+	} else {
+		write_line("\tlibusb_device *dev = (libusb_device *)data;");
+	}
 	if (driver.sdk && driver.sdk->hotplug && *driver.sdk->discovery_retries) {
 		write_line("\tupdate_sdk_discovery_retry(dev, false);");
 	}
@@ -2386,7 +2516,7 @@ void write_c_hotplug_section(void) {
 			write_line("\t\t\t}");
 			write_line("\t\t\tif (unplug_result) {");
 		} else {
-			write_line("\t\t\tif (PRIVATE_DATA->usbdev == dev) {");
+			write_line("\t\t\tif (PRIVATE_DATA->%s == dev) {", sdk_without_usb() ? "sdkdev" : "usbdev");
 		}
 		write_line("\t\t\t\tprivate_data = PRIVATE_DATA;");
 		if (driver.sdk) {
@@ -2417,7 +2547,9 @@ void write_c_hotplug_section(void) {
 			write_line("\t}");
 		} else {
 			write_line("\tif (private_data != NULL) {");
-			write_line("\t\tlibusb_unref_device(dev);");
+			if (!sdk_without_usb()) {
+				write_line("\t\tlibusb_unref_device(dev);");
+			}
 			write_line("\t\tindigo_safe_free(private_data);");
 			write_line("\t}");
 		}
@@ -2440,12 +2572,17 @@ void write_c_hotplug_section(void) {
 		write_line("\tif (dev != NULL) {");
 		write_line("\t\tlibusb_unref_device(dev);");
 		write_line("\t}");
-	} else {
+	} else if (!sdk_without_usb()) {
 		write_line("\tlibusb_unref_device(dev);");
 	}
 	write_line("}");
 	write_line("");
-	if (driver.sdk && !driver.sdk->hotplug) {
+	if (sdk_without_usb()) {
+		write_line("static void discover_devices_handler(indigo_device *device) {");
+		write_c_code_blocks(driver.sdk->discover, 1, "sdk.discover");
+		write_line("}");
+		write_line("");
+	} else if (driver.sdk && !driver.sdk->hotplug) {
 		write_line("static void discover_devices_handler(indigo_device *device) {");
 		write_line("\tlibusb_device **list = NULL;");
 		write_line("\tssize_t count = libusb_get_device_list(NULL, &list);");
@@ -2600,7 +2737,9 @@ void write_c_main_section(void) {
 		write_line("\t\t\t\treturn INDIGO_FAILED;");
 		write_line("\t\t\t}");
 		write_line("\t\t\tindigo_queue_set_name(driver_queue, \"Queue \" DRIVER_LABEL);");
-		write_line("\t\t\tindigo_start_usb_event_handler();");
+		if (driver.sdk->usb) {
+			write_line("\t\t\tindigo_start_usb_event_handler();");
+		}
 		if (driver.sdk->hotplug) {
 				write_line("\t\t\tint rc = libusb_hotplug_register_callback(NULL, (libusb_hotplug_event)(LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED | LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT), LIBUSB_HOTPLUG_ENUMERATE, %s, %s, LIBUSB_HOTPLUG_MATCH_ANY, hotplug_callback, NULL, &callback_handle);", *driver.sdk->vid ? driver.sdk->vid : "LIBUSB_HOTPLUG_MATCH_ANY", *driver.sdk->pid ? driver.sdk->pid : "LIBUSB_HOTPLUG_MATCH_ANY");
 			write_line("\t\t\tINDIGO_DRIVER_DEBUG(DRIVER_NAME, \"libusb_hotplug_register_callback ->  %%s\", rc < 0 ? libusb_error_name(rc) : \"OK\");");
@@ -2675,7 +2814,11 @@ void write_c_main_section(void) {
 			write_line("\t\t\tfor (int i = 0; i < MAX_DEVICES; i++) {");
 			write_line("\t\t\t\tif (devices[i] != NULL) {");
 			write_line("\t\t\t\t\tindigo_device *device = devices[i];");
-			write_line("\t\t\t\t\tprocess_unplug_event_handler(NULL, libusb_ref_device(PRIVATE_DATA->usbdev));");
+			if (sdk_without_usb()) {
+				write_line("\t\t\t\t\tprocess_unplug_event_handler(NULL, PRIVATE_DATA->sdkdev);");
+			} else {
+				write_line("\t\t\t\t\tprocess_unplug_event_handler(NULL, libusb_ref_device(PRIVATE_DATA->usbdev));");
+			}
 			write_line("\t\t\t\t}");
 			write_line("\t\t\t}");
 		} else {
@@ -2804,7 +2947,7 @@ void parse_base_code(void) {
 	for (device_type *device = driver.devices; device; device = device->next) {
 		char path[PATH_MAX];
 		debug(0, "Searching for hidden properties %s", device->type);
-		snprintf(path, sizeof(path), "../../indigo_libs/indigo_%s_driver.c", device->type);
+		checked_path(path, sizeof(path), "../../indigo_libs/indigo_%s_driver.c", device->type);
 		FILE *f = fopen(path, "r");
 		if (f) {
 			char line[1024];
@@ -2820,7 +2963,10 @@ void parse_base_code(void) {
 					}
 				}
 			}
-			fclose(f);
+			bool read_ok = !ferror(f);
+			if (fclose(f) != 0 || !read_ok) {
+				resource_error("reading base driver");
+			}
 		}
 	}
 }
@@ -2844,7 +2990,8 @@ void read_c_source(void) {
 		if (strncmp(line, "// ", 3) == 0 || strncmp(line, "//\n", 3) == 0) {
 			if (strncmp(line, "// TODO:", 8) == 0) {
 				code_type *todo = allocate(sizeof(code_type));
-				todo->text = strdup(line);
+				todo->text = allocate(strlen(line) + 1);
+				strcpy(todo->text, line);
 				append((void **)&todos, todo);
 			}
 			if (sscanf(line, "// device_id: %127s type: %127s", s1, s2) == 2) {
@@ -2868,7 +3015,7 @@ void read_c_source(void) {
 			code_type *code = allocate(sizeof(code_type));
 			int current_length = 0;
 			int current_size = 1024;
-			code->text = malloc(current_size);
+			code->text = allocate(current_size);
 			while (fgets(line, sizeof(line), stdin)) {
 				if (strstr(line, "//-")) {
 					break;
@@ -2877,8 +3024,12 @@ void read_c_source(void) {
 				if (line_length == 1 && current_length == 0) {
 					continue;
 				}
-				if (current_length + line_length >= current_size) {
-					code->text = realloc(code->text, current_size += 1024);
+				if (line_length >= current_size - current_length) {
+					if (current_size > INT_MAX - 1024) {
+						resource_error("source block is too large");
+					}
+					current_size += 1024;
+					code->text = resize_buffer(code->text, current_size);
 				}
 				strcpy(code->text + current_length, line);
 				current_length += line_length;
@@ -3517,10 +3668,15 @@ int main(int argc, char **argv) {
 		fprintf(stderr, "indigo_generator [-h|--help] [-v|--verbose] [-c|--create] definition_file\n");
 		return 1;
 	}
-	definition_source_basename = basename(definition_file);
-	definition_source_dirname = dirname(definition_file);
+	char definition_path[PATH_MAX], basename_path[PATH_MAX], dirname_path[PATH_MAX];
+	checked_path(definition_path, sizeof(definition_path), "%s", definition_file);
+	checked_path(basename_path, sizeof(basename_path), "%s", definition_path);
+	checked_path(dirname_path, sizeof(dirname_path), "%s", definition_path);
+	definition_file = definition_path;
+	definition_source_basename = basename(basename_path);
+	definition_source_dirname = dirname(dirname_path);
 	if (!create && access(definition_file, F_OK) == 0) {
-		freopen(definition_file, "r", stdin);
+		redirect_stream(definition_file, "r", stdin);
 		fprintf(stderr, "Reading %s ...\n", definition_source_basename);
 		read_definition_source();
 		debug(0, "Parsing ...\n\n");
@@ -3531,27 +3687,31 @@ int main(int argc, char **argv) {
 		parse_base_code();
 		if (driver.devices) {
 			char file_name[PATH_MAX];
-			snprintf(file_name, sizeof(file_name), "%s/indigo_%s_%s.h", definition_source_dirname, driver.devices->type, driver.name);
+			checked_path(file_name, sizeof(file_name), "%s/indigo_%s_%s.h", definition_source_dirname, driver.devices->type, driver.name);
 			fprintf(stderr, "Writing %s ...\n", file_name);
-			freopen(file_name, "w", stdout);
+			redirect_stream(file_name, "w", stdout);
 			write_h_source();
-			snprintf(file_name, sizeof(file_name), "%s/indigo_%s_%s_main.c", definition_source_dirname, driver.devices->type, driver.name);
+			checked_path(file_name, sizeof(file_name), "%s/indigo_%s_%s_main.c", definition_source_dirname, driver.devices->type, driver.name);
 			fprintf(stderr, "Writing %s ...\n", file_name);
-			freopen(file_name, "w", stdout);
+			redirect_stream(file_name, "w", stdout);
 			write_c_main_source();
-			snprintf(file_name, sizeof(file_name), "%s/indigo_%s_%s.%s", definition_source_dirname, driver.devices->type, driver.name, driver.cpp ? "cpp" : "c");
+			checked_path(file_name, sizeof(file_name), "%s/indigo_%s_%s.%s", definition_source_dirname, driver.devices->type, driver.name, driver.cpp ? "cpp" : "c");
 			fprintf(stderr, "Writing %s ...\n", file_name);
-			freopen(file_name, "w", stdout);
+			redirect_stream(file_name, "w", stdout);
 			write_c_source();
 		}
 	} else {
 		debug(0, "Creating %s", definition_source_basename);
 		char source_file[PATH_MAX];
-		strcpy(source_file, definition_file);
+		checked_path(source_file, sizeof(source_file), "%s", definition_file);
 		char *ext = strrchr(source_file, '.');
 		if (ext == NULL) {
 			report_error("No extension in definition file name");
 			return 1;
+		}
+		if ((size_t)(ext - source_file) > sizeof(source_file) - sizeof(".cpp")) {
+			errno = ENAMETOOLONG;
+			resource_error("source path");
 		}
 		strcpy(ext, ".c");
 		if (access(source_file, F_OK) != 0) {
@@ -3562,9 +3722,17 @@ int main(int argc, char **argv) {
 			}
 		}
 		driver.cpp = strcmp(ext, ".cpp") == 0;
-		freopen(source_file, "r", stdin);
-		freopen(definition_file, "w", stdout);
+		redirect_stream(source_file, "r", stdin);
+		redirect_stream(definition_file, "w", stdout);
 		read_c_source();
+		if (ferror(stdin)) {
+			resource_error("reading source");
+		}
 		write_definition_source();
 	}
+	finish_output();
+	if (generated_output != NULL && fclose(generated_output) != 0) {
+		resource_error("closing output");
+	}
+	return 0;
 }

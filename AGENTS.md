@@ -1,9 +1,197 @@
+# AI Factory 2
+
+This file is the bootstrap and usage guide for the coordinating agent. It is
+not a rule source and must not define or restate rules; it points to the rule
+files instead.
+
+Rules are maintained in `.factory2/rules.json` (Factory rules) and
+`.factory2/project-rules.json`, including nested
+`DIRECTORY/.factory2/project-rules.json` files (project-owned rules). Read
+them there, or through `config show`. The worker brief printed by `flow brief`
+already contains the effective rule text for the files a ticket changes.
+
+The flow and command references mentioned below (`docs/flow.md`,
+`docs/cli.md`) are part of the Factory development repository and are not
+installed in this project; here every command explains itself with `--help`.
+The INDIGO conventions that are still kept in this file follow the Factory
+guide under [INDIGO repository rules](#indigo-repository-rules).
+
+## Commands
+
+`.factory2/factory.py` is the entry point. Run it from the project root:
+
+```sh
+python3 ".factory2/factory.py" ticket list
+python3 ".factory2/factory.py" ticket create --title "..." --description "..." [--priority P] [--severity S] [--profile NAME]
+python3 ".factory2/factory.py" ticket confirm TICKET_ID [--priority P] [--severity S] [--profile NAME]
+python3 ".factory2/factory.py" flow start TICKET_ID
+python3 ".factory2/factory.py" flow check TICKET_ID [--check NAME ... | --command "..."]
+python3 ".factory2/factory.py" flow review TICKET_ID --verdict pass|changes --text "..."
+python3 ".factory2/factory.py" flow close TICKET_ID
+```
+
+`flow status TICKET_ID` lists what `close` still needs. `flow brief TICKET_ID
+--role implement|review` prints the short assignment for a worker. Details are
+in `docs/flow.md`.
+
+## Seeing what a worker is doing
+
+Flow commands and workers write short progress lines into the journal of the
+task being worked on: when implementation, a check, a review or a stage starts
+and how it ended, plus the worker's own lines.
+
+```sh
+python3 ".factory2/factory.py" flow log TICKET_ID --text "Writing the parser tests" [--task implement|review|STAGE]
+python3 ".factory2/factory.py" flow log TICKET_ID --model MODEL [--provider P] [--reasoning R] --text "Implementer launched"
+python3 ".factory2/factory.py" ticket task-journal TICKET_ID TASK_ID
+```
+
+- When the owner asks what a worker is doing, read the task journal (task IDs
+  are in `ticket show TICKET_ID`) and report its latest lines; the Console
+  shows the same journal for the selected task.
+- A worker records a line with `flow log` when it starts a distinct piece of
+  work and before it runs tests outside `flow check`; the briefs tell it so.
+  Without `--task` the line goes to the running task. `flow log` only adds
+  the line, and with `--model` records the model on that task's latest
+  attempt.
+
+## Changes go through a ticket
+
+Work on this repository in this order; the governing rule text is in the rule
+files named above.
+
+1. Before touching any file, have a ticket. Look through `ticket list` for an
+   open one that matches and reuse it; otherwise register the request with
+   `ticket create`. Creating a ticket does not start it: tell the owner the
+   ticket ID and ask whether to start it. Run `flow start` (or `flow stage`,
+   `ticket start`) only once the owner has said so for that ticket; being
+   told to create a ticket is not being told to start it.
+2. Edit files only in that ticket's worktree, never directly in the primary
+   checkout. The change reaches the base branch only through `flow close`.
+3. This procedure also covers work on Factory itself, documentation and
+   configuration. A question or a discussion that changes nothing needs no
+   ticket.
+4. If the primary checkout holds uncommitted changes that belong to no ticket,
+   report them to the owner rather than building on them. Modified files
+   under `.factory2/tickets/` of open tickets are expected there: Factory
+   commits them itself or leaves them uncommitted, depending on
+   `git/auto_commit`, so leave them alone. Which commits a ticket produces
+   is described in `docs/flow.md`.
+5. When the owner changes or adds to a request after its ticket exists,
+   change the ticket with `ticket edit TICKET_ID --expected-revision N
+   [--title "..."] [--description "..."]` or record the addition with
+   `flow note TICKET_ID --text "..."`. `flow brief` prints the notes after
+   the description, so the worker receives them.
+
+## One ticket, step by step
+
+1. `ticket create` registers the request and nothing more; in a Git project
+   with `git/auto_commit` enabled it commits the new ticket's files. Pass the
+   priority, severity and profile you propose (`--priority`, `--severity`,
+   `--profile`). Then tell the owner the proposed values, each estimated one
+   with a one-line reason, and ask them in one question to agree or to give
+   other values; record the reply with `ticket confirm TICKET_ID`, adding
+   `--priority`, `--severity` or `--profile` for what they changed. Until then
+   the ticket reports the `ticket/confirm` wait. Once the owner
+   has agreed to start that ticket, `flow start` creates the branch
+   `ticket/TICKET_ID`, a worktree in
+   `.factory2/local/worktrees/TICKET_ID` and prints the implementer brief.
+2. Give the brief to one implementer. Before launching it, read the
+   `recommendation` field of the `flow start` or `flow brief` result (and of
+   `flow stage` for a stage worker): for each provider with a model policy it
+   gives the tier, model and reasoning for that worker's task; `--provider P`
+   limits it to one provider. The `models` rule in the rule files governs the
+   choice. Record the model the worker actually runs on with `flow log
+   TICKET_ID --model MODEL [--provider P] [--reasoning R] --text "..."`; the
+   brief asks the worker to do the same, and the Console shows the model as a
+   badge on the task. The
+   recommended tier depends on the ticket's difficulty, set with `ticket
+   create --difficulty low|medium|high` (default `unknown`) or `ticket edit
+   --difficulty`. The implementer edits the worktree and runs
+   `flow check` itself. A failing check returns the end of its output; the
+   same implementer fixes the cause and repeats the command.
+3. Give `flow brief --role review` to a second, fresh worker; requesting that
+   brief also switches the time tracking from the Implement task to the
+   Review task. The reviewer reads the diff and records its verdict with
+   `flow review`. Notes from a `changes`
+   verdict go back to the same implementer, followed by check and review
+   again.
+4. `flow close` puts the change on the base branch as one commit, archives
+   the ticket in a second commit and removes the worktree. Committing, merging and pushing follow the `git` settings in the
+   effective configuration; when committing or merging is not automatic,
+   `close` says so, names the command (`flow close TICKET_ID` with
+   `--commit`, `--merge` or both) and waits for it to be run on the owner's
+   instruction.
+
+## When a ticket waits for the owner
+
+Results of `ticket list`, `ticket show` and every `flow` command carry `waiting_for_human` and `pending_human_actions`; the Console
+shows the same. Whenever a command reports `waiting_for_human: true`, say so
+in the conversation first, as a direct question to the owner that names the
+ticket (ID and title) and the action asked for in `pending_human_actions`,
+before doing anything else on that ticket.
+
+- When you need the owner's decision about a ticket, record the question with
+  `flow ask TICKET_ID --text "..."`, then ask it in the conversation. Record
+  the reply with `flow answer TICKET_ID --text "..."`; the same command
+  records the owner's decision after two review rounds asked for changes.
+- When a stage file is ready, show it to the owner and record
+  `flow present TICKET_ID --stage STAGE --file FILE`; their decision is
+  recorded with `flow approve`.
+- The indication is not a lock and is not stored: it goes away once the
+  owner's action is recorded. The cases are listed in
+  `docs/flow.md`.
+
+## Larger changes
+
+- Choose a profile with `flow profile TICKET_ID full` (or `full-ui`, or one
+  from `config.json`); the owner confirms the choice. It can be changed later.
+- Before implementation, `flow stage TICKET_ID --stage design` prints the
+  brief for a design worker, who writes one file into the ticket directory.
+  Present it to the owner, record that with `flow present`, and record their
+  decision with `flow approve`.
+- Split work with `ticket create --related-ticket-id PARENT`. Start the
+  parent first when the parts must land together.
+- Request additional reviews with `flow brief --role review --kind KIND` and
+  `flow review --kind KIND`.
+
+## When something goes wrong
+
+Nothing in this flow is locked. A check or a review belongs to the exact file
+tree it was recorded for, so any new edit simply makes it stale and it is run
+again. An error message names the next command; act on it in the same ticket
+instead of opening a replacement. Every command may be repeated after an
+interruption.
+
+Return to the owner when the review has asked for changes twice, when the
+request itself is unclear, or when `close --unresolved --reason "..."` is the
+right outcome.
+
+## Tickets and tasks without Git
+
+`ticket` and `task` commands record work that does not go through a branch:
+`ticket start|pause|close`, `task create|start|finish|retry|cancel`. A larger
+change is better split into several tickets than into many tasks. The full
+command reference is in `docs/cli.md`.
+
+# INDIGO repository rules
+
+The following project requirements supplement the Factory workflow. Explicit owner instructions take precedence. Legacy incremental REVIEW.md tracking has been retired; record findings as Factory tickets. Exclude `indigo_test/shell_compliance/` from routine development and validation unless explicitly requested; the automated suite lives in the other `indigo_test/` subdirectories.
+
 # Repository Guidelines
+
+## Repository searches
+
+- Do not run `rg` or `ripgrep`, including from scripts or tests. Use Git file inventories, `find`, `grep`, or standard-library searches instead. Exclude `.factory2/archive/` from routine discovery.
+
+## Language
+
+Write all project documents in English, including specifications, plans, ticket descriptions and notes, review reports, architecture decisions, README files, and agent instructions. Use English for new code comments, identifiers where practical, and commit/PR descriptions. User-facing product localization may use the languages required by the specification. Conversation with the owner may use their preferred language.
 
 ## Scope
 
 - These instructions apply to the whole INDIGO repository. More specific instructions may exist in subdirectories.
-- For driver work under `indigo_drivers/`, read `indigo_drivers/AGENTS.override.md` and follow it in addition to this file. It contains the driver-refactoring workflow and is more specific than this root file.
+- For driver work under `indigo_drivers/`, read `indigo_drivers/AGENTS.md` and follow it in addition to this file. It contains the driver-refactoring workflow and is more specific than this root file.
 - For automated tests under `indigo_test/`, read `indigo_test/AGENTS.md` and follow it in addition to this file.
 - Never modify `indigo_drivers/ccd_apogee`, `indigo_drivers/ccd_sbig`, `indigo_drivers/mount_asi`, `indigo_drivers/mount_mxhd` and `indigo_drivers/system_ascol`. These drivers are off limits: do not refactor, reformat, fix, test-instrument, or otherwise change any file in them, and do not include them in repository-wide sweeps. They may be read for reference only. If a task appears to require a change there, stop and ask the user first.
 
@@ -19,7 +207,7 @@ Read the relevant documentation before changing behavior:
 - `indigo_docs/SERIAL_DEVICE_SIMULATORS.md` documents the host-side serial simulator contract and ready-file convention.
 - `indigo_drivers/*/README.md` files document driver-specific hardware, prerequisites, connection details, limitations, and operational notes.
 - `indigo_test/AGENTS.md` documents automated-test layout, harness conventions, simulator integration rules, and test cleanup.
-- `REVIEW.md` indexes incremental automatic code review state and links to folder-level review files.
+- `.factory2/tickets/` holds the open Factory tickets, including the findings imported from the earlier registry, and `.factory2/archive/` the closed ones; list them with `ticket list` instead of reading the directories.
 
 ## Properties reference
 
@@ -76,13 +264,13 @@ Some drivers are generated from `.driver` files by `indigo_generator`.
 - Modify the generator implementation, its DSL or generated lifecycle semantics only after explicit user approval of the concrete proposed change. Authorization to implement/refactor a driver or extend its tests does not authorize generator changes. First describe the limitation, proposed generator diff and impact on existing drivers, then wait for approval. Running the unchanged generator and editing a driver's existing `.driver` input remain ordinary authorized driver work.
 - If a `.driver` source exists for a generated `.c` file, edit the generator input rather than hand-editing generated output unless the task explicitly requires otherwise.
 - Keep generated output and checked-in generated files synchronized when the repository convention expects both.
-- After completing any driver migration, update only the status columns of the driver's row in root `MIGRATION_STATUS.md` in the same change: API, Windows, generator, async queues, retesting and automated-test availability. Preserve the Comment column exactly; it is reserved for manual user input. Distinguish simulator validation from hardware validation in the retesting status, and document unverified platforms, remaining limitations and detailed results in the driver's `REFACTOR.md`, not in the Comment column. Keep both files consistent.
+- After completing any driver migration, update only the status columns of the driver's row in root `MIGRATION_STATUS.md` in the same change: API, Windows, generator, async queues, retesting and automated-test availability. Preserve the Comment column exactly; it is reserved for manual user input. Distinguish simulator validation from hardware validation in the retesting status, and document unverified platforms, remaining limitations and detailed results in the Factory ticket performing the migration, not in the Comment column. Keep both files consistent.
 - During refactoring, use generator defaults unless the user explicitly requests an override. In particular, never override `MAX_DEVICES` with `#undef` / `#define` to preserve a legacy capacity; check that no such override is introduced.
 - Review `indigo_docs/DRIVER_GENERATOR_MIGRATION.md` before migrating or creating generated drivers.
 - Treat the `.driver` file as the source of truth once migration starts. Check in the `.driver` file together with the regenerated `.c`, `.h`, and `_main.c` files, and add the `.driver` file to project files such as Xcode groups when relevant.
 - When reverse-extracting a `.driver` file from an annotated C driver, run `indigo_generator -c <target>.driver`, where `<target>.driver` is the new generator source file to create. Do not pass the existing `.c` file as the `-c` argument; the generator treats that argument as the output path and can overwrite the hand-written source. If unsure, run the extraction in a temporary directory first and inspect the result before touching repository files.
 - Keep custom code in generator-owned blocks: `include`, `define`, `data`, shared `code`, `<device>.code`, `<device>.on_attach`, `<device>.on_connect`, `<device>.on_disconnect`, `<device>.on_timer`, and property `on_change` blocks. Do not preserve old hand-written boilerplate just because it existed in the source driver.
-- Name low-level connection helpers exactly `<driver_name>_open(indigo_device *device)` and `<driver_name>_close(indigo_device *device)`. The generator wires these into generated connection handlers and owns open/close reference counting for multi-device drivers through `PRIVATE_DATA->count`.
+- Name low-level connection helpers exactly `<driver_name>_open(indigo_device *device)` and `<driver_name>_close(indigo_device *device)`. Serial drivers take an extra parameter, `<driver_name>_open(indigo_device *device, const char **error_message)`, and pass `error_message` to the `indigo_uni_open_serial*2()` functions; the generated connection handler shows the message in its connection failure alert. The generator wires these into generated connection handlers and owns open/close reference counting for multi-device drivers through `PRIVATE_DATA->count`.
 - Connection helpers must have a transactional contract: `<driver_name>_open()` returns true with all low-level resources acquired, or false after releasing every resource acquired by that attempt. Increment shared connection references only after successful open; call `<driver_name>_close()` only for a successfully opened session, on final disconnect or rollback of subsequent connection initialization. Do not add a persistent `opened` flag merely to compensate for calling close after a failed open; fix the lifecycle ownership instead.
 - In generated `on_connect` blocks, use the generator-provided `connection_result` variable. Do not introduce a separate `ok` variable for the connection result, and do not `return` from `on_connect` or `on_disconnect` blocks because that can skip generator-owned cleanup, reference counting, property definition/deletion, messages, and final connection property updates.
 - Let generated property handlers own their standard prologue and epilogue. The generator may set `PROPERTY->state = INDIGO_OK_STATE` before `on_change`, appends `indigo_update_property()` for most properties, and appends `indigo_update_coordinates()` for `MOUNT_EQUATORIAL_COORDINATES`. Inside `on_change`, set `INDIGO_ALERT_STATE` only on failure where possible instead of writing `PROPERTY->state = ok ? INDIGO_OK_STATE : INDIGO_ALERT_STATE`.
@@ -107,13 +295,13 @@ Some drivers are generated from `.driver` files by `indigo_generator`.
 
 For CCD, mount, wheel, focuser, rotator, guider, AO and GPS validation, follow the shared scope and class standards in [Driver Testing Rules](indigo_test/DRIVER_TESTING_RULES.md).
 
-- Every driver refactoring must include full applicable test coverage of its supported capabilities and driver-specific behavior, using the class standard as the acceptance checklist. Cover protocol commands and readback, property transitions, failure/recovery paths, lifecycle and concurrency; a smoke test alone is not completion. Record the scenario-to-test mapping and justify non-applicable cases or hardware-only gaps in the driver's `REFACTOR.md`.
+- Every driver refactoring must include full applicable test coverage of its supported capabilities and driver-specific behavior, using the class standard as the acceptance checklist. Cover protocol commands and readback, property transitions, failure/recovery paths, lifecycle and concurrency; a smoke test alone is not completion. Record the scenario-to-test mapping and justify non-applicable cases or hardware-only gaps in the Factory ticket.
 - Audit the simulator as part of each refactoring against the supplied manufacturer protocol documentation (including bundled XLSX documents). For serial simulators with motion, use `indigo_test/simulator_common/serial_motion.h` unless a documented protocol requirement cannot be represented by it. Validate elapsed-time motion, stop and sync through the simulator protocol; do not count testing the shared helper itself as driver coverage.
 
 ### Requested Test Runs
 
 - Every requested test run is one of four modes: interactive simulator, non-interactive simulator, interactive hardware, non-interactive hardware. If the request does not identify the mode unambiguously, ask before running anything; never assume a mode.
-- In all modes, run and repeat the tests according to this file, `indigo_drivers/AGENTS.override.md` and `indigo_test/AGENTS.md`. Every rerun after a fix repeats the full requested scope, not only the failing case, and the run is finished only when that full scope is clean.
+- In all modes, run and repeat the tests according to this file, `indigo_drivers/AGENTS.md` and `indigo_test/AGENTS.md`. Every rerun after a fix repeats the full requested scope, not only the failing case, and the run is finished only when that full scope is clean.
 - Non-interactive simulator run: exercise the driver through the simulator, fake SDK, fake USB or another hardware-free backend. Fix every defect found, rerun, then commit the result. Do not push.
 - Interactive simulator run: same execution, but do not change code on your own. Report each defect with a proposed fix, wait for the user's approval, implement the approved fix, rerun, then commit. Do not push.
 - Non-interactive hardware run: exercise the driver against the physical device. Fix every defect found, rerun, then commit the result. Do not push.
@@ -126,35 +314,68 @@ For CCD, mount, wheel, focuser, rotator, guider, AO and GPS validation, follow t
 ## Repository Hygiene
 
 - Do not modify any `README.md` file without the user's explicit approval.
-- Add every newly created persistent repository file to the appropriate group in `indigo.xcodeproj/project.pbxproj` in the same change, including source files, headers, `.driver` inputs, tests and documentation. Preserve existing project edits; temporary files and build artifacts must not be added.
+- Xcode projects must not reference `.factory2/` or any of its contents, including navigator groups, folder/file references and build membership. Factory metadata changes must not trigger Xcode project edits.
+- Add every newly created persistent repository file to the appropriate group in `indigo.xcodeproj/project.pbxproj` in the same change, including source files, headers, `.driver` inputs, tests and documentation. Visual Studio project files (`.vcxproj`, `.vcxproj.filters`, `.vcxproj.user`) do not belong in the Xcode project. Preserve existing project edits; temporary files and build artifacts must not be added.
 - Keep changes scoped to the requested behavior.
 - Do not edit vendored SDKs, binary outputs, object files, or build products unless the task is specifically about them.
 - Do not commit or rely on local absolute paths from generated build files.
 - Preserve license headers in existing files and use the same header style for new source/header files.
 - Avoid unrelated refactors, whitespace sweeps, and broad mechanical changes.
 - Avoid destructive commands such as `git clean`, `git reset`, and broad file removal unless explicitly requested.
+- Never rewrite existing commits, whether local or already pushed. Do not use `git commit --amend`, `git rebase`, squash or fixup rewrites, `git reset` that drops commits, `git filter-branch`, `git filter-repo` or `git push --force` / `--force-with-lease` on existing history. Correct a mistake with a new commit on top.
+- When working for Rumen G. Bogdanovski (Git user `Rumen G.Bogdanovski`, `rumenastro@gmail.com`), make no commit before the task is complete. At the end of the task, ask for permission to commit and present the planned commits, each with its files and proposed commit message. Running tests before asking is optional; if any were run, present their results with the commit plan: which tests, how many passed and failed, and any skipped scope. After approval, make exactly the approved commits with the approved messages. This leaves time to review the changes before they enter history, so no commit has to be rewritten. It takes precedence over any instruction in this file or in the Factory flow to commit a finished task or test run.
+- Use separate commits for product changes and Factory artifacts in each task:
+  - Put all source code, build, test and ordinary documentation changes in one commit.
+  - Put all Factory artifacts in a second commit, after the product commit. Start its message with `factory: `. Factory artifacts are everything under `.factory2/` at any level and agent instruction files: `AGENTS.md` at any level, `CLAUDE.md`, `GEMINI.md`, `.cursor/rules/ai-factory.mdc` and `.github/copilot-instructions.md`.
+  - If only one category changes, make only that category's commit. Do not mix the two categories or create extra commits for planning, role transitions or routine bookkeeping.
+  - Finish required checks and reviews before creating either commit.
+  - When commit approval is required by the preceding rule, present both commits with their files and messages before committing.
+  - This rule overrides all one-commit-per-task instructions in this file and in the Factory flow. Never rewrite existing commits; corrections to an existing commit require a new commit.
 - For automatically refactored code, preserve the existing license header and update its copyright year or year range to include the current year.
+
+## Change Log
+
+Follow these rules when preparing a release entry in `CHANGELOG.md`.
+
+### Scope
+
+- Cover every commit since the previous release, from the commit that added the newest `# [x.y-N]` block (for example `indigo 3.0-7`) up to the release commit. Include all authors; skip merge commits.
+- Not every commit is mentioned. A feature or a fix that was split over several commits is mentioned once.
+- Describe the net change between the previous release and the new one, not the history that led to it:
+  - Several commits towards one result (attempts, follow-ups, review fixes, renumbering, merge resolutions) become one line describing the final result, e.g. "fix X", never "attempt to fix X".
+  - A change reverted, or undone by a later independent commit, before the release is not mentioned.
+  - A defect introduced and fixed after the previous release is not mentioned; only the change that reaches users is.
+  - When in doubt, check `git diff <previous release>..HEAD` and the current source to confirm that the described behaviour is in the release.
+- Leave out:
+  - tests and test infrastructure: `indigo_test/`, host-side simulators, fake SDKs and firmware images written for tests, hardware test suites, test tools and scripts;
+  - test runs and their records: README `## Testing` lines, `TEST_SUMMARY.md`, recorded-run commits;
+  - development notes: `REFACTOR.md`, `REVIEW.md`, `MIGRATION_STATUS.md`, `AGENTS.md`, `CLAUDE.md`, `DRIVER_TESTING_RULES.md` and similar;
+  - driver version bumps, regenerated output without a change of behaviour, formatting, comments, renames without a visible effect, and build or CI housekeeping that does not change what users install.
+- Simulator drivers that ship with INDIGO (`ccd_simulator`, `mount_simulator`, `dome_simulator`, ...) are user-visible and are covered like any other driver.
+
+### Format
+
+- Follow the existing file exactly. A release block starts with `# [<INDIGO_VERSION>-<INDIGO_BUILD>] - DD Mon Ddd YYYY` (for example `# [3.0-7] - 03 Sep Thu 2026`), using the values from `Makefile.inc` and the release date, and contains `## Overall:`, `## New drivers:` and `## Driver changes:`. Migrations of many drivers (code generator, Windows, async queues) get their own sections, listed per device class as in 3.0-1.
+- New drivers go into their own `## New drivers:` section, placed right after `## Overall:`, one `- indigo_<driver>:` block per driver with a line saying which devices it supports (for example "ASCOM Alpaca client driver added"). A new driver is listed only there, never again under `## Driver changes:`. A driver is new when its directory did not exist at the previous release; compare the driver directories (`indigo_drivers`, `indigo_linux_drivers`, `indigo_mac_drivers`, `indigo_optional_drivers`) of the previous release with the new one. A driver that only gained a `.driver` file, moved to the code generator or was renamed is not new.
+- Every component is one top-level `- <component>:` bullet with its lines below as tab-indented `- ` items, one blank line between components and two blank lines before the next older release block. Each driver gets its own bullet naming only that driver, never a bullet naming several (`- indigo_aux_ppb, indigo_aux_upb:`), even when the drivers received the same change in one commit or share the same source (for example the ToupTek family); the line is repeated under each of them. Name drivers `indigo_<driver directory>` (for example `indigo_mount_lx200`) and framework parts as in earlier entries (`indigo_libs`, `indigo_server`, `indigo_tools`, ...).
+- Order: in `## Overall:` the framework, server and tools first, then changes applied to many drivers; in `## Driver changes:` agents first, then the other drivers alphabetically.
+- Insert the new block above the previous release. Never edit older blocks.
+
+### Lines
+
+- One line per change a user or integrator can notice, summarised; never one line per commit.
+- A bug fix starts with "fix" and names the visible symptom and, when useful, its cause ("fix guide rate limits, the V2.5/V3 protocol accepts two digits per axis only"). Additions end with "added", removals with "removed".
+- Start in lower case, no trailing period, property and item names verbatim, and append issue or pull request numbers referenced by the commits as ` - #NNN`.
+- A change made the same way in many drivers is one line in `## Overall:` naming the drivers, not a line repeated under each of them; only driver-specific details stay under the driver.
+- Every line must be traceable to commits in the range; keep the commit references in the working notes, not in the changelog.
 
 ## AI Usage Conduct
 
 - Keep AI work scoped to the files, folders, and behavior explicitly requested.
 - Ground conclusions in repository sources. For reviews, cite exact files and lines; for implementation, follow nearby code and documented INDIGO APIs.
 - Treat AI-generated code, tests, and review notes as drafts until they are compiled, tested, or otherwise verified.
-- Separate concerns: use `REVIEW.md` files for risks and findings, driver-local `REFACTOR.md` files for automated-test plans, coverage notes and refactoring evidence, and patches for actual code changes.
+- Separate concerns: use Factory tickets for risks and findings, the notes and attachments of the ticket doing the work for automated-test plans, coverage notes and refactoring evidence, and patches for actual code changes.
 - Prefer simulator-backed or hardware-free validation before claiming driver behavior is covered; document hardware assumptions when real devices are required.
 - Do not edit generated output, vendored SDKs, build products, or local artifacts unless the task explicitly targets them.
 - Leave the workspace clean of avoidable temporary files, running servers, test processes, and generated artifacts.
 - Do not duplicate agent policy across tool-specific files. Keep `CLAUDE.md` and similar files as pointers to this file unless a tool needs a small compatibility note.
-
-## Incremental Code Review Notes
-
-- Use `REVIEW.md` as the top-level index for automatic review status.
-- Only perform automatic incremental reviews for folders explicitly listed in top-level `REVIEW.md`; add an index row and folder-level `REVIEW.md` before reviewing any other folder.
-- Folder-level `REVIEW.md` files record the last reviewed commit, current findings, review focus, and reviewed ranges for that subtree.
-- When asked for a review, first identify the affected folder review file and read its recorded `Last reviewed commit`.
-- Review incrementally with `git diff <last-reviewed-commit>..<target-commit> -- <folder>` unless the user asks for a different range.
-- Record findings with stable IDs, severity, file reference, summary, and status in the folder-level review file.
-- Advance a folder's `Last reviewed commit` only after that folder has been reviewed through the target commit.
-- After advancing a folder-level file, update the matching row in top-level `REVIEW.md`.
-- Do not mark a commit reviewed if the review was partial, skipped changed generated files, or depends on unresolved assumptions.
-- Keep review notes separate from test plans: `REVIEW.md` files track risks/findings, while driver-local `REFACTOR.md` files track automated-test coverage and deferred test work.

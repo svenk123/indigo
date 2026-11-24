@@ -45,7 +45,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000013
+#define DRIVER_VERSION       0x03000017
 #define DRIVER_NAME          "indigo_focuser_steeldrive2"
 #define DRIVER_LABEL         "Baader Planetarium SteelDriveII Focuser"
 #define FOCUSER_DEVICE_NAME  "SteelDriveII (focuser)"
@@ -58,6 +58,8 @@
 #define STEELDRIVE2_LINE_BUDGET 8
 #define STEELDRIVE2_MOTION_FAILURE_LIMIT 3
 #define STEELDRIVE2_MOTION_STALL_LIMIT 30
+// A temperature sensor that is not connected reads -128.
+#define STEELDRIVE2_NO_SENSOR -128
 
 //- define
 
@@ -194,6 +196,8 @@ typedef struct {
 	int position, target, limit, focus, pwm, pid_ctrl, auto_dew, last_position, stalled, failures;
 	double temperature_0, temperature_1, temperature_average;
 	bool crc_enabled, moving, active, uncertain, zeroing, external;
+	// The last move ended ALERT, which an idle poll must not turn into OK.
+	bool failed;
 	//- data
 } steeldrive2_private_data;
 
@@ -309,6 +313,11 @@ static bool steeldrive2_vcommand(indigo_device *device, bool allow_unchecked_res
 		if (!strncmp(PRIVATE_DATA->response, "$BS DEBUG:", 10)) {
 			continue;
 		}
+		// the manual's SUMMARY example answers "STATUS NAME:..." without the $BS prefix
+		if (!strncmp(PRIVATE_DATA->response, "STATUS ", 7) && strlen(PRIVATE_DATA->response) + 4 < sizeof(PRIVATE_DATA->response)) {
+			memmove(PRIVATE_DATA->response + 4, PRIVATE_DATA->response, strlen(PRIVATE_DATA->response) + 1);
+			memcpy(PRIVATE_DATA->response, "$BS ", 4);
+		}
 		return !strncmp(PRIVATE_DATA->response, "$BS", 3);
 	}
 	return false;
@@ -382,33 +391,35 @@ static bool steeldrive2_summary(indigo_device *device) {
 	if (strncmp(PRIVATE_DATA->response, prefix, strlen(prefix))) {
 		return false;
 	}
-	char *fields[10];
-	char *cursor = PRIVATE_DATA->response + strlen(prefix);
-	for (int i = 0; i < 10; i++) {
-		fields[i] = cursor;
+	// key:value items separated by ';', read by key as the 2.0 driver did, so the order and items a later
+	// firmware adds do not matter; NAME comes first as in the manual
+	const char *keys[] = { "NAME", "POS", "STATE", "LIMIT", "FOCUS", "TEMP0", "TEMP1", "TEMP_AVG", "TCOMP", "PWM" };
+	char *fields[10] = { NULL };
+	char *cursor = PRIVATE_DATA->response + strlen(prefix) - strlen("NAME:");
+	while (cursor != NULL && *cursor) {
 		char *separator = strchr(cursor, ';');
-		if (i == 9) {
-			if (separator != NULL) {
-				return false;
-			}
-		} else {
-			if (separator == NULL) {
-				return false;
-			}
+		if (separator != NULL) {
 			*separator = 0;
-			cursor = separator + 1;
 		}
-	}
-	const char *keys[] = { "", "POS:", "STATE:", "LIMIT:", "FOCUS:", "TEMP0:", "TEMP1:", "TEMP_AVG:", "TCOMP:", "PWM:" };
-	for (int i = 1; i < 10; i++) {
-		size_t key_length = strlen(keys[i]);
-		if (strncmp(fields[i], keys[i], key_length)) {
+		char *colon = strchr(cursor, ':');
+		if (colon == NULL) {
 			return false;
 		}
-		fields[i] += key_length;
+		*colon = 0;
+		for (int i = 0; i < 10; i++) {
+			if (!strcmp(cursor, keys[i]) && fields[i] == NULL) {
+				fields[i] = colon + 1;
+			}
+		}
+		cursor = separator != NULL ? separator + 1 : NULL;
+	}
+	for (int i = 0; i < 10; i++) {
+		if (fields[i] == NULL) {
+			return false;
+		}
 	}
 	double position, limit, focus, temperature_0, temperature_1, temperature_average, tcomp, pwm;
-	if (*fields[0] == 0 || strlen(fields[0]) > 19 || !steeldrive2_number(fields[1], 0, STEELDRIVE2_MAX_POSITION, true, &position) || (strcmp(fields[2], "GOING_UP") && strcmp(fields[2], "GOING_DOWN") && strcmp(fields[2], "STOPPED") && strcmp(fields[2], "ZEROED")) || !steeldrive2_number(fields[3], 0, STEELDRIVE2_MAX_POSITION, true, &limit) || !steeldrive2_number(fields[4], 0, STEELDRIVE2_MAX_POSITION, true, &focus) || !steeldrive2_number(fields[5], -128, 150, false, &temperature_0) || !steeldrive2_number(fields[6], -128, 150, false, &temperature_1) || !steeldrive2_number(fields[7], -128, 150, false, &temperature_average) || !steeldrive2_number(fields[8], 0, 1, true, &tcomp) || !steeldrive2_number(fields[9], 0, 100, true, &pwm)) {
+	if (*fields[0] == 0 || strlen(fields[0]) > 19 || !steeldrive2_number(fields[1], 0, STEELDRIVE2_MAX_POSITION, true, &position) || *fields[2] == 0 || !steeldrive2_number(fields[3], 0, STEELDRIVE2_MAX_POSITION, true, &limit) || !steeldrive2_number(fields[4], 0, STEELDRIVE2_MAX_POSITION, true, &focus) || !steeldrive2_number(fields[5], -128, 150, false, &temperature_0) || !steeldrive2_number(fields[6], -128, 150, false, &temperature_1) || !steeldrive2_number(fields[7], -128, 150, false, &temperature_average) || !steeldrive2_number(fields[8], 0, 1, true, &tcomp) || !steeldrive2_number(fields[9], 0, 100, true, &pwm)) {
 		return false;
 	}
 	PRIVATE_DATA->position = (int)position;
@@ -418,7 +429,8 @@ static bool steeldrive2_summary(indigo_device *device) {
 	PRIVATE_DATA->temperature_1 = temperature_1;
 	PRIVATE_DATA->temperature_average = temperature_average;
 	PRIVATE_DATA->pwm = (int)pwm;
-	PRIVATE_DATA->moving = !strcmp(fields[2], "GOING_UP") || !strcmp(fields[2], "GOING_DOWN");
+	// STOPPED and ZEROED are at rest; GOING_UP, GOING_DOWN and any other state are taken as motion, as in 2.0
+	PRIVATE_DATA->moving = strcmp(fields[2], "STOPPED") && strcmp(fields[2], "ZEROED");
 	return true;
 }
 
@@ -475,13 +487,20 @@ static bool steeldrive2_load_focuser(indigo_device *device) {
 	FOCUSER_POSITION_ITEM->number.max = PRIVATE_DATA->limit;
 	FOCUSER_STEPS_ITEM->number.max = PRIVATE_DATA->limit;
 	FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target = PRIVATE_DATA->limit;
-	FOCUSER_TEMPERATURE_ITEM->number.value = PRIVATE_DATA->temperature_average;
+	if (PRIVATE_DATA->temperature_average > STEELDRIVE2_NO_SENSOR) {
+		FOCUSER_TEMPERATURE_ITEM->number.value = PRIVATE_DATA->temperature_average;
+		FOCUSER_TEMPERATURE_PROPERTY->state = INDIGO_OK_STATE;
+	} else {
+		FOCUSER_TEMPERATURE_PROPERTY->state = INDIGO_IDLE_STATE;
+	}
 	X_STATUS_SENSOR_0_ITEM->number.value = PRIVATE_DATA->temperature_0;
 	X_STATUS_SENSOR_1_ITEM->number.value = PRIVATE_DATA->temperature_1;
+	// The controller moves the focuser itself in temperature compensation mode.
+	FOCUSER_POSITION_PROPERTY->perm = tcomp ? INDIGO_RO_PERM : INDIGO_RW_PERM;
 	INDIGO_COPY_VALUE(INFO_DEVICE_MODEL_ITEM->text.value, "Baader Planetarium SteelDriveII");
 	INDIGO_COPY_VALUE(INFO_DEVICE_FW_REVISION_ITEM->text.value, PRIVATE_DATA->firmware);
 	PRIVATE_DATA->target = PRIVATE_DATA->position;
-	PRIVATE_DATA->active = PRIVATE_DATA->uncertain = PRIVATE_DATA->zeroing = PRIVATE_DATA->external = false;
+	PRIVATE_DATA->active = PRIVATE_DATA->uncertain = PRIVATE_DATA->zeroing = PRIVATE_DATA->external = PRIVATE_DATA->failed = false;
 	return true;
 }
 
@@ -518,8 +537,8 @@ static bool steeldrive2_read_aux(indigo_device *device, bool complete) {
 	return true;
 }
 
-static bool steeldrive2_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 19200, INDIGO_LOG_DEBUG);
+static bool steeldrive2_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 19200, INDIGO_LOG_DEBUG, error_message);
 	if (PRIVATE_DATA->handle == NULL) {
 		return false;
 	}
@@ -552,28 +571,48 @@ static void steeldrive2_close(indigo_device *device) {
 
 //+ focuser.code
 
+// Stops the motor and reads where it stopped; the position stays uncertain only when that fails.
+static bool steeldrive2_stop(indigo_device *device) {
+	bool stopped = steeldrive2_ok(device, "$BS STOP") && steeldrive2_summary(device) && !PRIVATE_DATA->moving;
+	PRIVATE_DATA->uncertain = !stopped;
+	return stopped;
+}
+
 static void steeldrive2_publish_focuser(indigo_device *device, indigo_property_state motion_state) {
 	FOCUSER_POSITION_ITEM->number.value = PRIVATE_DATA->position;
 	FOCUSER_POSITION_ITEM->number.max = PRIVATE_DATA->limit;
 	FOCUSER_STEPS_ITEM->number.max = PRIVATE_DATA->limit;
-	FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target = PRIVATE_DATA->limit;
-	FOCUSER_TEMPERATURE_ITEM->number.value = PRIVATE_DATA->temperature_average;
+	// a pending limit request owns the property: the poll must not replace its target nor publish over it
+	bool limits_pending = FOCUSER_LIMITS_PROPERTY->state == INDIGO_BUSY_STATE;
+	if (!limits_pending) {
+		FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target = PRIVATE_DATA->limit;
+	}
+	// No sensor reads -128, which is published IDLE and never as a value.
+	if (PRIVATE_DATA->temperature_average > STEELDRIVE2_NO_SENSOR) {
+		FOCUSER_TEMPERATURE_ITEM->number.value = PRIVATE_DATA->temperature_average;
+		FOCUSER_TEMPERATURE_PROPERTY->state = INDIGO_OK_STATE;
+	} else {
+		FOCUSER_TEMPERATURE_PROPERTY->state = INDIGO_IDLE_STATE;
+	}
 	X_STATUS_SENSOR_0_ITEM->number.value = PRIVATE_DATA->temperature_0;
 	X_STATUS_SENSOR_1_ITEM->number.value = PRIVATE_DATA->temperature_1;
 	FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = motion_state;
 	// BUSY without an active motion is only published by the poll, for a motion the driver did not start.
 	PRIVATE_DATA->external = motion_state == INDIGO_BUSY_STATE && !PRIVATE_DATA->active;
-	FOCUSER_TEMPERATURE_PROPERTY->state = X_STATUS_PROPERTY->state = INDIGO_OK_STATE;
+	X_STATUS_PROPERTY->state = INDIGO_OK_STATE;
 	indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
 	indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
-	indigo_update_property(device, FOCUSER_LIMITS_PROPERTY, NULL);
+	if (!limits_pending) {
+		indigo_update_property(device, FOCUSER_LIMITS_PROPERTY, NULL);
+	}
 	indigo_update_property(device, FOCUSER_TEMPERATURE_PROPERTY, NULL);
 	indigo_update_property(device, X_STATUS_PROPERTY, NULL);
 }
 
+// The value is the position reached, the target keeps the request also when the move ended short.
 static void steeldrive2_finish_motion(indigo_device *device, indigo_property_state state) {
 	PRIVATE_DATA->active = false;
-	FOCUSER_POSITION_ITEM->number.target = PRIVATE_DATA->position;
+	PRIVATE_DATA->failed = state != INDIGO_OK_STATE;
 	steeldrive2_publish_focuser(device, state);
 	if (PRIVATE_DATA->zeroing) {
 		PRIVATE_DATA->zeroing = false;
@@ -592,8 +631,7 @@ static void motion_finalizer(indigo_device *device) {
 			indigo_execute_handler_in(device, 0.1, motion_finalizer);
 			return;
 		}
-		PRIVATE_DATA->uncertain = true;
-		steeldrive2_ok(device, "$BS STOP");
+		steeldrive2_stop(device);
 		steeldrive2_finish_motion(device, INDIGO_ALERT_STATE);
 		return;
 	}
@@ -606,8 +644,7 @@ static void motion_finalizer(indigo_device *device) {
 			PRIVATE_DATA->stalled = 0;
 		}
 		if (PRIVATE_DATA->stalled >= STEELDRIVE2_MOTION_STALL_LIMIT) {
-			PRIVATE_DATA->uncertain = true;
-			steeldrive2_ok(device, "$BS STOP");
+			steeldrive2_stop(device);
 			steeldrive2_finish_motion(device, INDIGO_ALERT_STATE);
 			return;
 		}
@@ -615,14 +652,30 @@ static void motion_finalizer(indigo_device *device) {
 		indigo_execute_handler_in(device, 0.1, motion_finalizer);
 		return;
 	}
-	PRIVATE_DATA->uncertain = PRIVATE_DATA->position != PRIVATE_DATA->target;
-	steeldrive2_finish_motion(device, PRIVATE_DATA->uncertain ? INDIGO_ALERT_STATE : INDIGO_OK_STATE);
+	// The focuser stopped, so its position is known; one stopped elsewhere than the target did not arrive.
+	PRIVATE_DATA->uncertain = false;
+	steeldrive2_finish_motion(device, PRIVATE_DATA->position != PRIVATE_DATA->target ? INDIGO_ALERT_STATE : INDIGO_OK_STATE);
+}
+
+// A refused move ends both motion properties ALERT at the position the focuser has, with the controller's reason;
+// the target keeps the request.
+static void steeldrive2_motion_refused(indigo_device *device) {
+	PRIVATE_DATA->failed = true;
+	FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = INDIGO_ALERT_STATE;
+	indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+	if (!strncmp(PRIVATE_DATA->response, "$BS ERROR", 9)) {
+		indigo_update_property(device, FOCUSER_POSITION_PROPERTY, "%s", PRIVATE_DATA->response + 4);
+	} else {
+		indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+	}
 }
 
 static bool steeldrive2_start_motion(indigo_device *device, int target, bool zeroing) {
+	PRIVATE_DATA->response[0] = 0;
 	if (PRIVATE_DATA->active || PRIVATE_DATA->moving || PRIVATE_DATA->uncertain) {
 		return false;
 	}
+	PRIVATE_DATA->failed = false;
 	target = (int)fmax(0, fmin(PRIVATE_DATA->limit, target));
 	PRIVATE_DATA->target = target;
 	if (!zeroing && target == PRIVATE_DATA->position) {
@@ -634,9 +687,8 @@ static bool steeldrive2_start_motion(indigo_device *device, int target, bool zer
 	if (!accepted) {
 		return false;
 	}
-	if (!zeroing) {
-		FOCUSER_POSITION_ITEM->number.target = target;
-	}
+	// zeroing ends at 0
+	FOCUSER_POSITION_ITEM->number.target = target;
 	PRIVATE_DATA->active = true;
 	PRIVATE_DATA->zeroing = zeroing;
 	PRIVATE_DATA->stalled = PRIVATE_DATA->failures = 0;
@@ -660,12 +712,17 @@ static void focuser_timer_callback(indigo_device *device) {
 	if (!PRIVATE_DATA->active && !PRIVATE_DATA->uncertain && !pending) {
 		bool read = steeldrive2_summary(device);
 		// A request can also be copied on the bus thread during the status round trip, so it is checked again after
-		// the read and the poll never writes the target.
+		// the read and the poll writes the target only for motion the driver did not command.
 		pending = !PRIVATE_DATA->external && (FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE);
 		if (pending) {
 			INDIGO_DRIVER_DEBUG(DRIVER_NAME, "'%s' status read left to the pending motion request", device->name);
 		} else if (read) {
-			steeldrive2_publish_focuser(device, PRIVATE_DATA->moving ? INDIGO_BUSY_STATE : INDIGO_OK_STATE);
+			// Uncommanded motion (moving or moved while no move of the driver runs) is published with the target
+			// following the measured position; a failed or aborted move keeps its target and stays ALERT.
+			if (PRIVATE_DATA->moving || PRIVATE_DATA->external || PRIVATE_DATA->position != FOCUSER_POSITION_ITEM->number.value) {
+				FOCUSER_POSITION_ITEM->number.target = PRIVATE_DATA->position;
+			}
+			steeldrive2_publish_focuser(device, PRIVATE_DATA->moving ? INDIGO_BUSY_STATE : PRIVATE_DATA->failed ? INDIGO_ALERT_STATE : INDIGO_OK_STATE);
 		} else {
 			PRIVATE_DATA->external = false;
 			FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = FOCUSER_TEMPERATURE_PROPERTY->state = X_STATUS_PROPERTY->state = INDIGO_ALERT_STATE;
@@ -682,8 +739,9 @@ static void focuser_timer_callback(indigo_device *device) {
 static void focuser_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = steeldrive2_open(device);
+			connection_result = steeldrive2_open(device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -707,7 +765,11 @@ static void focuser_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				steeldrive2_close(device);
 			}
@@ -850,7 +912,11 @@ static void focuser_x_start_zeroing_handler(indigo_device *device) {
 	//+ focuser.X_START_ZEROING.on_change
 	bool requested = X_START_ZEROING_ITEM->sw.value;
 	X_START_ZEROING_ITEM->sw.value = false;
-	if (!requested || !steeldrive2_start_motion(device, 0, true)) {
+	if (!requested) {
+		// A request with the item OFF is answered without a command.
+		X_START_ZEROING_PROPERTY->state = INDIGO_OK_STATE;
+		indigo_update_property(device, X_START_ZEROING_PROPERTY, NULL);
+	} else if (!steeldrive2_start_motion(device, 0, true)) {
 		X_START_ZEROING_PROPERTY->state = INDIGO_ALERT_STATE;
 		indigo_update_property(device, X_START_ZEROING_PROPERTY, NULL);
 	} else {
@@ -867,7 +933,14 @@ static void focuser_limits_handler(indigo_device *device) {
 	//+ focuser.FOCUSER_LIMITS.on_change
 	int requested = (int)FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target;
 	double actual;
-	if (PRIVATE_DATA->active || !steeldrive2_ok(device, "$BS SET LIMIT:%d", requested) || !steeldrive2_get_number(device, "LIMIT", "LIMIT", 0, STEELDRIVE2_MAX_POSITION, true, &actual) || (int)actual != requested) {
+	if (requested < PRIVATE_DATA->position) {
+		// A limit below the current position would exclude it; nothing is sent.
+		FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target = PRIVATE_DATA->limit;
+		FOCUSER_LIMITS_PROPERTY->state = INDIGO_ALERT_STATE;
+		indigo_update_property(device, FOCUSER_LIMITS_PROPERTY, "The limit is below the current position");
+		return;
+	}
+	if (!steeldrive2_ok(device, "$BS SET LIMIT:%d", requested) || !steeldrive2_get_number(device, "LIMIT", "LIMIT", 0, STEELDRIVE2_MAX_POSITION, true, &actual) || (int)actual != requested) {
 		FOCUSER_LIMITS_PROPERTY->state = INDIGO_ALERT_STATE;
 	}
 	if (steeldrive2_get_number(device, "LIMIT", "LIMIT", 0, STEELDRIVE2_MAX_POSITION, true, &actual)) {
@@ -889,6 +962,13 @@ static void focuser_mode_handler(indigo_device *device) {
 	}
 	if (steeldrive2_get_switch(device, "TCOMP", "TCOMP", 1, &actual)) {
 		steeldrive2_set_switch(FOCUSER_MODE_PROPERTY, actual ? 1 : 0);
+		// In temperature compensation mode the controller moves the focuser, so the position is read-only there.
+		indigo_property_perm perm = actual ? INDIGO_RO_PERM : INDIGO_RW_PERM;
+		if (FOCUSER_POSITION_PROPERTY->perm != perm) {
+			indigo_delete_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+			FOCUSER_POSITION_PROPERTY->perm = perm;
+			indigo_define_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+		}
 	}
 	//- focuser.FOCUSER_MODE.on_change
 	indigo_update_property(device, FOCUSER_MODE_PROPERTY, NULL);
@@ -913,15 +993,16 @@ static void focuser_position_handler(indigo_device *device) {
 	int requested = (int)FOCUSER_POSITION_ITEM->number.target;
 	if (FOCUSER_ON_POSITION_SET_SYNC_ITEM->sw.value) {
 		bool accepted = !PRIVATE_DATA->active && !PRIVATE_DATA->moving && !PRIVATE_DATA->uncertain && steeldrive2_ok(device, "$BS SET POS:%d", requested) && steeldrive2_summary(device) && PRIVATE_DATA->position == requested && !PRIVATE_DATA->moving;
-		PRIVATE_DATA->uncertain = !accepted;
 		if (accepted) {
 			PRIVATE_DATA->target = PRIVATE_DATA->position;
+			FOCUSER_POSITION_ITEM->number.target = PRIVATE_DATA->position;
+		} else {
+			// The position the controller really has is kept, the target keeps the request and the next sync is accepted.
+			steeldrive2_summary(device);
 		}
 		steeldrive2_finish_motion(device, accepted ? INDIGO_OK_STATE : INDIGO_ALERT_STATE);
 	} else if (!steeldrive2_start_motion(device, requested, false)) {
-		FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = INDIGO_ALERT_STATE;
-		indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
-		indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+		steeldrive2_motion_refused(device);
 	} else if (PRIVATE_DATA->active) {
 		indigo_execute_handler_in(device, 0.1, motion_finalizer);
 	}
@@ -937,9 +1018,7 @@ static void focuser_steps_handler(indigo_device *device) {
 	long long requested = (long long)PRIVATE_DATA->position + direction * (long long)FOCUSER_STEPS_ITEM->number.value;
 	int target = requested < 0 ? 0 : requested > PRIVATE_DATA->limit ? PRIVATE_DATA->limit : (int)requested;
 	if (!steeldrive2_start_motion(device, target, false)) {
-		FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = INDIGO_ALERT_STATE;
-		indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
-		indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+		steeldrive2_motion_refused(device);
 	} else if (PRIVATE_DATA->active) {
 		indigo_execute_handler_in(device, 0.1, motion_finalizer);
 	}
@@ -950,28 +1029,40 @@ static void focuser_abort_motion_handler(indigo_device *device) {
 	//+ focuser.FOCUSER_ABORT_MOTION.on_change
 	FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
 	if (FOCUSER_ABORT_MOTION_ITEM->sw.value) {
+		// A move still queued behind this abort is never sent.
+		bool queued = !PRIVATE_DATA->active && !PRIVATE_DATA->external && (FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || X_START_ZEROING_PROPERTY->state == INDIGO_BUSY_STATE);
 		indigo_cancel_pending_handler(device, focuser_position_handler);
 		indigo_cancel_pending_handler(device, focuser_steps_handler);
 		indigo_cancel_pending_handler(device, focuser_x_start_zeroing_handler);
-		bool stopped = (!PRIVATE_DATA->active && !PRIVATE_DATA->moving && !PRIVATE_DATA->uncertain) || (steeldrive2_ok(device, "$BS STOP") && steeldrive2_summary(device) && !PRIVATE_DATA->moving);
-		indigo_cancel_pending_handler(device, motion_finalizer);
-		if (stopped) {
-			if (PRIVATE_DATA->zeroing) {
-				X_START_ZEROING_ITEM->sw.value = false;
-				X_START_ZEROING_PROPERTY->state = INDIGO_ALERT_STATE;
-				indigo_update_property(device, X_START_ZEROING_PROPERTY, "Zeroing aborted");
+		if (PRIVATE_DATA->active || PRIVATE_DATA->moving || PRIVATE_DATA->uncertain || queued) {
+			if (steeldrive2_stop(device)) {
+				// The aborted move ends ALERT at the position the focuser stopped at and keeps the requested target.
+				indigo_cancel_pending_handler(device, motion_finalizer);
+				if (PRIVATE_DATA->zeroing || X_START_ZEROING_PROPERTY->state == INDIGO_BUSY_STATE) {
+					X_START_ZEROING_ITEM->sw.value = false;
+					X_START_ZEROING_PROPERTY->state = INDIGO_ALERT_STATE;
+					indigo_update_property(device, X_START_ZEROING_PROPERTY, "Zeroing aborted");
+				}
+				PRIVATE_DATA->zeroing = false;
+				PRIVATE_DATA->target = PRIVATE_DATA->position;
+				if (PRIVATE_DATA->external) {
+					// motion the driver did not command keeps following the measured position
+					FOCUSER_POSITION_ITEM->number.target = PRIVATE_DATA->position;
+				}
+				steeldrive2_finish_motion(device, INDIGO_ALERT_STATE);
+			} else {
+				FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
+				if (!PRIVATE_DATA->active) {
+					// No finalizer follows the motion, so its state is unknown.
+					PRIVATE_DATA->external = false;
+					PRIVATE_DATA->failed = true;
+					FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = INDIGO_ALERT_STATE;
+					indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+					indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+				}
+				// Otherwise the move is not completed while the focuser may still run; the finalizer keeps
+				// following it and an immediate retry can stop it.
 			}
-			PRIVATE_DATA->active = PRIVATE_DATA->uncertain = PRIVATE_DATA->zeroing = false;
-			PRIVATE_DATA->target = PRIVATE_DATA->position;
-			FOCUSER_POSITION_ITEM->number.target = PRIVATE_DATA->position;
-			steeldrive2_publish_focuser(device, INDIGO_OK_STATE);
-		} else {
-			PRIVATE_DATA->active = PRIVATE_DATA->external = false;
-			PRIVATE_DATA->uncertain = true;
-			FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
-			FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = INDIGO_ALERT_STATE;
-			indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
-			indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
 		}
 	}
 	FOCUSER_ABORT_MOTION_ITEM->sw.value = false;
@@ -1100,13 +1191,15 @@ static indigo_result focuser_change_property(indigo_device *device, indigo_clien
 		INDIGO_COPY_VALUES_PROCESS_CHANGE(X_RESET_PROPERTY, focuser_x_reset_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(X_USE_ENDSTOP_PROPERTY, property)) {
+		INDIGO_REJECT_CHANGE_IF(PRIVATE_DATA->active || PRIVATE_DATA->moving || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || X_START_ZEROING_PROPERTY->state == INDIGO_BUSY_STATE, X_USE_ENDSTOP_PROPERTY, "The focuser is moving");
 		INDIGO_COPY_VALUES_PROCESS_CHANGE(X_USE_ENDSTOP_PROPERTY, focuser_x_use_endstop_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(X_START_ZEROING_PROPERTY, property)) {
-		INDIGO_REJECT_CHANGE_IF(FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_ABORT_MOTION_PROPERTY->state == INDIGO_BUSY_STATE, X_START_ZEROING_PROPERTY, "Another motion is pending");
+		INDIGO_REJECT_CHANGE_IF(FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_ABORT_MOTION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_MODE_AUTOMATIC_ITEM->sw.value, X_START_ZEROING_PROPERTY, "Another motion is pending or temperature compensation moves the focuser");
 		INDIGO_COPY_VALUES_PROCESS_CHANGE(X_START_ZEROING_PROPERTY, focuser_x_start_zeroing_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_REVERSE_MOTION_PROPERTY, property)) {
+		INDIGO_REJECT_CHANGE_IF(PRIVATE_DATA->active || PRIVATE_DATA->moving || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || X_START_ZEROING_PROPERTY->state == INDIGO_BUSY_STATE, FOCUSER_REVERSE_MOTION_PROPERTY, "The focuser is moving");
 		indigo_property_copy_values(FOCUSER_REVERSE_MOTION_PROPERTY, property, false);
 		FOCUSER_REVERSE_MOTION_PROPERTY->state = INDIGO_OK_STATE;
 		indigo_update_property(device, FOCUSER_REVERSE_MOTION_PROPERTY, NULL);
@@ -1117,12 +1210,15 @@ static indigo_result focuser_change_property(indigo_device *device, indigo_clien
 		indigo_update_property(device, FOCUSER_ON_POSITION_SET_PROPERTY, NULL);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_LIMITS_PROPERTY, property)) {
+		INDIGO_REJECT_CHANGE_IF(PRIVATE_DATA->active || PRIVATE_DATA->moving || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || X_START_ZEROING_PROPERTY->state == INDIGO_BUSY_STATE, FOCUSER_LIMITS_PROPERTY, "The focuser is moving");
 		INDIGO_COPY_TARGETS_PROCESS_CHANGE(FOCUSER_LIMITS_PROPERTY, focuser_limits_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_MODE_PROPERTY, property)) {
+		INDIGO_REJECT_CHANGE_IF(PRIVATE_DATA->active || PRIVATE_DATA->moving || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || X_START_ZEROING_PROPERTY->state == INDIGO_BUSY_STATE, FOCUSER_MODE_PROPERTY, "The focuser is moving");
 		INDIGO_COPY_VALUES_PROCESS_CHANGE(FOCUSER_MODE_PROPERTY, focuser_mode_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_COMPENSATION_PROPERTY, property)) {
+		INDIGO_REJECT_CHANGE_IF(PRIVATE_DATA->active || PRIVATE_DATA->moving || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || X_START_ZEROING_PROPERTY->state == INDIGO_BUSY_STATE, FOCUSER_COMPENSATION_PROPERTY, "The focuser is moving");
 		INDIGO_COPY_TARGETS_PROCESS_CHANGE(FOCUSER_COMPENSATION_PROPERTY, focuser_compensation_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_POSITION_PROPERTY, property)) {
@@ -1130,7 +1226,7 @@ static indigo_result focuser_change_property(indigo_device *device, indigo_clien
 		INDIGO_COPY_TARGETS_PROCESS_CHANGE(FOCUSER_POSITION_PROPERTY, focuser_position_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_STEPS_PROPERTY, property)) {
-		INDIGO_REJECT_CHANGE_IF(FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || X_START_ZEROING_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_ABORT_MOTION_PROPERTY->state == INDIGO_BUSY_STATE, FOCUSER_STEPS_PROPERTY, "Another motion is pending");
+		INDIGO_REJECT_CHANGE_IF(FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || X_START_ZEROING_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_ABORT_MOTION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_MODE_AUTOMATIC_ITEM->sw.value, FOCUSER_STEPS_PROPERTY, "Another motion is pending or temperature compensation moves the focuser");
 		INDIGO_COPY_VALUES_PROCESS_CHANGE(FOCUSER_STEPS_PROPERTY, focuser_steps_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_ABORT_MOTION_PROPERTY, property)) {
@@ -1179,8 +1275,9 @@ static void aux_timer_callback(indigo_device *device) {
 static void aux_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = steeldrive2_open(device->master_device);
+			connection_result = steeldrive2_open(device->master_device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -1203,7 +1300,11 @@ static void aux_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				steeldrive2_close(device);
 			}

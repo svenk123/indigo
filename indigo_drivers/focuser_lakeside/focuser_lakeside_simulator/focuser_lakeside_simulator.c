@@ -24,7 +24,8 @@
 
 static const char *profile = "normal", *ready_file, *fault_file;
 static FILE *events;
-static bool headless, trace, moving, stalled, automatic;
+static bool headless, trace, moving, stalled, frozen, automatic;
+static double frozen_report;
 static volatile sig_atomic_t running = 1;
 static int serial_fd = -1, backlash, reverse, active_slope = 1, last_reported_position;
 static int slope[2] = { 10, 20 }, slope_direction[2] = { 0, 1 }, slope_deadband[2] = { 5, 10 }, slope_period[2] = { 6, 12 };
@@ -99,9 +100,9 @@ static bool read_fault(const char *command, char *action) {
 	if (!strcmp(key, "external")) {
 		int position;
 		if (parse_unsigned(action, 0, 65535, &position)) {
-			serial_motion_sync(&motion, position);
+			// Handset motion at its fast rate: finite speed, no P/DONE frames to the PC.
+			serial_motion_start(&motion, position, 20000);
 			moving = false;
-			last_reported_position = position;
 		}
 		unlink(fault_file);
 		return false;
@@ -129,7 +130,11 @@ static bool inject(const char *command, char expected) {
 		return false;
 	}
 	event("FAULT", action);
-	if (!strcmp(action, "silent")) {
+	if (!strcmp(action, "slow")) {
+		// Delayed but valid reply: holds the driver's queue on this transaction.
+		usleep(800000);
+		return false;
+	} else if (!strcmp(action, "silent")) {
 		return true;
 	} else if (!strcmp(action, "close")) {
 		running = 0;
@@ -154,6 +159,11 @@ static bool inject(const char *command, char expected) {
 	} else if (!strcmp(action, "stall")) {
 		stalled = true;
 		return false;
+	} else if (!strcmp(action, "frozen")) {
+		// A stuck motor that keeps reporting its position: P<n> of the same position every 100 ms, never DONE.
+		stalled = frozen = true;
+		frozen_report = 0;
+		return false;
 	} else {
 		reply("%cBAD#", expected ? expected : 'X');
 	}
@@ -161,6 +171,14 @@ static bool inject(const char *command, char expected) {
 }
 
 static void update_motion(void) {
+	if (moving && frozen) {
+		double now = serial_motion_time();
+		if (now >= frozen_report) {
+			frozen_report = now + 0.1;
+			reply("P%d#", last_reported_position);
+		}
+		return;
+	}
 	if (!moving || stalled) {
 		return;
 	}
@@ -168,7 +186,13 @@ static void update_motion(void) {
 	if (position != last_reported_position) {
 		last_reported_position = position;
 		if (!inject("progress", 'P')) {
-			reply("P%d#", position);
+			if (!strcmp(profile, "padded")) {
+				// numbers padded with spaces and a Kelvin report between the positions
+				reply("P%5d#", position);
+				reply("K%5d#", 592);
+			} else {
+				reply("P%d#", position);
+			}
 		}
 	}
 	if (motion.duration == 0) {
@@ -190,7 +214,11 @@ static void start_move(int target) {
 }
 
 static void value_reply(char prefix, int value) {
-	reply("%c%d#", prefix, value);
+	if (!strcmp(profile, "padded")) {
+		reply("%c%5d#", prefix, value);
+	} else {
+		reply("%c%d#", prefix, value);
+	}
 }
 
 static void dispatch(const char *command) {
@@ -217,14 +245,19 @@ static void dispatch(const char *command) {
 	} else if (!strcmp(command, "?D")) {
 		value_reply('D', reverse);
 	} else if (!strcmp(command, "?T")) {
-		value_reply('T', (int)(temperature * 2));
+		if (!strcmp(profile, "padded")) {
+			// no probe connected
+			reply("TN/A#");
+		} else {
+			value_reply('T', (int)(temperature * 2));
+		}
 	} else if (!strcmp(command, "CTF")) {
 		automatic = false;
 	} else if (!strcmp(command, "CTN")) {
 		automatic = true;
 	} else if (!strcmp(command, "CH")) {
 		serial_motion_stop(&motion);
-		moving = stalled = false;
+		moving = stalled = frozen = false;
 		last_reported_position = (int)motion.position;
 	} else if (!strncmp(command, "CI", 2) && parse_unsigned(command + 2, 0, 65535, &value)) {
 		int position = (int)serial_motion_update(&motion);
@@ -287,12 +320,25 @@ int main(int argc, char **argv) {
 		} else if (i + 1 < argc && !strcmp(argv[i], "--profile")) {
 			profile = argv[++i];
 		} else {
-			fprintf(stderr, "Usage: %s [--headless] [--trace] [--ready-file PATH] [--profile normal|split|alternate]\n", argv[0]);
+			fprintf(stderr, "Usage: %s [--headless] [--trace] [--ready-file PATH] [--profile normal|split|alternate|start_state|moving|padded]\n", argv[0]);
 			return 1;
 		}
 	}
 	serial_motion_sync(&motion, !strcmp(profile, "alternate") ? 1000 : 32768);
 	temperature = !strcmp(profile, "alternate") ? -5.5 : 23.0;
+	if (!strcmp(profile, "start_state")) {
+		// Settings the controller keeps from a previous session, none of them a driver default.
+		serial_motion_sync(&motion, 1234);
+		temperature = -3.5;
+		backlash = 17;
+		slope[0] = 33;
+		slope_direction[0] = 1;
+		slope_deadband[0] = 7;
+		slope_period[0] = 9;
+	} else if (!strcmp(profile, "moving")) {
+		// Handset motion already running when the driver connects.
+		serial_motion_start(&motion, 40000, 2000);
+	}
 	last_reported_position = (int)motion.position;
 	const char *event_path = getenv("INDIGO_LAKESIDE_EVENTS");
 	events = event_path ? fopen(event_path, "w") : NULL;

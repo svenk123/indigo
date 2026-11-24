@@ -45,6 +45,8 @@ typedef struct {
 	int detect_reply_delay;
 	bool lose_detect_reply;
 	int stall_frame_at;
+	int move_start_delay;
+	int light_delay;
 } simulator_options;
 
 static simulator_options options = {
@@ -55,7 +57,9 @@ static simulator_options options = {
 	.firmware = "20240618",
 	.detect_reply_delay = 0,
 	.lose_detect_reply = false,
-	.stall_frame_at = 0
+	.stall_frame_at = 0,
+	.move_start_delay = 0,
+	.light_delay = 0
 };
 
 static const char *simulator_name = "aux_wcv4ec";
@@ -71,6 +75,8 @@ static void usage(const char *name) {
 	printf("  --detect-reply-delay <ms> Delay the OpenSet/CloseSet reply to 100001/100000\n");
 	printf("  --lose-detect-reply     Teach the angle on 100001/100000 but lose the OpenSet/CloseSet reply on the wire\n");
 	printf("  --stall-frame-at <ms>   Stall the first status frame sent <ms> after start mid-line, one byte every 2 s\n");
+	printf("  --move-start-delay <ms> Keep the cover at its old angle for <ms> after 1000/1001 before the servo moves\n");
+	printf("  --light-delay <ms>      Apply a brightness command (1-255, 9999) <ms> after it, the frames report the old one until then\n");
 	printf("  -h, --help              Show this help and exit\n");
 }
 
@@ -120,6 +126,18 @@ static bool parse_args(int argc, char *argv[]) {
 				return false;
 			}
 			options.stall_frame_at = atoi(argv[i]);
+		} else if (!strcmp(argv[i], "--move-start-delay")) {
+			if (++i == argc) {
+				fprintf(stderr, "--move-start-delay requires milliseconds\n");
+				return false;
+			}
+			options.move_start_delay = atoi(argv[i]);
+		} else if (!strcmp(argv[i], "--light-delay")) {
+			if (++i == argc) {
+				fprintf(stderr, "--light-delay requires milliseconds\n");
+				return false;
+			}
+			options.light_delay = atoi(argv[i]);
 		} else {
 			fprintf(stderr, "Unknown option '%s'\n", argv[i]);
 			return false;
@@ -143,6 +161,11 @@ static int brightness = 0;
 static bool do_open = false;
 static bool do_close = false;
 static bool pending_done = false;
+// monotonic time in ms before which a requested move does not start, the frames keep reporting the old angle
+static long move_hold_until = 0;
+// a brightness command takes effect at requested_brightness_at (monotonic ms), the frames report the old one until then
+static int requested_brightness = 0;
+static long requested_brightness_at = 0;
 
 // one status frame stalls after its first STALL_HEAD bytes and trickles the next STALL_BYTES bytes one every
 // STALL_GAP_US, a gap shorter than the 5 s serial read timeout, so each byte keeps a read without its own
@@ -176,10 +199,32 @@ static bool sim_printf(int fd, const char *format, ...) {
 	return serial_simulator_write_all(fd, buffer, (size_t)length);
 }
 
+static long monotonic_ms(void) {
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static void request_brightness(int value) {
+	requested_brightness = value;
+	requested_brightness_at = monotonic_ms() + options.light_delay;
+}
+
+// called with state_mutex held; the brightness field was introduced with firmware 20240618
+static int format_status(char *frame, size_t size) {
+	if (brightness != requested_brightness && monotonic_ms() >= requested_brightness_at) {
+		brightness = requested_brightness;
+	}
+	if (strcmp(options.firmware, "20240618") < 0) {
+		return snprintf(frame, size, "%sA%sA%.2fA%.2fA%.2fA%.2fA\n", options.model, options.firmware, close_position, open_position, current_position, voltage);
+	}
+	return snprintf(frame, size, "%sA%sA%.2fA%.2fA%.2fA%.2fA%dA\n", options.model, options.firmware, close_position, open_position, current_position, voltage, brightness);
+}
+
 static void send_stalled_status(int fd) {
 	char frame[256];
 	pthread_mutex_lock(&state_mutex);
-	int length = snprintf(frame, sizeof(frame), "%sA%sA%.2fA%.2fA%.2fA%.2fA%dA\n", options.model, options.firmware, close_position, open_position, current_position, voltage, brightness);
+	int length = format_status(frame, sizeof(frame));
 	pthread_mutex_unlock(&state_mutex);
 	if (length < STALL_HEAD + STALL_BYTES || length >= (int)sizeof(frame)) {
 		return;
@@ -199,22 +244,19 @@ static void send_status(int fd) {
 		sim_printf(fd, "done\n");
 		pending_done = false;
 	}
-	sim_printf(
-		fd,
-		"%sA%sA%.2fA%.2fA%.2fA%.2fA%dA\n",
-		options.model,
-		options.firmware,
-		close_position,
-		open_position,
-		current_position,
-		voltage,
-		brightness
-	);
+	char frame[256];
+	format_status(frame, sizeof(frame));
+	sim_printf(fd, "%s", frame);
 	pthread_mutex_unlock(&state_mutex);
 }
 
 static void update_cover_position(void) {
 	pthread_mutex_lock(&state_mutex);
+	if (monotonic_ms() < move_hold_until) {
+		// the servo has not started yet
+		pthread_mutex_unlock(&state_mutex);
+		return;
+	}
 	if (do_open) {
 		if (open_position - current_position > 15) {
 			current_position += 15;
@@ -311,10 +353,12 @@ static void dispatch_command(int fd, const char *buffer) {
 		case 1000:
 			do_open = false;
 			do_close = true;
+			move_hold_until = monotonic_ms() + options.move_start_delay;
 			break;
 		case 1001:
 			do_open = true;
 			do_close = false;
+			move_hold_until = monotonic_ms() + options.move_start_delay;
 			break;
 		case 2000:
 			heater = 0;
@@ -329,7 +373,7 @@ static void dispatch_command(int fd, const char *buffer) {
 			heater = 150;
 			break;
 		case 9999:
-			brightness = 0;
+			request_brightness(0);
 			break;
 		case 100000:
 			close_position = current_position;
@@ -345,7 +389,7 @@ static void dispatch_command(int fd, const char *buffer) {
 			} else if (10000 <= command && command <= 12055) {
 				close_position = (command - 10000) / 100.0;
 			} else if (1 <= command && command <= 255) {
-				brightness = command;
+				request_brightness(command);
 			} else {
 				serial_simulator_trace_line(options.trace, "??", buffer);
 			}

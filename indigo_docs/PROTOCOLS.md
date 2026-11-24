@@ -30,6 +30,14 @@ Extensions are enabled only in case of succesfull handshake with two possible va
 → <getProperties version='1.7' client='My Client' switch='2.0'>
 ← <switchProtocol version='2.0'/>
 ```
+The offer can also come with a request for one device or property, as INDIGO clients send it when they start with such
+a request. `version` and `switch` precede `device` and `name`, because the server switches before it reads the name,
+which is therefore in INDIGO form:
+
+```
+→ <getProperties version='1.7' switch='2.0' device='CCD Simulator' name='CCD_EXPOSURE'/>
+← <switchProtocol version='2.0'/>
+```
 In case of successful handshake for version 2.0 the following extensions can be used:
 
 1. BLOBs in BASE64 representation can use any line length instead of fixed 74 characters for much faster encoding/decoding.
@@ -60,7 +68,14 @@ upload the data to http://localhost:7624/blob/0x10381d798 with PUT method
   </newBLOBVector>
 ```
 
+For the native backend that accepts images for solving, see the [native INDIGO solver reference](../indigo_drivers/agent_platesolver/doc/PLATESOLVER.md).
+
 INDI style BLOB uploads are not supported by INDIGO for performance reasons.
+
+HTTP BLOB PUT requests require one decimal `Content-Length` header; duplicate lengths, transfer encodings, malformed or incomplete headers and invalid sizes are rejected. The default maximum upload is 64 MiB. Pending uploads and retained uploaded cache content share a 256 MiB budget; exceeding it fails without replacing the previous BLOB. Builds may override `INDIGO_BLOB_UPLOAD_LIMIT` and `INDIGO_BLOB_UPLOAD_BUDGET` consistently for the library and its consumers. Empty uploads are allowed. A complete body is received privately before atomic publication; failed or incomplete uploads leave the prior cache unchanged. Uploads allow at most 5 seconds without progress and 60 seconds in total, including headers, and close the HTTP connection after their response. These defaults can be changed at build time with `INDIGO_BLOB_UPLOAD_PROGRESS_TIMEOUT` and `INDIGO_BLOB_UPLOAD_TOTAL_TIMEOUT` in seconds.
+
+Inline XML BLOBs received from an upstream device are limited to 256 MiB per item. Their declared size must match the decoded BASE64 bytes exactly; malformed padding and incomplete data terminate parsing. Each item retains its own decoded data until dispatch. This is a per-item limit, not a total session allocation budget.
+
 
 4. Number property items has 'target' attribute to distinguish between current and target item value for properties like CCD_EXPOSURE.
 
@@ -68,9 +83,10 @@ INDI style BLOB uploads are not supported by INDIGO for performance reasons.
 
 6. Every newXXXVector request may contain 'token' attribute containing client token used to allow write access to the protected or locked device. Please see: [INDIGO_DEVICE_ACCESS_CONTROL_AND_LOCKING.md](https://github.com/indigo-astronomy/indigo/blob/master/indigo_docs/INDIGO_DEVICE_ACCESS_CONTROL_AND_LOCKING.md)
 
-If protocol version 2.0 is used, INDIGO property and item names are used (more gramatically and semantically consistent),
-while if version 1.7 is used, names of  commonly used names are maped to their INDI counter parts.  Also "Idle" property state is mapped
-to "Ok" state ("Idle" state is not used as a property state in INDIGO, just as a light item value).
+Protocol version 2.0 uses INDIGO property and item names, while version 1.7 maps commonly used names to their INDI counterparts.
+When receiving property states over legacy XML protocol version 1.7, INDIGO maps "Idle" to "Ok" for compatibility.
+XML protocol version 2.0 preserves "Idle". Light item values preserve "Idle" in both versions.
+INDIGO uses "Idle" both as a property state and as a light item value.
 
 ## INDIGO JSON protocol
 
@@ -79,6 +95,8 @@ e.g. javascript client used by web applications or .net client used by ASCOM dri
 over TCP or WEB-cocket stream.
 
 JSON protocol offers just BLOBs referenced by URL, no inline data.
+
+WebSocket clients send masked text frames. Text fragmentation and ping/pong/close control frames are supported; invalid lengths, incomplete frames, binary frames and unsupported flags/opcodes terminate parsing. A text message, including all continuation frames, is limited to 256 KiB.
 
 The mapping of XML to JSON messages demonstrated on a few examples is as follows:
 
@@ -207,6 +225,14 @@ tip: "Information text"
 The hint text can be used as a tool tip for the property or the item witget in the UI. It should contain a short description of the proeprty or the item.
 
 
+
+## Server resource limits and BLOB upload ownership
+
+Client XML and JSON property requests are limited to 4096 items and 16 MiB of parsed wire input per request by default (`INDIGO_PROTOCOL_ITEM_LIMIT` and `INDIGO_PROTOCOL_REQUEST_LIMIT`). The parsers close an over-limit input without dispatching its partial property. Limits reset between requests; JSON rejects a second nonempty `items` array in the same vector. Upstream XML property updates retain their separate image limits, including the 256 MiB inline BLOB item limit.
+
+HTTP BLOB PUT accepts only write-only upload entries; read-only image snapshots cannot be replaced through PUT (HTTP 403). Uploads are staged for their published device/property/item and consumed once by the matching XML BLOB change. A change without fresh staging is rejected, so a repeated request cannot reuse an earlier upload. Each upload retains the 64 MiB limit and the shared pending/published staging budget is 256 MiB; the same budget bounds staging copied into one XML change. Compile-time settings are declared in [indigo_bus.h](../indigo_libs/indigo/indigo_bus.h). Existing BLOB identifiers select an item and do not authenticate a client; this does not introduce client authentication or isolation between clients addressing the same item.
+
+The portable TCP listener helper admits at most 128 active worker callbacks across its listeners (`INDIGO_TCP_WORKER_LIMIT`). Excess accepted connections close without starting a worker. Failed worker creation closes its socket and releases admission. INDIGO server connections must supply their initial protocol byte within five seconds (`INDIGO_SERVER_INITIAL_TIMEOUT`, microseconds). Established XML/JSON sessions retain their existing idle behavior. The deadline covers initial protocol detection, not every subsequent request; the admission bound also covers workers waiting on partial requests.
 
 ## References
 

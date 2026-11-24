@@ -9,6 +9,7 @@
 
 #include <indigo/indigo_bus.h>
 #include <indigo/indigo_raw_utils.h>
+#include <indigo/indigo_bahtinov.h>
 #include <indigo/indigo_stretch.h>
 #include <indigo/indigo_base64.h>
 

@@ -173,7 +173,7 @@ static void apply_external_fault(void) {
 	if (file == NULL) {
 		return;
 	}
-	if (fscanf(file, "%79s %79s", key, value) != 2 || (strcmp(key, "external_position") && strcmp(key, "external_temperature") && strcmp(key, "external_pwm") && strcmp(key, "external_pid_ctrl"))) {
+	if (fscanf(file, "%79s %79s", key, value) != 2 || (strcmp(key, "external_position") && strcmp(key, "external_move") && strcmp(key, "external_temperature") && strcmp(key, "external_pwm") && strcmp(key, "external_pid_ctrl"))) {
 		fclose(file);
 		return;
 	}
@@ -184,6 +184,14 @@ static void apply_external_fault(void) {
 		long parsed = strtol(value, &end, 10);
 		if (!*end && parsed >= 0 && parsed <= limit) {
 			serial_motion_sync(&motion, parsed);
+			zeroed = false;
+		}
+	} else if (!strcmp(key, "external_move")) {
+		// The focuser moves without a command, as from its hand controller.
+		char *end;
+		long parsed = strtol(value, &end, 10);
+		if (!*end && parsed >= 0 && parsed <= limit) {
+			serial_motion_start(&motion, parsed, 500);
 			zeroed = false;
 		}
 	} else if (!strcmp(key, "external_temperature")) {
@@ -408,9 +416,12 @@ static void dispatch(char *command) {
 	} else if (!strncmp(command, "$BS SET POS:", 12)) {
 		long value;
 		if (parse_integer(command + 12, 0, MAX_POSITION, &value)) {
-			serial_motion_sync(&motion, value);
-			zeroed = value == 0;
-			ok_reply("SET_POS");
+			// A refused or lost SET POS leaves the position as it was.
+			if (!injected_reply("SET_POS", "$BS OK")) {
+				serial_motion_sync(&motion, value);
+				zeroed = value == 0;
+				send_line("$BS OK", false, false);
+			}
 		} else {
 			send_line("$BS ERROR: Unknown command!", false, false);
 		}
@@ -437,10 +448,13 @@ static void dispatch(char *command) {
 			send_line("$BS ERROR: Unknown command!", false, false);
 		}
 	} else if (!strcmp(command, "$BS STOP")) {
-		serial_motion_stop(&motion);
-		zeroing = false;
-		zeroed = false;
-		ok_reply("STOP");
+		// A refused or lost STOP leaves the motor running.
+		if (!injected_reply("STOP", "$BS OK")) {
+			serial_motion_stop(&motion);
+			zeroing = false;
+			zeroed = false;
+			send_line("$BS OK", false, false);
+		}
 	} else if (!strcmp(command, "$BS ZEROING")) {
 		if (use_endstop) {
 			char action[80] = { 0 };
@@ -459,7 +473,12 @@ static void dispatch(char *command) {
 		int position = (int)lround(serial_motion_update(&motion));
 		double average = (temp0 + temp0_offset + temp1 + temp1_offset) / 2;
 		char line[512];
-		snprintf(line, sizeof(line), "$BS STATUS NAME:%s;POS:%d;STATE:%s;LIMIT:%d;FOCUS:%d;TEMP0:%.2f;TEMP1:%.2f;TEMP_AVG:%.2f;TCOMP:%d;PWM:%d", device_name, position, motion_state(), limit, focus, temp0 + temp0_offset, temp1 + temp1_offset, average, tcomp, pwm);
+		if (!strcmp(profile, "documented")) {
+			// the manual's example answer has no $BS prefix; an item a later firmware might add is appended
+			snprintf(line, sizeof(line), "STATUS NAME:%s;POS:%d;STATE:%s;LIMIT:%d;FOCUS:%d;TEMP0:%.2f;TEMP1:%.2f;TEMP_AVG:%.2f;TCOMP:%d;PWM:%d;RCX:0", device_name, position, motion_state(), limit, focus, temp0 + temp0_offset, temp1 + temp1_offset, average, tcomp, pwm);
+		} else {
+			snprintf(line, sizeof(line), "$BS STATUS NAME:%s;POS:%d;STATE:%s;LIMIT:%d;FOCUS:%d;TEMP0:%.2f;TEMP1:%.2f;TEMP_AVG:%.2f;TCOMP:%d;PWM:%d", device_name, position, motion_state(), limit, focus, temp0 + temp0_offset, temp1 + temp1_offset, average, tcomp, pwm);
+		}
 		if (!injected_reply("SUMMARY", line)) {
 			send_line(line, false, false);
 		}
@@ -532,11 +551,11 @@ static bool parse_args(int argc, char *argv[]) {
 		} else if (i + 1 < argc && !strcmp(argv[i], "--profile")) {
 			profile = argv[++i];
 		} else {
-			fprintf(stderr, "Usage: %s [--headless] [--trace] [--ready-file PATH] [--profile normal|split|alternate|missing_sensor|stall]\n", argv[0]);
+			fprintf(stderr, "Usage: %s [--headless] [--trace] [--ready-file PATH] [--profile normal|split|alternate|missing_sensor|stall|documented]\n", argv[0]);
 			return false;
 		}
 	}
-	return !strcmp(profile, "normal") || !strcmp(profile, "split") || !strcmp(profile, "alternate") || !strcmp(profile, "missing_sensor") || !strcmp(profile, "stall");
+	return !strcmp(profile, "normal") || !strcmp(profile, "split") || !strcmp(profile, "alternate") || !strcmp(profile, "missing_sensor") || !strcmp(profile, "stall") || !strcmp(profile, "documented");
 }
 
 static void stop_signal(int signal) {

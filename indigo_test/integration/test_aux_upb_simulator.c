@@ -304,28 +304,9 @@ static int property_count(const char *property_name) {
 // The refusal is a transition, not a resting state: the driver publishes the
 // property in ALERT and the very next status poll publishes the running motion
 // again, so the check is whether ALERT was published at all after the request.
+// A refused motion request: a BUSY message while the running move owns the property, ALERT with the values restored otherwise.
 static bool assert_refused_motion_request(const char *property_name, const char *item_name, double value) {
-	indigo_item *item = find_cached_item(property_name, item_name);
-	if (item == NULL) {
-		fprintf(stderr, "Missing number item %s.%s\n", property_name, item_name);
-		return false;
-	}
-	double previous_value = item->number.value, previous_target = item->number.target;
-	unsigned int revision = property_state_revision(property_name, INDIGO_ALERT_STATE);
-	if (indigo_change_number_property_1(&simulator_test_client, focuser.device_name, property_name, item_name, value) != INDIGO_OK) {
-		return false;
-	}
-	if (!wait_for_property_state_seen_after(property_name, INDIGO_ALERT_STATE, revision)) {
-		indigo_property *property = find_cached_property(property_name);
-		fprintf(stderr, "Refused %s was never published in ALERT, state is %d\n", property_name, property ? property->state : -1);
-		return false;
-	}
-	item = find_cached_item(property_name, item_name);
-	if (item == NULL || item->number.value != previous_value || item->number.target != previous_target) {
-		fprintf(stderr, "Refused %s.%s was not restored: value %g -> %g, target %g -> %g\n", property_name, item_name, previous_value, item ? item->number.value : NAN, previous_target, item ? item->number.target : NAN);
-		return false;
-	}
-	return true;
+	return assert_rejected_number_change_on(focuser.device_name, property_name, item_name, value);
 }
 
 static void outlet_item(char *buffer, size_t size, int index) {
@@ -361,6 +342,8 @@ static void metadata_and_property_completeness(void) {
 	// PU:b is documented for both models, so the hub switch is available on the v2
 	// box as well, next to its per port controls.
 	assert_property_has_item("X_AUX_HUB", "ENABLED");
+	indigo_item *model = find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_MODEL_ITEM_NAME);
+	SERIAL_CHECK_TRUE(model != NULL && !strcmp(model->text.value, "PegasusAstro UPBv2"));
 cleanup:
 	stop_serial_driver(&aux);
 	stop_external_serial_simulator(&simulator);
@@ -380,6 +363,8 @@ static void upb1_model_reduces_the_outlet_inventory(void) {
 	SERIAL_CHECK_TRUE(!has_defined_property("X_AUX_VARIABLE_POWER_OUTLET"));
 	assert_property_has_item("X_AUX_HUB", "ENABLED");
 	assert_property_has_item("X_AUX_HUB", "DISABLED");
+	indigo_item *model = find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_MODEL_ITEM_NAME);
+	SERIAL_CHECK_TRUE(model != NULL && !strcmp(model->text.value, "PegasusAstro UPB"));
 cleanup:
 	stop_serial_driver(&aux);
 	stop_external_serial_simulator(&simulator);
@@ -555,6 +540,22 @@ static void autodew_state_is_adopted_from_the_device(void) {
 	const char *arguments[] = { "--autodew", NULL };
 	SERIAL_CHECK_TRUE(start_upb(&simulator, arguments));
 	SERIAL_CHECK_TRUE(start_serial_driver(&aux, simulator.port));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_DEW_CONTROL_PROPERTY_NAME, AUX_DEW_CONTROL_AUTOMATIC_ITEM_NAME, true));
+cleanup:
+	stop_serial_driver(&aux);
+	stop_external_serial_simulator(&simulator);
+}
+
+// The v2 reports the automatic dew mode as an integer: 1 for all dew channels, 2 to 7 for a subset of them.
+// A subset is automatic as well, at the connect and in every poll after it.
+static void v2_channel_autodew_stays_automatic(void) {
+	external_serial_simulator simulator = { 0 };
+	const char *arguments[] = { "--model", "upb2", "--autodew-mode", "5", NULL };
+	SERIAL_CHECK_TRUE(start_upb(&simulator, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&aux, simulator.port));
+	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_DEW_CONTROL_PROPERTY_NAME, AUX_DEW_CONTROL_AUTOMATIC_ITEM_NAME, true));
+	// Two status polls later the mode is still automatic.
+	indigo_usleep(4500000);
 	SERIAL_CHECK_TRUE(wait_for_switch_item_value(AUX_DEW_CONTROL_PROPERTY_NAME, AUX_DEW_CONTROL_AUTOMATIC_ITEM_NAME, true));
 cleanup:
 	stop_serial_driver(&aux);
@@ -1342,6 +1343,67 @@ cleanup:
 	stop_external_serial_simulator(&simulator);
 }
 
+static char focuser_command_log[PATH_MAX], focuser_move_command[32];
+static atomic_int focuser_ok_before_move;
+
+static indigo_result check_focuser_ok_updates(indigo_client *client, indigo_device *device, indigo_property *property, const char *message) {
+	if (!strcmp(property->device, focuser.device_name) && (!strcmp(property->name, FOCUSER_POSITION_PROPERTY_NAME) || !strcmp(property->name, FOCUSER_STEPS_PROPERTY_NAME)) && property->state == INDIGO_OK_STATE) {
+		if (!command_logged(focuser_command_log, focuser_move_command)) {
+			atomic_store(&focuser_ok_before_move, 1);
+		}
+	}
+	return simulator_client_update_property(client, device, property, message);
+}
+
+// TGT-D29: a position request copied while the focuser poll waits for its SP reply is queued behind the poll. The
+// poll's SI then reports no motion, but the request has not been sent yet, so the poll must leave the BUSY
+// properties to the handler instead of publishing them OK before the box got SM. The simulator answers the SP of
+// the poll that finds the delay file 0.5 s late, which holds the request in that window every time.
+static void focuser_poll_leaves_a_queued_request_busy(void) {
+	external_serial_simulator simulator = { 0 };
+	char delay_file[] = "/tmp/indigo-upb-delay.XXXXXX";
+	int fd = mkstemp(delay_file);
+	SERIAL_CHECK_TRUE(fd >= 0);
+	close(fd);
+	unlink(delay_file);
+	snprintf(focuser_command_log, sizeof(focuser_command_log), "%s.log", delay_file);
+	unlink(focuser_command_log);
+	const char *arguments[] = { "--delay-file", delay_file, "SP", "--command-log", focuser_command_log, NULL };
+	SERIAL_CHECK_TRUE(start_upb(&simulator, arguments));
+	SERIAL_CHECK_TRUE(start_shared_serial_device(&focuser, aux.device_name, simulator.port));
+	SERIAL_CHECK_TRUE(set_switch(&focuser, FOCUSER_ON_POSITION_SET_PROPERTY_NAME, FOCUSER_ON_POSITION_SET_GOTO_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_ON_POSITION_SET_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(set_number(&focuser, FOCUSER_LIMITS_PROPERTY_NAME, FOCUSER_LIMITS_MAX_POSITION_ITEM_NAME, 9999999));
+	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_LIMITS_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_OK_STATE));
+	int target = (int)cached_number_value(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME) + 100;
+	snprintf(focuser_move_command, sizeof(focuser_move_command), "SM:%d", target);
+	FILE *file = fopen(delay_file, "w");
+	SERIAL_CHECK_TRUE(file != NULL);
+	fclose(file);
+	for (int i = 0; i < 400 && access(delay_file, F_OK) == 0; i++) {
+		indigo_usleep(10000);
+	}
+	SERIAL_CHECK_TRUE(access(delay_file, F_OK) != 0);
+	atomic_store(&focuser_ok_before_move, 0);
+	simulator_test_client.update_property = check_focuser_ok_updates;
+	SERIAL_CHECK_TRUE(set_number(&focuser, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, target));
+	for (int i = 0; i < 300 && !command_logged(focuser_command_log, focuser_move_command); i++) {
+		indigo_usleep(10000);
+	}
+	SERIAL_CHECK_TRUE(command_logged(focuser_command_log, focuser_move_command));
+	SERIAL_CHECK_EQ_INT(0, atomic_load(&focuser_ok_before_move));
+	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_number_item_value(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, target, 0.5));
+	SERIAL_CHECK_EQ_INT(0, atomic_load(&focuser_ok_before_move));
+cleanup:
+	simulator_test_client.update_property = simulator_client_update_property;
+	unlink(focuser_command_log);
+	unlink(delay_file);
+	stop_serial_driver(&focuser);
+	stop_external_serial_simulator(&simulator);
+}
+
 // The focuser initialization parses the SA frame; a malformed one has to roll the
 // connection back instead of leaving a half configured device.
 static void focuser_initialization_failure_rolls_back(void) {
@@ -1404,6 +1466,7 @@ int main(void) {
 		{ "heater_state_and_current_follow_the_duty_cycle", heater_state_and_current_follow_the_duty_cycle },
 		{ "automatic_dew_control_round_trips", automatic_dew_control_round_trips },
 		{ "autodew_state_is_adopted_from_the_device", autodew_state_is_adopted_from_the_device },
+		{ "v2_channel_autodew_stays_automatic", v2_channel_autodew_stays_automatic },
 		{ "dew_control_has_one_mode_when_the_connect_status_fails", dew_control_has_one_mode_when_the_connect_status_fails },
 		{ "each_usb_port_switches_on_its_own", each_usb_port_switches_on_its_own },
 		{ "usb_hub_switches_on_the_v1_box", usb_hub_switches_on_the_v1_box },
@@ -1440,6 +1503,7 @@ int main(void) {
 		{ "focuser_sync_relabels_the_position", focuser_sync_relabels_the_position },
 		{ "focuser_settings_round_trip", focuser_settings_round_trip },
 		{ "focuser_overlapping_request_is_rejected", focuser_overlapping_request_is_rejected },
+		{ "focuser_poll_leaves_a_queued_request_busy", focuser_poll_leaves_a_queued_request_busy },
 		{ "focuser_initialization_failure_rolls_back", focuser_initialization_failure_rolls_back },
 		{ "focuser_shares_the_powerbox_connection", focuser_shares_the_powerbox_connection }
 	};

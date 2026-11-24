@@ -41,7 +41,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000010
+#define DRIVER_VERSION       0x03000012
 #define DRIVER_NAME          "indigo_dome_nexdome3"
 #define DRIVER_LABEL         "NexDome3"
 #define DOME_DEVICE_NAME     "NexDome3"
@@ -237,10 +237,10 @@ static void request_settings(indigo_device *device) {
 	nexdome3_command(device, "RRS");
 }
 
-static bool nexdome3_open(indigo_device *device) {
+static bool nexdome3_open(indigo_device *device, const char **error_message) {
 	char *name = DEVICE_PORT_ITEM->text.value;
 	if (!indigo_uni_is_url(name, "nexdome")) {
-		PRIVATE_DATA->handle = indigo_uni_open_serial(name, INDIGO_LOG_DEBUG);
+		PRIVATE_DATA->handle = indigo_uni_open_serial2(name, INDIGO_LOG_DEBUG, error_message);
 		if (PRIVATE_DATA->handle != NULL) {
 			// to be on the safe side
 			indigo_sleep(NEXDOME3_RESET_DELAY);
@@ -826,7 +826,8 @@ static void nexdome3_process_messages(indigo_device *device) {
 static void dome_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = nexdome3_open(device);
+		const char *error_message = NULL;
+		connection_result = nexdome3_open(device, &error_message);
 		if (connection_result) {
 			//+ dome.on_connect
 			PRIVATE_DATA->steps_per_degree = NEXDOME3_DEFAULT_STEPS_PER_DEGREE;
@@ -864,7 +865,11 @@ static void dome_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -936,6 +941,8 @@ static void dome_horizontal_coordinates_handler(indigo_device *device) {
 	//+ dome.DOME_HORIZONTAL_COORDINATES.on_change
 	double target_position = DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.target;
 	if (DOME_PARK_PARKED_ITEM->sw.value) {
+		// the copied request is not where the dome is: show the last known heading with the refusal
+		DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.value = DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.target = nexdome3_azimuth(device, PRIVATE_DATA->position);
 		DOME_HORIZONTAL_COORDINATES_PROPERTY->state = INDIGO_ALERT_STATE;
 		indigo_update_property(device, DOME_HORIZONTAL_COORDINATES_PROPERTY, "Dome is parked.");
 		nexdome3_command(device, "PRR");

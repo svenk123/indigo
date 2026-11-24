@@ -89,7 +89,13 @@ static int sim_model = LUNATICO_PLATYPUS;
 static int sim_oper = 0;
 static int sim_temperature[2] = { LUNATICO_TEMP_INTERNAL, LUNATICO_TEMP_EXTERNAL };
 static bool sim_has_moved;
+// read-glitch: the first position readback after a move is lost; stop-error-once and goto-error-once: the first
+// stop or goto is refused.
+static bool sim_glitched, sim_stop_refused, sim_goto_refused;
+// stall: a goto is acknowledged but the motor does not advance while it reports moving.
+static bool sim_stalled[LUNATICO_PORTS];
 static const char *sim_ready_file;
+static bool sim_poll_held;
 
 // A profile is a '+' separated set of flags, so one scenario can combine
 // independent device conditions, for example "armadillo+goto-error".
@@ -161,6 +167,9 @@ static void lunatico_load_control(void) {
 		sim_temperature[1] = value;
 	} else if (sscanf(control, "position:%d:%d", &port, &value) == 2 && port >= 0 && port < LUNATICO_PORTS) {
 		serial_motion_sync(&sim_port[port].motion, value);
+	} else if (sscanf(control, "move:%d:%d", &port, &value) == 2 && port >= 0 && port < LUNATICO_PORTS) {
+		// The axis moves without a command of the driver.
+		serial_motion_start(&sim_port[port].motion, value, sim_port[port].speed);
 	}
 }
 
@@ -199,7 +208,32 @@ static void lunatico_reply_status(const char *command, bool accepted) {
 }
 
 static bool lunatico_read_fault(void) {
+	if (sim_has_moved && sim_flag("read-glitch") && !sim_glitched) {
+		sim_glitched = true;
+		return true;
+	}
 	return sim_has_moved && sim_flag("read-error");
+}
+
+// Hold one initial poll reply for deterministic bus/worker overlap tests. The
+// fixture handshake is local and bounded below the driver's reply timeout.
+static void lunatico_hold_poll(void) {
+	if (!sim_flag("hold-initial-poll") || sim_poll_held || sim_ready_file == NULL) {
+		return;
+	}
+	sim_poll_held = true;
+	char held[PATH_MAX], release[PATH_MAX];
+	snprintf(held, sizeof(held), "%s.held", sim_ready_file);
+	snprintf(release, sizeof(release), "%s.release", sim_ready_file);
+	FILE *file = fopen(held, "w");
+	if (file != NULL) {
+		fclose(file);
+	}
+	for (int i = 0; i < 200 && access(release, F_OK); i++) {
+		usleep(10000);
+	}
+	unlink(held);
+	unlink(release);
 }
 
 static void lunatico_step(const char *command, const char *verb, int port, int a, int b, int arguments) {
@@ -211,19 +245,33 @@ static void lunatico_step(const char *command, const char *verb, int port, int a
 			lunatico_reply_int(command, (int)lround(serial_motion_update(&target->motion)));
 		}
 	} else if (!strcmp(verb, "ismoving")) {
+		bool initial_poll = !sim_poll_held;
+		lunatico_hold_poll();
+		if (initial_poll && sim_flag("poll-position-shift")) {
+			// External movement during the held initial readback, without a driver command.
+			serial_motion_sync(&target->motion, serial_motion_update(&target->motion) + 100);
+		}
 		if (lunatico_read_fault()) {
 			lunatico_reply(command, "invalid");
 		} else {
 			serial_motion_update(&target->motion);
-			lunatico_reply_int(command, target->motion.duration > 0 ? 1 : 0);
+			lunatico_reply_int(command, target->motion.duration > 0 || sim_stalled[port] ? 1 : 0);
 		}
 	} else if (!strcmp(verb, "goto") || !strcmp(verb, "gopr")) {
 		// goto takes an absolute position and a backlash compensation, gopr a
 		// relative step count.
 		int requested = !strcmp(verb, "gopr") ? (int)lround(serial_motion_update(&target->motion)) + a : a;
-		if (arguments < 2 || sim_flag("goto-error") || (target->limits && (requested < target->low || requested > target->high))) {
+		if (arguments < 2 || sim_flag("goto-error") || (sim_flag("goto-error-once") && !sim_goto_refused) || (target->limits && (requested < target->low || requested > target->high))) {
+			sim_goto_refused = true;
 			lunatico_reply_status(command, false);
+		} else if (sim_flag("stall")) {
+			sim_stalled[port] = true;
+			lunatico_reply_status(command, true);
 		} else {
+			if (sim_flag("early-stop") && !sim_has_moved) {
+				int current = (int)lround(serial_motion_update(&target->motion));
+				requested = current + (requested - current) / 2;
+			}
 			serial_motion_start(&target->motion, requested, target->speed);
 			sim_has_moved = true;
 			lunatico_reply_status(command, true);
@@ -236,10 +284,13 @@ static void lunatico_step(const char *command, const char *verb, int port, int a
 			lunatico_reply_status(command, true);
 		}
 	} else if (!strcmp(verb, "stop")) {
-		if (sim_flag("stop-error")) {
+		if (sim_flag("stop-error") || (sim_flag("stop-error-once") && !sim_stop_refused)) {
+			// A refused stop leaves the motor running.
+			sim_stop_refused = true;
 			lunatico_reply_status(command, false);
 		} else {
 			serial_motion_stop(&target->motion);
+			sim_stalled[port] = false;
 			lunatico_reply_status(command, true);
 		}
 	} else if (!strcmp(verb, "speedrangeus")) {

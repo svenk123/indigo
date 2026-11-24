@@ -26,6 +26,7 @@
 #include "simulator_test_common.h"
 #include "ccd_test_noise.h"
 #include <stdatomic.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static const char *ccd_imager_connected_properties[] = {
@@ -534,6 +535,10 @@ static void ccd_ao_passes_compliance_checks(void) {
 	stop_connected_simulator(&ccd_ao_simulator);
 }
 
+indigo_device *sim_test_imager_device(void);
+void sim_test_prepare_hotpixel_edges(indigo_device *device);
+bool sim_test_hotpixel_guard_intact(indigo_device *device);
+
 static bool sim_fast_temperature;
 static indigo_timer **sim_temperature_timer;
 
@@ -552,7 +557,7 @@ bool sim_test_reschedule_timer(indigo_device *device, double delay, indigo_timer
 // Extra scenarios observe the production simulator, never its built-in image arrays.
 static atomic_int sim_frames, sim_bad_frames;
 static atomic_int sim_countdown_ticks;
-static const char *sim_properties[] = { "BAHTINOV_SETTINGS", "CCD_ABORT_EXPOSURE", "CCD_BIN", "CCD_COOLER", "CCD_EXPOSURE", "CCD_FRAME", "CCD_IMAGE_FORMAT", "CCD_STREAMING", "CCD_TEMPERATURE", "CCD_UPLOAD_MODE", "CONNECTION", "DSLR_APERTURE", "DSLR_ISO", "DSLR_PROGRAM", "DSLR_SHUTTER", "GUIDER_MODE", "SIMULATION_SETUP" };
+static const char *sim_properties[] = { "BAHTINOV_SETTINGS", "CCD_ABORT_EXPOSURE", "CCD_BIN", "CCD_COOLER", "CCD_EXPOSURE", "CCD_FRAME", "CCD_IMAGE_FORMAT", "CCD_LOCAL_MODE", "CCD_STREAMING", "CCD_TEMPERATURE", "CCD_UPLOAD_MODE", "CONNECTION", "DSLR_APERTURE", "DSLR_ISO", "DSLR_PROGRAM", "DSLR_SHUTTER", "GUIDER_MODE", "SIMULATION_SETUP" };
 static atomic_int sim_revisions[ARRAY_SIZE(sim_properties)];
 
 static int sim_property_index(const char *name) {
@@ -649,6 +654,71 @@ static void sim_end(const simulator_driver_case *driver) {
 	simulator_test_client.update_property = simulator_client_update_property;
 }
 
+static bool sim_local_mode_dir(const char *dir, indigo_property_state state) {
+	int before = atomic_load(&sim_revisions[sim_property_index("CCD_LOCAL_MODE")]);
+	return indigo_change_text_property_1(&simulator_test_client, context.driver_case->device_name, "CCD_LOCAL_MODE", "DIR", dir) == INDIGO_OK && sim_wait_revision("CCD_LOCAL_MODE", state, before);
+}
+
+static bool sim_is_directory(const char *path) {
+	struct stat st;
+	return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool sim_exists(const char *path) {
+	struct stat st;
+	return stat(path, &st) == 0;
+}
+
+// CCD_LOCAL_MODE.DIR accepts a folder that does not exist yet when it can be created: the check does not create it, the
+// first saved image does; a folder below a regular file or below a read only folder is rejected
+static void simulator_local_mode_accepts_a_folder_that_can_be_created(void) {
+	char base[] = "/tmp/indigo_local_mode_XXXXXX";
+	char path[PATH_MAX], nested[PATH_MAX], blocked[PATH_MAX], read_only[PATH_MAX];
+	bool created = mkdtemp(base) != NULL;
+	if (!created) {
+		perror("mkdtemp");
+		indigo_test_failures++;
+		return;
+	}
+	snprintf(path, sizeof(path), "%s/Rosette Nebula", base);
+	snprintf(nested, sizeof(nested), "%s/a/b/c/", base);
+	snprintf(blocked, sizeof(blocked), "%s/file", base);
+	snprintf(read_only, sizeof(read_only), "%s/read_only", base);
+	sim_begin(&ccd_imager_simulator);
+	// a folder below a writable one, no trailing separator
+	SIM_CHECK(sim_local_mode_dir(path, INDIGO_OK_STATE));
+	SIM_CHECK(!sim_exists(path));
+	// several levels that do not exist
+	SIM_CHECK(sim_local_mode_dir(nested, INDIGO_OK_STATE));
+	SIM_CHECK(!sim_exists(blocked) && !sim_exists(nested));
+	// the folder is created by the first saved image
+	SIM_CHECK(sim_switch("CCD_UPLOAD_MODE", "BOTH", INDIGO_OK_STATE));
+	SIM_CHECK(sim_expose());
+	SIM_CHECK(sim_is_directory(nested));
+	// below a regular file
+	FILE *file = fopen(blocked, "w");
+	SIM_CHECK(file != NULL);
+	fclose(file);
+	char below_file[2 * PATH_MAX];
+	snprintf(below_file, sizeof(below_file), "%s/sub/dir", blocked);
+	SIM_CHECK(sim_local_mode_dir(below_file, INDIGO_ALERT_STATE));
+	SIM_CHECK(!sim_exists(below_file));
+	// below a read only folder (root can write anywhere)
+	SIM_CHECK(mkdir(read_only, 0555) == 0);
+	if (geteuid() != 0) {
+		char below_read_only[2 * PATH_MAX];
+		snprintf(below_read_only, sizeof(below_read_only), "%s/sub/dir", read_only);
+		SIM_CHECK(sim_local_mode_dir(below_read_only, INDIGO_ALERT_STATE));
+		SIM_CHECK(!sim_exists(below_read_only));
+	}
+	// an existing writable folder is still accepted
+	SIM_CHECK(sim_local_mode_dir(base, INDIGO_OK_STATE));
+cleanup:
+	sim_end(&ccd_imager_simulator);
+	chmod(read_only, 0755);
+	indigo_test_remove_tree(base);
+}
+
 static void simulator_raw_geometry_and_bins(void) {
 	sim_begin(&ccd_imager_simulator);
 	SIM_CHECK(sim_expose());
@@ -664,6 +734,84 @@ static void simulator_raw_geometry_and_bins(void) {
 	SIM_CHECK(sim_number("CCD_BIN", 2, (const char *[]){ "HORIZONTAL", "VERTICAL" }, (double []){ 1, 2 }, INDIGO_ALERT_STATE));
 	SIM_CHECK(sim_expose());
 cleanup:
+	sim_end(&ccd_imager_simulator);
+}
+
+// Every binned pixel of a 128 x 96 region of the imager frame is the mean of its bin block of the fixed image (the
+// integer part), plus the frame noise of 0 to 127 ADU added after binning (CCD_FRAME is in unbinned pixels; the region
+// around (682, 928) holds the brightest star of the image, whose 2 x 2 blocks sum beyond 65535 and must not clamp)
+#define BIN_REGION_LEFT 616
+#define BIN_REGION_TOP 880
+#define BIN_REGION_WIDTH 128
+#define BIN_REGION_HEIGHT 96
+
+static bool sim_imager_bins_average_the_block(int bin) {
+	int width = (int)atomic_load(&sim_width), height = (int)atomic_load(&sim_height);
+	if (sim_image == NULL || width != BIN_REGION_WIDTH / bin || height != BIN_REGION_HEIGHT / bin) {
+		fprintf(stderr, "bin %d: %d x %d frame captured\n", bin, width, height);
+		return false;
+	}
+	int bright = 0;
+	for (int y = 0; y < height; y++) {
+		for (int x = 0; x < width; x++) {
+			unsigned sum = 0;
+			for (int j = 0; j < bin; j++) {
+				for (int i = 0; i < bin; i++) {
+					sum += indigo_ccd_simulator_raw_image[(BIN_REGION_TOP + y * bin + j) * IMAGER_WIDTH + BIN_REGION_LEFT + x * bin + i];
+				}
+			}
+			unsigned low = sum / (bin * bin);
+			unsigned high = low + 127 > 65535 ? 65535 : low + 127;
+			unsigned value = sim_image[y * width + x];
+			if (value < low || value > high) {
+				fprintf(stderr, "bin %d: pixel %d, %d is %u, expected %u to %u\n", bin, x, y, value, low, high);
+				return false;
+			}
+			if (sum > 65535) {
+				bright++;
+			}
+		}
+	}
+	printf("    bin %d: %d x %d pixels are the means of their bin blocks, %d of them with a block sum beyond 65535\n", bin, width, height, bright);
+	return bin == 1 || bright > 0;
+}
+
+static void simulator_imager_binning_averages_the_bin_block(void) {
+	sim_begin(&ccd_imager_simulator);
+	atomic_store(&sim_capture, true);
+	for (int bin = 1; bin <= 4; bin *= 2) {
+		SIM_CHECK(sim_number("CCD_BIN", 2, (const char *[]){ "HORIZONTAL", "VERTICAL" }, (double []){ bin, bin }, INDIGO_OK_STATE));
+		SIM_CHECK(sim_number("CCD_FRAME", 4, (const char *[]){ "LEFT", "TOP", "WIDTH", "HEIGHT" }, (double []){ BIN_REGION_LEFT, BIN_REGION_TOP, BIN_REGION_WIDTH, BIN_REGION_HEIGHT }, INDIGO_OK_STATE));
+		SIM_CHECK(sim_expose());
+		SIM_CHECK(sim_imager_bins_average_the_block(bin));
+	}
+cleanup:
+	atomic_store(&sim_capture, false);
+	free(sim_image);
+	sim_image = NULL;
+	sim_end(&ccd_imager_simulator);
+}
+
+static void simulator_hot_pixels_respect_subframe_edges(void) {
+	sim_begin(&ccd_imager_simulator);
+	atomic_store(&sim_capture, true);
+	indigo_device *device = sim_test_imager_device();
+	SIM_CHECK(device != NULL);
+	for (int bin = 1; bin <= 4; bin *= 2) {
+		SIM_CHECK(sim_number("CCD_BIN", 2, (const char *[]){ "HORIZONTAL", "VERTICAL" }, (double []){ bin, bin }, INDIGO_OK_STATE));
+		SIM_CHECK(sim_number("CCD_FRAME", 4, (const char *[]){ "LEFT", "TOP", "WIDTH", "HEIGHT" }, (double []){ 128, 128, 64, 64 }, INDIGO_OK_STATE));
+		sim_test_prepare_hotpixel_edges(device);
+		SIM_CHECK(sim_expose());
+		int width = 64 / bin, height = 64 / bin;
+		SIM_CHECK(sim_image != NULL && atomic_load(&sim_width) == width && atomic_load(&sim_height) == height);
+		SIM_CHECK(sim_image[(height - 1) * width + 1] == 0xFFFF);
+		SIM_CHECK(sim_image[5] == 0xFFFF && sim_image[width * height - 1] == 0xFFFF);
+		SIM_CHECK(sim_test_hotpixel_guard_intact(device));
+	}
+cleanup:
+	atomic_store(&sim_capture, false);
+	free(sim_image);
+	sim_image = NULL;
 	sim_end(&ccd_imager_simulator);
 }
 
@@ -865,6 +1013,18 @@ static void simulator_file_noise_formats_and_failure(void) {
 	indigo_raw_header truncated_header = { INDIGO_RAW_MONO16, 64, 48 };
 	SIM_CHECK(fwrite(&truncated_header, sizeof(truncated_header), 1, file) == 1 && fclose(file) == 0);
 	SIM_CHECK(sim_switch("CONNECTION", "CONNECTED", INDIGO_ALERT_STATE));
+	// A payload one byte short of the header shape is refused instead of becoming a zero-filled frame.
+	file = fopen(sim_raw_path, "wb");
+	SIM_CHECK(file != NULL);
+	bool short_written = fwrite(&truncated_header, sizeof(truncated_header), 1, file) == 1;
+	for (int i = 0; i < 64 * 48 * 2 - 1; i++) { short_written = (fputc(ccd_test_noise(i, 0) >> 8, file) != EOF) && short_written; }
+	SIM_CHECK(fclose(file) == 0 && short_written);
+	SIM_CHECK(sim_switch("CONNECTION", "CONNECTED", INDIGO_ALERT_STATE));
+	// So is a header cut short.
+	file = fopen(sim_raw_path, "wb");
+	SIM_CHECK(file != NULL);
+	SIM_CHECK(fwrite(&truncated_header, sizeof(truncated_header) - 1, 1, file) == 1 && fclose(file) == 0);
+	SIM_CHECK(sim_switch("CONNECTION", "CONNECTED", INDIGO_ALERT_STATE));
 	for (int format = 0; format < 4; format++) {
 		file = fopen(sim_raw_path, "wb");
 		SIM_CHECK(file != NULL);
@@ -969,6 +1129,119 @@ static void sim_follow_end(void) {
 
 static bool sim_expose_centroid(double *cx, double *cy) {
 	return sim_expose() && sim_star_centroid(cx, cy);
+}
+
+// Centroid, width (the root mean square radius of the profile) and flux of the star at the local maximum nearest to
+// (x, y), from the signal above the exact background of a frame rendered without noise and gradient
+static bool sim_star_profile(int x, int y, int radius, double background, double *cx, double *cy, double *width_px, double *flux) {
+	int width = (int)atomic_load(&sim_width), height = (int)atomic_load(&sim_height);
+	if (sim_image == NULL || x < 0 || x >= width || y < 0 || y >= height) {
+		return false;
+	}
+	int peak = y * width + x;
+	for (int j = y - 3; j <= y + 3; j++) {
+		for (int i = x - 3; i <= x + 3; i++) {
+			if (i >= 0 && i < width && j >= 0 && j < height && sim_image[j * width + i] > sim_image[peak]) {
+				peak = j * width + i;
+			}
+		}
+	}
+	double sum = 0, sum_x = 0, sum_y = 0, sum_r2 = 0;
+	for (int j = peak / width - radius; j <= peak / width + radius; j++) {
+		for (int i = peak % width - radius; i <= peak % width + radius; i++) {
+			if (i < 0 || i >= width || j < 0 || j >= height) {
+				continue;
+			}
+			double weight = fmax(0, sim_image[j * width + i] - background);
+			sum += weight;
+			sum_x += weight * i;
+			sum_y += weight * j;
+		}
+	}
+	if (sum == 0) {
+		return false;
+	}
+	*cx = sum_x / sum;
+	*cy = sum_y / sum;
+	for (int j = peak / width - radius; j <= peak / width + radius; j++) {
+		for (int i = peak % width - radius; i <= peak % width + radius; i++) {
+			if (i < 0 || i >= width || j < 0 || j >= height) {
+				continue;
+			}
+			double weight = fmax(0, sim_image[j * width + i] - background);
+			sum_r2 += weight * ((i - *cx) * (i - *cx) + (j - *cy) * (j - *cy));
+		}
+	}
+	*width_px = sqrt(sum_r2 / sum);
+	*flux = sum;
+	return true;
+}
+
+// The brightest star peak below the given value, at least margin pixels from the frame edges: a local maximum, so
+// the wing of a saturated star does not qualify
+static bool sim_brightest_peak_below(unsigned limit, int margin, int *x, int *y) {
+	int width = (int)atomic_load(&sim_width), height = (int)atomic_load(&sim_height);
+	int best = -1;
+	for (int i = 0; i < width * height; i++) {
+		if (sim_image[i] >= limit || (best >= 0 && sim_image[i] <= sim_image[best])) {
+			continue;
+		}
+		if (i % width < margin || i % width >= width - margin || i / width < margin || i / width >= height - margin) {
+			continue;
+		}
+		bool peak = true;
+		for (int j = i / width - 3; peak && j <= i / width + 3; j++) {
+			for (int k = i % width - 3; peak && k <= i % width + 3; k++) {
+				peak = k < 0 || k >= width || j < 0 || j >= height || sim_image[j * width + k] <= sim_image[i];
+			}
+		}
+		if (peak) {
+			best = i;
+		}
+	}
+	if (best < 0) {
+		return false;
+	}
+	*x = best % width;
+	*y = best / width;
+	return true;
+}
+
+// A 2 x 2 binned guider frame renders every star with the profile of the unbinned one scaled down by the binning
+// and with the unbinned amplitude, like the imager's mean of the bin block: the star is at half the unbinned
+// position, half as wide in binned pixels (the root mean square radius goes from 2 px to about 1 px, the pixel
+// sampling adds a little) and its flux above the background is a quarter
+#define GUIDER_BIN_BACKGROUND 500
+
+static void simulator_guider_binning_scales_the_star_profile(void) {
+	double x1, y1, w1, f1, x2, y2, w2, f2;
+	int x, y;
+	sim_begin(&ccd_guider_camera_simulator);
+	atomic_store(&sim_capture, true);
+	SIM_CHECK(sim_switch("GUIDER_MODE", "STARS", INDIGO_OK_STATE));
+	// deterministic frame: no noise (a range of 1 adds 0), no gradient, no periodic error, Orion at rotation 0
+	SIM_CHECK(sim_number("SIMULATION_SETUP", 7, (const char *[]){ "RA", "DEC", "IMAGE_ROTATION_ANGLE", "PER_ERR_CYCLE", "IMAGE_NOISE_FIX", "IMAGE_NOISE_VAR", "IMAGE_GRADIENT" }, (double []){ FOLLOW_RA, FOLLOW_DEC, 0, 0, GUIDER_BIN_BACKGROUND, 1, 0 }, INDIGO_OK_STATE));
+	SIM_CHECK(sim_number("CCD_BIN", 2, (const char *[]){ "HORIZONTAL", "VERTICAL" }, (double []){ 1, 1 }, INDIGO_OK_STATE));
+	SIM_CHECK(sim_expose());
+	// a star of magnitude 5 or 6 (peak 7800 or 3100 ADU), far from the clamp at 65535
+	SIM_CHECK(sim_brightest_peak_below(GUIDER_BIN_BACKGROUND + 10000, 32, &x, &y));
+	SIM_CHECK(sim_star_profile(x, y, 12, GUIDER_BIN_BACKGROUND, &x1, &y1, &w1, &f1));
+	printf("    unbinned star at %.2f, %.2f width %.2f px flux %.0f ADU\n", x1, y1, w1, f1);
+	// the profile exp(-(x² + y²) / 4) has a root mean square radius of 2 px
+	SIM_CHECK(w1 > 1.8 && w1 < 2.3);
+	SIM_CHECK(sim_number("CCD_BIN", 2, (const char *[]){ "HORIZONTAL", "VERTICAL" }, (double []){ 2, 2 }, INDIGO_OK_STATE));
+	SIM_CHECK(sim_expose());
+	SIM_CHECK(atomic_load(&sim_width) == GUIDER_WIDTH / 2 && atomic_load(&sim_height) == GUIDER_HEIGHT / 2);
+	SIM_CHECK(sim_star_profile((int)round(x1 / 2), (int)round(y1 / 2), 6, GUIDER_BIN_BACKGROUND, &x2, &y2, &w2, &f2));
+	printf("    2 x 2 binned star at %.2f, %.2f width %.2f px flux %.0f ADU\n", x2, y2, w2, f2);
+	SIM_CHECK(fabs(x2 - x1 / 2) < 1 && fabs(y2 - y1 / 2) < 1);
+	SIM_CHECK(w2 > 0.3 * w1 && w2 < 0.7 * w1);
+	SIM_CHECK(fabs(4 * f2 / f1 - 1) < 0.2);
+cleanup:
+	atomic_store(&sim_capture, false);
+	free(sim_image);
+	sim_image = NULL;
+	sim_end(&ccd_guider_camera_simulator);
 }
 
 static void simulator_guider_camera_follows_simulated_mount(void) {
@@ -1215,7 +1488,7 @@ static bool mount_connect(const char *device_name, bool connected) {
 
 // Mount Simulator and CCD Guider Simulator in one process: pulses of either guider move the same mount and the image follows it
 static void simulator_guider_camera_follows_mount_simulator_guiding(void) {
-	bool mount_started = false;
+	bool mount_started = false, pier_west = false;
 	double x0, y0, x1, y1, x2, y2, x3, y3;
 	indigo_simulated_mount_state state;
 	SIM_CHECK(sim_follow_begin());
@@ -1245,6 +1518,11 @@ static void simulator_guider_camera_follows_mount_simulator_guiding(void) {
 	SIM_CHECK(fabs(cached_number_value("SIMULATION_SETUP", "RA") - FOLLOW_RA) < 1e-9);
 	SIM_CHECK(fabs(cached_number_value("SIMULATION_SETUP", "DEC") - FOLLOW_DEC) < 1e-9);
 	SIM_CHECK(fabs(x0 - atomic_load(&sim_width) / 2.0) < 2 && fabs(y0 - atomic_load(&sim_height) / 2.0) < 2);
+	// The mount takes the side of the pier that the hour angle of the target gives at the time of the run, so the shifts
+	// are checked for the side it took.
+	SIM_CHECK(indigo_get_simulated_mount_state(&state));
+	pier_west = state.west;
+	printf("    the mount is on the %s side of the pier\n", pier_west ? "west" : "east");
 	SIM_CHECK(mount_connect("Mount Simulator (guider)", true));
 	indigo_usleep(200000);
 	// 3 s at the default 50 % of sidereal rate is 22.6 arcsec, about 1.88 px
@@ -1254,7 +1532,7 @@ static void simulator_guider_camera_follows_mount_simulator_guiding(void) {
 	SIM_CHECK(mount_state_changes(state.ra, state.dec, 6));
 	SIM_CHECK(sim_expose_centroid(&x1, &y1));
 	printf("    3 s north pulse shifted the star by %.3f, %.3f px, expected %.3f px\n", x1 - x0, y1 - y0, expected);
-	SIM_CHECK(shifted_along(x1 - x0, y1 - y0, true, false, expected, 0.25));
+	SIM_CHECK(shifted_along(x1 - x0, y1 - y0, true, pier_west, expected, 0.25));
 	SIM_CHECK(indigo_get_simulated_mount_state(&state));
 	SIM_CHECK(indigo_change_number_property_1(&simulator_test_client, "Mount Simulator (guider)", GUIDER_GUIDE_RA_PROPERTY_NAME, GUIDER_GUIDE_WEST_ITEM_NAME, 3000) == INDIGO_OK);
 	SIM_CHECK(mount_state_changes(state.ra, state.dec, 6));
@@ -1262,7 +1540,7 @@ static void simulator_guider_camera_follows_mount_simulator_guiding(void) {
 	// the RA axis turns by the same angle, the sky moves by cos(dec) of it
 	expected *= 1.00273791 * 15 / 15.0410686 * cos(FOLLOW_DEC * M_PI / 180);
 	printf("    3 s west pulse shifted the star by %.3f, %.3f px, expected %.3f px\n", x2 - x1, y2 - y1, expected);
-	SIM_CHECK(shifted_along(x2 - x1, y2 - y1, false, false, expected, 0.25));
+	SIM_CHECK(shifted_along(x2 - x1, y2 - y1, false, pier_west, expected, 0.25));
 	// The camera's own guider moves the mount back: the star returns and the mount takes the move over
 	SIM_CHECK(indigo_get_simulated_mount_state(&state));
 	SIM_CHECK(indigo_change_number_property_1(&simulator_test_client, "CCD Guider Simulator (guider)", GUIDER_GUIDE_DEC_PROPERTY_NAME, GUIDER_GUIDE_SOUTH_ITEM_NAME, 3000) == INDIGO_OK);
@@ -1455,7 +1733,11 @@ int main(int argc, char **argv) {
 		{ "simulator_countdown_progress_abort_and_restart", simulator_countdown_progress_abort_and_restart },
 		{ "simulator_fractional_exposure_and_finite_stream_timing", simulator_fractional_exposure_and_finite_stream_timing },
 		{ "simulator_guider_replacement_and_simultaneous_axes", simulator_guider_replacement_and_simultaneous_axes },
+		{ "simulator_local_mode_accepts_a_folder_that_can_be_created", simulator_local_mode_accepts_a_folder_that_can_be_created },
 		{ "simulator_raw_geometry_and_bins", simulator_raw_geometry_and_bins },
+		{ "simulator_hot_pixels_respect_subframe_edges", simulator_hot_pixels_respect_subframe_edges },
+		{ "simulator_imager_binning_averages_the_bin_block", simulator_imager_binning_averages_the_bin_block },
+		{ "simulator_guider_binning_scales_the_star_profile", simulator_guider_binning_scales_the_star_profile },
 		{ "simulator_stream_abort_and_reconnect", simulator_stream_abort_and_reconnect },
 		{ "simulator_cooling_target_and_polling", simulator_cooling_target_and_polling },
 		{ "simulator_camera_modes_and_settings", simulator_camera_modes_and_settings },

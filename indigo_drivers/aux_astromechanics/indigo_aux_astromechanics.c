@@ -24,6 +24,13 @@
 #include <string.h>
 #include <math.h>
 #include <assert.h>
+
+//+ include
+
+#include <ctype.h>
+
+//- include
+
 #include <indigo/indigo_driver_xml.h>
 #include <indigo/indigo_aux_driver.h>
 #include <indigo/indigo_uni_io.h>
@@ -32,7 +39,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000007
+#define DRIVER_VERSION       0x0300000A
 #define DRIVER_NAME          "indigo_aux_astromechanics"
 #define DRIVER_LABEL         "ASTROMECHANICS LPM"
 #define AUX_DEVICE_NAME      "ASTROMECHANICS LPM"
@@ -51,6 +58,8 @@ typedef struct {
 	indigo_property *aux_weather_property;
 	//+ data
 	char response[16];
+	bool measuring;
+	double deadline;
 	//- data
 } astromechanics_private_data;
 
@@ -58,19 +67,61 @@ typedef struct {
 
 //+ code
 
-static bool astromechanics_command(indigo_device *device, char *command) {
-	long result = indigo_uni_discard(PRIVATE_DATA->handle);
-	if (result >= 0) {
-		result = indigo_uni_printf(PRIVATE_DATA->handle, command);
-		if (result > 0) {
-			result = indigo_uni_read_section(PRIVATE_DATA->handle, PRIVATE_DATA->response, sizeof(PRIVATE_DATA->response) - 1, "\n#", "\n#", INDIGO_DELAY(1));
+// V# is answered when the measurement is over, which takes up to 120 s under a dark sky.
+#define MEASUREMENT_TIMEOUT  130
+#define POLL_INTERVAL        10
+
+static bool astromechanics_measurement(const char *text, double *value) {
+	const char *cursor = text;
+	while (isspace((unsigned char)*cursor)) {
+		cursor++;
+	}
+	if (*cursor == '+' || *cursor == '-') {
+		cursor++;
+	}
+	bool digits = false;
+	while (isdigit((unsigned char)*cursor)) {
+		digits = true;
+		cursor++;
+	}
+	if (*cursor == '.' || *cursor == ',') {
+		cursor++;
+		while (isdigit((unsigned char)*cursor)) {
+			digits = true;
+			cursor++;
 		}
 	}
-	return result > 0;
+	if (!digits) {
+		return false;
+	}
+	if (*cursor == 'e' || *cursor == 'E') {
+		cursor++;
+		if (*cursor == '+' || *cursor == '-') {
+			cursor++;
+		}
+		if (!isdigit((unsigned char)*cursor)) {
+			return false;
+		}
+		unsigned exponent = 0;
+		while (isdigit((unsigned char)*cursor)) {
+			exponent = exponent * 10 + *cursor++ - '0';
+			if (exponent > 308) {
+				return false;
+			}
+		}
+	}
+	while (isspace((unsigned char)*cursor)) {
+		cursor++;
+	}
+	if (*cursor) {
+		return false;
+	}
+	*value = indigo_atod(text);
+	return isfinite(*value);
 }
 
-static bool astromechanics_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 38400, INDIGO_LOG_DEBUG);
+static bool astromechanics_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 38400, INDIGO_LOG_DEBUG, error_message);
 	return PRIVATE_DATA->handle != NULL;
 }
 
@@ -87,28 +138,66 @@ static void aux_timer_callback(indigo_device *device) {
 		return;
 	}
 	//+ aux.on_timer
-	if (astromechanics_command(device, "V#")) {
-		AUX_WEATHER_SKY_BRIGHTNESS_ITEM->number.value = indigo_atod(PRIVATE_DATA->response);
-		AUX_WEATHER_SKY_BORTLE_CLASS_ITEM->number.value = indigo_aux_sky_bortle(AUX_WEATHER_SKY_BRIGHTNESS_ITEM->number.value);
-		AUX_WEATHER_PROPERTY->state = INDIGO_OK_STATE;
+	// The request is sent once and the answer waited for in short steps, so a long measurement
+	// neither blocks the queue nor ends ALERT before the meter could answer.
+	if (!PRIVATE_DATA->measuring) {
+		if (indigo_uni_discard(PRIVATE_DATA->handle) >= 0 && indigo_uni_printf(PRIVATE_DATA->handle, "V#") > 0) {
+			PRIVATE_DATA->measuring = true;
+			PRIVATE_DATA->deadline = indigo_monotonic_time() + MEASUREMENT_TIMEOUT;
+		} else {
+			AUX_WEATHER_PROPERTY->state = INDIGO_ALERT_STATE;
+			indigo_update_property(device, AUX_WEATHER_PROPERTY, NULL);
+			indigo_execute_handler_in(device, POLL_INTERVAL, aux_timer_callback);
+			return;
+		}
+	}
+	long length = indigo_uni_read_section2(PRIVATE_DATA->handle, PRIVATE_DATA->response, sizeof(PRIVATE_DATA->response) - 1, "\n#", "\r", INDIGO_DELAY(0.5), INDIGO_DELAY(0.5));
+	if (length > 0) {
+		PRIVATE_DATA->measuring = false;
+		double brightness;
+		bool terminated = PRIVATE_DATA->response[length - 1] == '\n' || PRIVATE_DATA->response[length - 1] == '#';
+		if (terminated) {
+			PRIVATE_DATA->response[length - 1] = 0;
+		}
+		if (terminated && astromechanics_measurement(PRIVATE_DATA->response, &brightness)) {
+			AUX_WEATHER_SKY_BRIGHTNESS_ITEM->number.value = brightness;
+			AUX_WEATHER_SKY_BORTLE_CLASS_ITEM->number.value = indigo_aux_sky_bortle(brightness);
+			AUX_WEATHER_PROPERTY->state = INDIGO_OK_STATE;
+		} else {
+			AUX_WEATHER_PROPERTY->state = INDIGO_ALERT_STATE;
+		}
+	} else if (indigo_monotonic_time() < PRIVATE_DATA->deadline) {
+		indigo_execute_handler_in(device, 0.5, aux_timer_callback);
+		return;
 	} else {
+		PRIVATE_DATA->measuring = false;
 		AUX_WEATHER_PROPERTY->state = INDIGO_ALERT_STATE;
 	}
 	indigo_update_property(device, AUX_WEATHER_PROPERTY, NULL);
-	indigo_execute_handler_in(device, 10, aux_timer_callback);
+	indigo_execute_handler_in(device, POLL_INTERVAL, aux_timer_callback);
 	//- aux.on_timer
 }
 
 static void aux_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = astromechanics_open(device);
+		const char *error_message = NULL;
+		connection_result = astromechanics_open(device, &error_message);
+		if (connection_result) {
+			//+ aux.on_connect
+			PRIVATE_DATA->measuring = false;
+			//- aux.on_connect
+		}
 		if (connection_result) {
 			indigo_define_property(device, AUX_WEATHER_PROPERTY, NULL);
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}

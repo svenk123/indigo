@@ -26,7 +26,7 @@ driver rts {
 	label = "RTS-on-COM shutter release";
 	author = "Peter Polakovic <peter.polakovic@cloudmakers.eu>";
 	copyright = "Copyright (c) 2018-2026 CloudMakers, s. r. o.";
-	version = 12;
+	version = 13;
 	serial;
 	data {
 		double exposure_endtime;
@@ -42,8 +42,8 @@ driver rts {
 			return indigo_uni_set_rts(PRIVATE_DATA->handle, false) == 0;
 		}
 
-		static bool rts_open(indigo_device *device) {
-			PRIVATE_DATA->handle = indigo_uni_open_serial(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG);
+		static bool rts_open(indigo_device *device, const char **error_message) {
+			PRIVATE_DATA->handle = indigo_uni_open_serial2(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG, error_message);
 			if (PRIVATE_DATA->handle == NULL) {
 				return false;
 			}

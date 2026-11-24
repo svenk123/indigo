@@ -26,27 +26,30 @@ ifeq ($(OS_DETECTED),Linux)
 	INDIGO_LIBS = -lindigo -ludev
 	INDIGO_CLIENT_LIBS = -lindigo_client
 else
-	INDIGO_LIBS = $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libhidapi.a -lz -ldl -lm
+	INDIGO_LIBS = $(BUILD_LIB)/libindigo.a $(BUILD_LIB)/libhidapi.a $(BUILD_LIB)/libjpeg.a $(BUILD_LIB)/libraw.a -lz -ldl -lm -lstdc++
 	INDIGO_CLIENT_LIBS = $(BUILD_LIB)/libindigo_client.a -lz -ldl -lm
 endif
 
-all: $(BUILD_BIN)/indigo_prop_tool $(BUILD_BIN)/indigo_list_usbserial $(BUILD_BIN)/indigo_raw_to_fits $(BUILD_BIN)/indigo_raw_crop $(BUILD_BIN)/indigo_drivers $(BUILD_BIN)/indigo_driver_metadata $(BUILD_BIN)/indigo_generator $(BUILD_BIN)/indigo_scan_drivers
+TOOL_NAMES = indigo_prop_tool indigo_list_usbserial indigo_raw_to_fits indigo_raw_crop indigo_drivers indigo_driver_metadata indigo_generator indigo_scan_drivers indigo_solver_indexer indigo_solver
+TOOL_BINARIES = $(addprefix $(BUILD_BIN)/, $(TOOL_NAMES))
+
+# Build-only tools: used while building INDIGO and not installed.
+BUILD_TOOL_BINARIES = $(BUILD_BIN)/indigo_hexdump
+
+all: $(TOOL_BINARIES) $(BUILD_TOOL_BINARIES)
 
 install: all
-	cp $(BUILD_BIN)/indigo_prop_tool $(INSTALL_BIN)
-	cp $(BUILD_BIN)/indigo_list_usbserial $(INSTALL_BIN)
-	cp $(BUILD_BIN)/indigo_raw_to_fits $(INSTALL_BIN)
-	cp $(BUILD_BIN)/indigo_raw_crop $(INSTALL_BIN)
+	cp $(TOOL_BINARIES) $(INSTALL_BIN)
 	cp ./indigo_log_analyzer.pl $(INSTALL_BIN)/indigo_log_analyzer
 
 uninstall:
-	rm -f $(INSTALL_BIN)/indigo_prop_tool $(INSTALL_BIN)/indigo_raw_to_fits $(INSTALL_BIN)/indigo_raw_crop $(INSTALL_BIN)/indigo_log_analyzer $(INSTALL_BIN)/indigo_list_usbserial
+	rm -f $(addprefix $(INSTALL_BIN)/, $(TOOL_NAMES)) $(INSTALL_BIN)/indigo_log_analyzer
 
 status:
 	@printf "\nindigo_tools -------------------------\n\n"
 
 clean: status
-	rm -f *.o $(BUILD_BIN)/indigo_prop_tool $(BUILD_BIN)/indigo_list_usbserial $(BUILD_BIN)/indigo_raw_to_fits $(BUILD_BIN)/indigo_raw_crop $(BUILD_BIN)/indigo_generator
+	rm -f *.o $(TOOL_BINARIES) $(BUILD_TOOL_BINARIES)
 
 clean-all: status
 	git clean -dfx
@@ -56,6 +59,8 @@ $(BUILD_BIN)/indigo_prop_tool: indigo_prop_tool.o
 
 $(BUILD_BIN)/indigo_list_usbserial: indigo_list_usbserial.o
 	$(CC) $(CFLAGS)  -o $@ indigo_list_usbserial.o $(LDFLAGS) $(INDIGO_LIBS)
+
+indigo_raw_to_fits.o: tool_file_io.h
 
 $(BUILD_BIN)/indigo_raw_to_fits: indigo_raw_to_fits.o
 	$(CC) $(CFLAGS)  -o $@ indigo_raw_to_fits.o $(LDFLAGS) $(INDIGO_LIBS)
@@ -72,6 +77,43 @@ $(BUILD_BIN)/indigo_driver_metadata: indigo_driver_metadata.o
 $(BUILD_BIN)/indigo_generator: indigo_generator.c
 	$(CC) indigo_generator.c -o $(BUILD_BIN)/indigo_generator
 
+# Embeds files into C arrays (the agents' .dat and the server's .data files) without the system hexdump.
+# It uses the C library only, so it is compiled straight from its source like indigo_generator.
+$(BUILD_BIN)/indigo_hexdump: indigo_hexdump.c
+	$(CC) indigo_hexdump.c -o $(BUILD_BIN)/indigo_hexdump
+
 $(BUILD_BIN)/indigo_scan_drivers: indigo_scan_drivers.o
 	$(CC) $(CFLAGS)  -o $@ indigo_scan_drivers.o $(LDFLAGS) -lindigo
 
+# The index builder shares the quad code and index file format with the solver agent.
+SOLVER_AGENT_DIR = ../indigo_drivers/agent_platesolver
+
+# the tools are rebuilt when the shared solver headers change (the index scale list, the quad and index structures)
+indigo_solver.o indigo_solver_indexer.o: $(SOLVER_AGENT_DIR)/indigo_solver.h $(SOLVER_AGENT_DIR)/indigo_solver_utils.h $(SOLVER_AGENT_DIR)/indigo_solver_healpix.h
+
+indigo_solver_utils.o: $(SOLVER_AGENT_DIR)/indigo_solver_utils.c $(SOLVER_AGENT_DIR)/indigo_solver_utils.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+indigo_solver_healpix.o: $(SOLVER_AGENT_DIR)/indigo_solver_healpix.c $(SOLVER_AGENT_DIR)/indigo_solver_healpix.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILD_BIN)/indigo_solver_indexer: indigo_solver_indexer.o indigo_solver_core.o indigo_solver_utils.o indigo_solver_healpix.o
+	$(CC) $(CFLAGS)  -o $@ indigo_solver_indexer.o indigo_solver_core.o indigo_solver_utils.o indigo_solver_healpix.o $(LDFLAGS) $(INDIGO_LIBS) -lindigocat
+
+# The command line solver runs the solver agent's solving steps; its core is built under another object name, as
+# indigo_solver.o is the tool itself.
+indigo_solver_core.o: $(SOLVER_AGENT_DIR)/indigo_solver.c $(SOLVER_AGENT_DIR)/indigo_solver.h $(SOLVER_AGENT_DIR)/indigo_solver_utils.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# It depends on no INDIGO library: the framework sources it uses are built into it as the client library builds them,
+# with the static libraw and libjpeg the camera raw and JPEG files need.
+SOLVER_LIB_OBJECTS = indigo_bus.o indigo_uni_io.o indigo_token.o indigo_raw_utils.o indigo_timer.o indigo_align.o indigo_dslr_raw.o
+
+$(SOLVER_LIB_OBJECTS): %.o: ../indigo_libs/%.c
+	$(CC) $(CFLAGS) -DINDIGO_CLIENT -c -o $@ $<
+
+# the tool sees the same structures as these sources; the solver core is shared with the indexer, which links libindigo
+indigo_solver.o: CFLAGS += -DINDIGO_CLIENT
+
+$(BUILD_BIN)/indigo_solver: indigo_solver.o indigo_solver_core.o indigo_solver_utils.o indigo_solver_healpix.o $(SOLVER_LIB_OBJECTS)
+	$(CC) $(CFLAGS)  -o $@ indigo_solver.o indigo_solver_core.o indigo_solver_utils.o indigo_solver_healpix.o $(SOLVER_LIB_OBJECTS) $(LDFLAGS) $(BUILD_LIB)/libraw.a $(BUILD_LIB)/libjpeg.a -lstdc++ -lz

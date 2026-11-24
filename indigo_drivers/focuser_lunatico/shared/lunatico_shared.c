@@ -185,7 +185,7 @@ static bool lunatico_port_exists(indigo_device *device) {
 
 // --------------------------------------------------------------------------------- Connection
 
-static bool lunatico_open(indigo_device *device) {
+static bool lunatico_open(indigo_device *device, const char **error_message) {
 	char *name = DEVICE_PORT_ITEM->text.value;
 	if (indigo_uni_is_url(name, "lunatico")) {
 		char url[INDIGO_VALUE_SIZE];
@@ -193,7 +193,7 @@ static bool lunatico_open(indigo_device *device) {
 		snprintf(url, sizeof(url), "udp://%s", host == NULL ? name : host + 3);
 		PRIVATE_DATA->handle = indigo_uni_open_url(url, LUNATICO_UDP_PORT, INDIGO_UDP_HANDLE, INDIGO_LOG_DEBUG);
 	} else {
-		PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(name, atoi(DEVICE_BAUDRATE_ITEM->text.value), INDIGO_LOG_DEBUG);
+		PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(name, atoi(DEVICE_BAUDRATE_ITEM->text.value), INDIGO_LOG_DEBUG, error_message);
 	}
 	if (PRIVATE_DATA->handle != NULL) {
 		if (lunatico_identify(device)) {
@@ -230,7 +230,13 @@ static bool lunatico_claim_port(indigo_device *device) {
 	return true;
 }
 
+static void lunatico_focuser_halt(indigo_device *device);
+
 static void lunatico_release_port(indigo_device *device) {
+	// A focuser still moving is stopped before its connection goes away.
+	if (atoi(INFO_DEVICE_INTERFACE_ITEM->text.value) & INDIGO_INTERFACE_FOCUSER) {
+		lunatico_focuser_halt(device);
+	}
 	if (PORT_STATE.owner == device) {
 		PORT_STATE.owner = NULL;
 	}
@@ -406,11 +412,88 @@ static void lunatico_configure_port(indigo_device *device, indigo_property *powe
 
 // --------------------------------------------------------------------------------- Focuser device
 
-static void lunatico_focuser_motion_state(indigo_device *device, indigo_property_state state) {
-	FOCUSER_POSITION_PROPERTY->state = state;
-	FOCUSER_STEPS_PROPERTY->state = state;
+// The bus and worker share only this short admission/publication critical section.
+// Never hold it during transport or from a worker publishing to the bus. The bus
+// callback already owns the bus lock; recursion permits synchronous client reentry.
+static pthread_once_t lunatico_request_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t lunatico_request_mutex;
+// Additional instances copy the wrapped device callback but allocate fresh private
+// data. Each port has one focuser callback, retained for every instance here.
+static indigo_result (*lunatico_focuser_callbacks[LUNATICO_PORTS])(indigo_device *, indigo_client *, indigo_property *);
+#define LUNATICO_PENDING_POSITION 1u
+#define LUNATICO_PENDING_STEPS 2u
+
+static void lunatico_request_mutex_init(void) {
+	pthread_mutexattr_t attributes;
+	pthread_mutexattr_init(&attributes);
+	pthread_mutexattr_settype(&attributes, PTHREAD_MUTEX_RECURSIVE);
+	pthread_mutex_init(&lunatico_request_mutex, &attributes);
+	pthread_mutexattr_destroy(&attributes);
+}
+
+static indigo_result lunatico_focuser_change_property(indigo_device *device, indigo_client *client, indigo_property *property) {
+	pthread_mutex_lock(&lunatico_request_mutex);
+	indigo_property *motion = indigo_property_match_changeable(FOCUSER_POSITION_PROPERTY, property) ? FOCUSER_POSITION_PROPERTY : indigo_property_match_changeable(FOCUSER_STEPS_PROPERTY, property) ? FOCUSER_STEPS_PROPERTY : NULL;
+	indigo_property_state before = motion == NULL ? INDIGO_IDLE_STATE : motion->state;
+	indigo_result result = lunatico_focuser_callbacks[PORT_INDEX](device, client, property);
+	// Observe admission by the unchanged generated callback, including its sole BUSY guard.
+	if (motion != NULL && IS_CONNECTED && before != INDIGO_BUSY_STATE && motion->state == INDIGO_BUSY_STATE) {
+		if (motion == FOCUSER_POSITION_PROPERTY) {
+			PORT_STATE.focuser_requested_position = FOCUSER_POSITION_ITEM->number.target;
+			PORT_STATE.focuser_pending |= LUNATICO_PENDING_POSITION;
+		} else {
+			PORT_STATE.focuser_requested_steps = FOCUSER_STEPS_ITEM->number.value;
+			PORT_STATE.focuser_pending |= LUNATICO_PENDING_STEPS;
+		}
+	}
+	pthread_mutex_unlock(&lunatico_request_mutex);
+	return result;
+}
+
+static void lunatico_focuser_bind_requests(indigo_device *device) {
+	pthread_once(&lunatico_request_once, lunatico_request_mutex_init);
+	if (device->change_property != lunatico_focuser_change_property) {
+		lunatico_focuser_callbacks[PORT_INDEX] = device->change_property;
+		device->change_property = lunatico_focuser_change_property;
+	}
+}
+
+static void lunatico_focuser_publish_motion(indigo_device *device) {
 	indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
 	indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+}
+
+static void lunatico_focuser_motion_state(indigo_device *device, indigo_property_state state) {
+	pthread_mutex_lock(&lunatico_request_mutex);
+	bool publish = PORT_STATE.focuser_pending == 0;
+	if (publish) {
+		FOCUSER_POSITION_PROPERTY->state = state;
+		FOCUSER_STEPS_PROPERTY->state = state;
+	}
+	pthread_mutex_unlock(&lunatico_request_mutex);
+	if (publish) {
+		lunatico_focuser_publish_motion(device);
+	}
+}
+
+// A queued request owns the published target/state until its worker starts.
+static void lunatico_focuser_end(indigo_device *device, indigo_property_state state) {
+	pthread_mutex_lock(&lunatico_request_mutex);
+	bool publish = PORT_STATE.focuser_pending == 0;
+	if (publish) {
+		PORT_STATE.focuser_external = false;
+		FOCUSER_POSITION_ITEM->number.value = PORT_STATE.focuser_position;
+		FOCUSER_POSITION_PROPERTY->state = state;
+		FOCUSER_STEPS_PROPERTY->state = state;
+	}
+	pthread_mutex_unlock(&lunatico_request_mutex);
+	if (publish) {
+		lunatico_focuser_publish_motion(device);
+	}
+}
+
+static bool lunatico_focuser_moving(indigo_device *device) {
+	return FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE;
 }
 
 // Bounded progress check of a focuser move. It reschedules itself while the
@@ -422,20 +505,76 @@ static void focuser_motion_finalizer(indigo_device *device) {
 	}
 	bool moving = false;
 	int32_t position = 0;
-	if (!lunatico_is_moving(device, &moving)) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_is_moving() failed");
-		lunatico_focuser_motion_state(device, INDIGO_ALERT_STATE);
+	bool readback = lunatico_is_moving(device, &moving) && lunatico_get_position(device, &position);
+	bool advanced = readback && position != PORT_STATE.focuser_position;
+	if (readback) {
+		// Preserve measured hardware state even when a queued request owns the public target.
+		PORT_STATE.focuser_position = position;
+	}
+	pthread_mutex_lock(&lunatico_request_mutex);
+	bool pending = PORT_STATE.focuser_pending != 0;
+	pthread_mutex_unlock(&lunatico_request_mutex);
+	if (pending) {
+		// The queued request will read/start its own operation after this poll returns.
 		return;
 	}
-	if (!lunatico_get_position(device, &position)) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_get_position() failed");
-		lunatico_focuser_motion_state(device, INDIGO_ALERT_STATE);
+	if (!readback) {
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Focuser status readback failed");
+		// A single lost readback is retried; a persistent failure stops the motor
+		// so it does not run unobserved.
+		if (++PORT_STATE.focuser_failures < LUNATICO_MAX_FAILURES) {
+			indigo_execute_handler_in(device, LUNATICO_MOTION_POLL, focuser_motion_finalizer);
+			return;
+		}
+		if (!lunatico_stop(device)) {
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_stop() failed");
+		}
+		lunatico_focuser_end(device, INDIGO_ALERT_STATE);
 		return;
 	}
-	PORT_STATE.focuser_position = position;
-	FOCUSER_POSITION_ITEM->number.value = position;
-	if (!moving || position == PORT_STATE.focuser_target) {
-		lunatico_focuser_motion_state(device, INDIGO_OK_STATE);
+	PORT_STATE.focuser_failures = 0;
+	pthread_mutex_lock(&lunatico_request_mutex);
+	pending = PORT_STATE.focuser_pending != 0;
+	if (!pending) {
+		FOCUSER_POSITION_ITEM->number.value = position;
+		if (PORT_STATE.focuser_external) {
+			// Only external motion without a queued request may move the public target.
+			FOCUSER_POSITION_ITEM->number.target = PORT_STATE.focuser_target = position;
+		}
+	}
+	pthread_mutex_unlock(&lunatico_request_mutex);
+	if (pending) {
+		return;
+	}
+	if (PORT_STATE.focuser_external) {
+		if (moving) {
+			lunatico_focuser_motion_state(device, INDIGO_BUSY_STATE);
+			indigo_execute_handler_in(device, LUNATICO_MOTION_POLL, focuser_motion_finalizer);
+		} else {
+			lunatico_focuser_end(device, INDIGO_OK_STATE);
+		}
+		return;
+	}
+	if (position == PORT_STATE.focuser_target) {
+		lunatico_focuser_end(device, INDIGO_OK_STATE);
+		return;
+	}
+	if (!moving) {
+		// The focuser stopped elsewhere than the target, so it did not arrive.
+		lunatico_focuser_end(device, INDIGO_ALERT_STATE);
+		return;
+	}
+	if (advanced) {
+		PORT_STATE.focuser_stalls = 0;
+	} else if (++PORT_STATE.focuser_stalls >= LUNATICO_STALL_POLLS) {
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "The focuser stalled at %d", position);
+		if (!lunatico_stop(device)) {
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_stop() failed");
+		}
+		if (lunatico_get_position(device, &position)) {
+			PORT_STATE.focuser_position = position;
+		}
+		lunatico_focuser_end(device, INDIGO_ALERT_STATE);
 		return;
 	}
 	lunatico_focuser_motion_state(device, INDIGO_BUSY_STATE);
@@ -444,15 +583,28 @@ static void focuser_motion_finalizer(indigo_device *device) {
 
 // Start an absolute move to an already clamped target. Returns true when the
 // move started and its completion still has to be polled.
-static bool lunatico_focuser_start_move(indigo_device *device, int32_t target, int32_t backlash) {
+static bool lunatico_focuser_start_move(indigo_device *device, int32_t target, int32_t backlash, bool compensation) {
+	pthread_mutex_lock(&lunatico_request_mutex);
+	if (compensation && (PORT_STATE.focuser_pending != 0 || lunatico_focuser_moving(device))) {
+		pthread_mutex_unlock(&lunatico_request_mutex);
+		return false;
+	}
 	PORT_STATE.focuser_target = target;
+	PORT_STATE.focuser_external = false;
+	PORT_STATE.focuser_failures = PORT_STATE.focuser_stalls = 0;
 	FOCUSER_POSITION_ITEM->number.value = PORT_STATE.focuser_position;
-	lunatico_focuser_motion_state(device, INDIGO_BUSY_STATE);
+	if (!(PORT_STATE.focuser_pending & LUNATICO_PENDING_POSITION)) {
+		FOCUSER_POSITION_ITEM->number.target = target;
+	}
+	FOCUSER_POSITION_PROPERTY->state = INDIGO_BUSY_STATE;
+	FOCUSER_STEPS_PROPERTY->state = INDIGO_BUSY_STATE;
+	pthread_mutex_unlock(&lunatico_request_mutex);
+	lunatico_focuser_publish_motion(device);
 	if (!lunatico_goto_position(device, target, backlash)) {
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_goto_position(%d, %d) failed", target, backlash);
 		// The move never started, so it must not be polled: the poll would find
 		// the focuser idle at the unchanged position and overwrite the failure.
-		lunatico_focuser_motion_state(device, INDIGO_ALERT_STATE);
+		lunatico_focuser_end(device, INDIGO_ALERT_STATE);
 		return false;
 	}
 	return true;
@@ -472,14 +624,18 @@ static int32_t lunatico_focuser_clamp(indigo_device *device, double target) {
 // controller's position counter and reads it back. Returns true when a move
 // started and still has to be polled.
 static bool lunatico_focuser_position(indigo_device *device) {
-	int32_t target = (int32_t)FOCUSER_POSITION_ITEM->number.target;
-	if (target == PORT_STATE.focuser_position) {
-		lunatico_focuser_motion_state(device, INDIGO_OK_STATE);
-		return false;
-	}
+	pthread_mutex_lock(&lunatico_request_mutex);
+	int32_t target = (int32_t)(PORT_STATE.focuser_pending & LUNATICO_PENDING_POSITION ? PORT_STATE.focuser_requested_position : FOCUSER_POSITION_ITEM->number.target);
+	PORT_STATE.focuser_pending &= ~LUNATICO_PENDING_POSITION;
+	pthread_mutex_unlock(&lunatico_request_mutex);
 	if (FOCUSER_ON_POSITION_SET_GOTO_ITEM->sw.value) {
-		return lunatico_focuser_start_move(device, target, (int32_t)FOCUSER_BACKLASH_ITEM->number.value);
+		if (target == PORT_STATE.focuser_position) {
+			lunatico_focuser_end(device, INDIGO_OK_STATE);
+			return false;
+		}
+		return lunatico_focuser_start_move(device, target, (int32_t)FOCUSER_BACKLASH_ITEM->number.value, false);
 	}
+	// A sync always reaches the controller, also for the value already published.
 	indigo_property_state state = INDIGO_OK_STATE;
 	if (!lunatico_sync_position(device, target)) {
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_sync_position(%d) failed", target);
@@ -493,7 +649,12 @@ static bool lunatico_focuser_position(indigo_device *device) {
 		PORT_STATE.focuser_position = position;
 		FOCUSER_POSITION_ITEM->number.value = position;
 	}
-	lunatico_focuser_motion_state(device, state);
+	if (state == INDIGO_OK_STATE) {
+		PORT_STATE.focuser_target = PORT_STATE.focuser_position;
+	}
+	// A refused sync publishes the position the controller really has as the
+	// value; the target keeps the request.
+	lunatico_focuser_end(device, state);
 	return false;
 }
 
@@ -501,37 +662,72 @@ static bool lunatico_focuser_position(indigo_device *device) {
 // measured position, with no backlash compensation. Returns true when the move
 // started and still has to be polled.
 static bool lunatico_focuser_steps(indigo_device *device) {
+	pthread_mutex_lock(&lunatico_request_mutex);
+	double steps = PORT_STATE.focuser_pending & LUNATICO_PENDING_STEPS ? PORT_STATE.focuser_requested_steps : FOCUSER_STEPS_ITEM->number.value;
+	PORT_STATE.focuser_pending &= ~LUNATICO_PENDING_STEPS;
+	pthread_mutex_unlock(&lunatico_request_mutex);
 	int32_t position = 0;
 	if (!lunatico_get_position(device, &position)) {
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_get_position() failed");
 	} else {
 		PORT_STATE.focuser_position = position;
 	}
-	double steps = FOCUSER_STEPS_ITEM->number.value;
 	double target = FOCUSER_DIRECTION_MOVE_INWARD_ITEM->sw.value ? PORT_STATE.focuser_position - steps : PORT_STATE.focuser_position + steps;
-	return lunatico_focuser_start_move(device, lunatico_focuser_clamp(device, target), 0);
+	return lunatico_focuser_start_move(device, lunatico_focuser_clamp(device, target), 0, false);
 }
 
 static void lunatico_focuser_abort(indigo_device *device) {
-	indigo_property_state state = INDIGO_OK_STATE;
-	if (!lunatico_stop(device)) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_stop() failed");
-		state = INDIGO_ALERT_STATE;
+	bool requested = FOCUSER_ABORT_MOTION_ITEM->sw.value;
+	FOCUSER_ABORT_MOTION_ITEM->sw.value = false;
+	FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
+	// Nothing to stop while idle, so no command is sent.
+	if (requested && lunatico_focuser_moving(device)) {
+		if (!lunatico_stop(device)) {
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_stop() failed");
+			FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
+			// The focuser may still run, so the move is not reported completed; the
+			// poll the abort cancelled follows it again and a retry can stop it.
+			indigo_execute_handler_in(device, LUNATICO_MOTION_POLL, focuser_motion_finalizer);
+		} else {
+			int32_t position = 0;
+			if (!lunatico_get_position(device, &position)) {
+				INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_get_position() failed");
+			} else {
+				PORT_STATE.focuser_position = position;
+			}
+			// The aborted move ends ALERT at the position the focuser stopped at,
+			// with the target still the requested one.
+			lunatico_focuser_end(device, INDIGO_ALERT_STATE);
+		}
 	}
-	int32_t position = 0;
-	if (!lunatico_get_position(device, &position)) {
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_get_position() failed");
-		state = INDIGO_ALERT_STATE;
-	} else {
-		PORT_STATE.focuser_position = position;
-	}
-	FOCUSER_POSITION_ITEM->number.value = PORT_STATE.focuser_position;
-	lunatico_focuser_motion_state(device, INDIGO_OK_STATE);
 	// The generated handler suppresses its epilogue because this block schedules
 	// a finalizer, so the abort publishes its own outcome.
-	FOCUSER_ABORT_MOTION_PROPERTY->state = state;
-	FOCUSER_ABORT_MOTION_ITEM->sw.value = false;
 	indigo_update_property(device, FOCUSER_ABORT_MOTION_PROPERTY, NULL);
+}
+
+// The focuser of a port is stopped before its connection goes away.
+static void lunatico_focuser_halt(indigo_device *device) {
+	pthread_mutex_lock(&lunatico_request_mutex);
+	PORT_STATE.focuser_pending = 0;
+	pthread_mutex_unlock(&lunatico_request_mutex);
+	if (lunatico_focuser_moving(device) && !lunatico_stop(device)) {
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_stop() failed");
+	}
+	PORT_STATE.focuser_external = false;
+}
+
+// The range of FOCUSER_POSITION and FOCUSER_STEPS follows the software limits.
+static void lunatico_focuser_ranges(indigo_device *device, bool publish) {
+	FOCUSER_POSITION_ITEM->number.min = PORT_STATE.focuser_limit_min;
+	FOCUSER_POSITION_ITEM->number.max = PORT_STATE.focuser_limit_max;
+	FOCUSER_STEPS_ITEM->number.max = PORT_STATE.focuser_limit_max - PORT_STATE.focuser_limit_min;
+	if (publish) {
+		// An update does not carry a new range, so the properties are defined again.
+		indigo_delete_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+		indigo_delete_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+		indigo_define_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+		indigo_define_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+	}
 }
 
 // FOCUSER_LIMITS are the controller's software limits; the full range removes
@@ -539,9 +735,20 @@ static void lunatico_focuser_abort(indigo_device *device) {
 static void lunatico_focuser_limits(indigo_device *device) {
 	int32_t min = (int32_t)FOCUSER_LIMITS_MIN_POSITION_ITEM->number.target;
 	int32_t max = (int32_t)FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target;
+	const char *refusal = NULL;
 	if (max < min) {
+		refusal = "Minimum value can not be bigger then maximum";
+	} else if (lunatico_focuser_moving(device)) {
+		refusal = "The focuser is moving";
+	} else if (PORT_STATE.focuser_position < min || PORT_STATE.focuser_position > max) {
+		refusal = "The limits exclude the current position";
+	}
+	if (refusal != NULL) {
+		// Nothing is sent and the limits the controller holds stay published.
+		FOCUSER_LIMITS_MIN_POSITION_ITEM->number.value = FOCUSER_LIMITS_MIN_POSITION_ITEM->number.target = PORT_STATE.focuser_limit_min;
+		FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target = PORT_STATE.focuser_limit_max;
 		FOCUSER_LIMITS_PROPERTY->state = INDIGO_ALERT_STATE;
-		indigo_update_property(device, FOCUSER_LIMITS_PROPERTY, "Minimum value can not be bigger then maximum");
+		indigo_update_property(device, FOCUSER_LIMITS_PROPERTY, "%s", refusal);
 		return;
 	}
 	bool result;
@@ -552,8 +759,14 @@ static void lunatico_focuser_limits(indigo_device *device) {
 	}
 	if (!result) {
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_set_limits() failed");
+		FOCUSER_LIMITS_MIN_POSITION_ITEM->number.value = FOCUSER_LIMITS_MIN_POSITION_ITEM->number.target = PORT_STATE.focuser_limit_min;
+		FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target = PORT_STATE.focuser_limit_max;
 		FOCUSER_LIMITS_PROPERTY->state = INDIGO_ALERT_STATE;
+		return;
 	}
+	PORT_STATE.focuser_limit_min = min;
+	PORT_STATE.focuser_limit_max = max;
+	lunatico_focuser_ranges(device, true);
 }
 
 // Temperature compensation. It is driven by the temperature poll and only moves
@@ -565,7 +778,7 @@ static void lunatico_focuser_compensate(indigo_device *device, double temperatur
 		PORT_STATE.previous_temperature = temperature;
 		return;
 	}
-	if (temperature <= NO_TEMP_READING || FOCUSER_POSITION_PROPERTY->state != INDIGO_OK_STATE) {
+	if (temperature <= NO_TEMP_READING || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE) {
 		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Not compensating: temperature = %f, FOCUSER_POSITION state = %d", temperature, FOCUSER_POSITION_PROPERTY->state);
 		return;
 	}
@@ -583,8 +796,9 @@ static void lunatico_focuser_compensate(indigo_device *device, double temperatur
 	} else {
 		PORT_STATE.focuser_position = position;
 	}
-	PORT_STATE.previous_temperature = temperature;
-	if (lunatico_focuser_start_move(device, target, (int32_t)FOCUSER_BACKLASH_ITEM->number.value)) {
+	// The reference only advances with a move that started, so a failed one is retried from it.
+	if (lunatico_focuser_start_move(device, target, (int32_t)FOCUSER_BACKLASH_ITEM->number.value, true)) {
+		PORT_STATE.previous_temperature = temperature;
 		indigo_execute_handler_in(device, LUNATICO_MOTION_POLL, focuser_motion_finalizer);
 	}
 }
@@ -622,6 +836,12 @@ static void lunatico_focuser_poll_temperature(indigo_device *device) {
 // FOCUSER_MODE takes the manual controls away in automatic mode and makes the
 // position read-only.
 static void lunatico_focuser_mode(indigo_device *device) {
+	if (lunatico_focuser_moving(device)) {
+		// The mode is not changed while the focuser moves.
+		indigo_set_switch(FOCUSER_MODE_PROPERTY, FOCUSER_MODE_MANUAL_ITEM->sw.value ? FOCUSER_MODE_AUTOMATIC_ITEM : FOCUSER_MODE_MANUAL_ITEM, true);
+		FOCUSER_MODE_PROPERTY->state = INDIGO_ALERT_STATE;
+		return;
+	}
 	if (FOCUSER_MODE_MANUAL_ITEM->sw.value) {
 		indigo_define_property(device, FOCUSER_ON_POSITION_SET_PROPERTY, NULL);
 		indigo_define_property(device, FOCUSER_SPEED_PROPERTY, NULL);
@@ -649,6 +869,9 @@ static void lunatico_focuser_mode(indigo_device *device) {
 
 // The focuser connection sequence, in the order the original driver used.
 static bool lunatico_focuser_connect(indigo_device *device, indigo_property *power_control, indigo_property *motor_type, indigo_property *step_mode, indigo_property *wiring, indigo_property *temperature_sensor) {
+	pthread_mutex_lock(&lunatico_request_mutex);
+	PORT_STATE.focuser_pending = 0;
+	pthread_mutex_unlock(&lunatico_request_mutex);
 	if (!lunatico_claim_port(device)) {
 		return false;
 	}
@@ -676,6 +899,10 @@ static bool lunatico_focuser_connect(indigo_device *device, indigo_property *pow
 	if (!result) {
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_set_limits() failed");
 	}
+	PORT_STATE.focuser_limit_min = (int32_t)FOCUSER_LIMITS_MIN_POSITION_ITEM->number.value;
+	PORT_STATE.focuser_limit_max = (int32_t)FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value;
+	lunatico_focuser_ranges(device, false);
+	FOCUSER_POSITION_ITEM->number.target = position;
 	double temperature = NO_TEMP_READING;
 	if (lunatico_get_temperature(device, 0, &temperature)) {
 		FOCUSER_TEMPERATURE_ITEM->number.value = temperature;
@@ -684,7 +911,10 @@ static bool lunatico_focuser_connect(indigo_device *device, indigo_property *pow
 	PORT_STATE.has_temperature_sensor = true;
 	// The original driver published the initial position from a one-shot poll
 	// scheduled 0.5 s after the connection; the same poll is kept so an axis
-	// that is already moving when the driver connects is still followed.
+	// that is already moving when the driver connects is still followed, as
+	// motion this driver did not request.
+	PORT_STATE.focuser_external = true;
+	PORT_STATE.focuser_failures = PORT_STATE.focuser_stalls = 0;
 	indigo_execute_handler_in(device, LUNATICO_MOTION_POLL, focuser_motion_finalizer);
 	return true;
 }
@@ -763,7 +993,12 @@ static void rotator_motion_finalizer(indigo_device *device) {
 	}
 	PORT_STATE.rotator_position = lunatico_rotator_degrees(device, position);
 	ROTATOR_POSITION_ITEM->number.value = PORT_STATE.rotator_position;
-	ROTATOR_POSITION_PROPERTY->state = !moving || PORT_STATE.rotator_position == PORT_STATE.rotator_target ? INDIGO_OK_STATE : INDIGO_BUSY_STATE;
+	if (!moving || (PORT_STATE.rotator_commanded && position == PORT_STATE.rotator_expected)) {
+		ROTATOR_POSITION_PROPERTY->state = PORT_STATE.rotator_commanded && position != PORT_STATE.rotator_expected ? INDIGO_ALERT_STATE : INDIGO_OK_STATE;
+		PORT_STATE.rotator_commanded = false;
+	} else {
+		ROTATOR_POSITION_PROPERTY->state = INDIGO_BUSY_STATE;
+	}
 	indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
 	if (ROTATOR_POSITION_PROPERTY->state == INDIGO_BUSY_STATE) {
 		indigo_execute_handler_in(device, LUNATICO_MOTION_POLL, rotator_motion_finalizer);
@@ -788,7 +1023,6 @@ static bool lunatico_rotator_position(indigo_device *device) {
 		return false;
 	}
 	if (ROTATOR_ON_POSITION_SET_GOTO_ITEM->sw.value) {
-		PORT_STATE.rotator_target = ROTATOR_POSITION_ITEM->number.target;
 		ROTATOR_POSITION_ITEM->number.value = current;
 		ROTATOR_POSITION_PROPERTY->state = INDIGO_BUSY_STATE;
 		indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
@@ -799,6 +1033,8 @@ static bool lunatico_rotator_position(indigo_device *device) {
 			indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
 			return false;
 		}
+		PORT_STATE.rotator_expected = target;
+		PORT_STATE.rotator_commanded = true;
 		return true;
 	}
 	indigo_property_state state = INDIGO_OK_STATE;
@@ -820,6 +1056,9 @@ static bool lunatico_rotator_position(indigo_device *device) {
 }
 
 static void lunatico_rotator_abort(indigo_device *device) {
+	// a running move, or one still queued, ends ALERT; an abort while idle leaves the state of the last move
+	bool in_motion = ROTATOR_POSITION_PROPERTY->state == INDIGO_BUSY_STATE;
+	PORT_STATE.rotator_commanded = false;
 	indigo_property_state state = INDIGO_OK_STATE;
 	if (!lunatico_stop(device)) {
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "lunatico_stop() failed");
@@ -833,8 +1072,12 @@ static void lunatico_rotator_abort(indigo_device *device) {
 		PORT_STATE.rotator_position = lunatico_rotator_degrees(device, position);
 	}
 	ROTATOR_POSITION_ITEM->number.value = PORT_STATE.rotator_position;
-	ROTATOR_POSITION_PROPERTY->state = INDIGO_OK_STATE;
-	indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
+	if (in_motion) {
+		ROTATOR_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
+		indigo_update_property(device, ROTATOR_POSITION_PROPERTY, "Rotator motion aborted");
+	} else {
+		indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
+	}
 	// The generated handler suppresses its epilogue because this block schedules
 	// a finalizer, so the abort publishes its own outcome.
 	ROTATOR_ABORT_MOTION_PROPERTY->state = state;
@@ -871,7 +1114,8 @@ static bool lunatico_rotator_connect(indigo_device *device, indigo_property *pow
 	// The current angle has to follow what the controller reports: the position
 	// handler skips a request that equals it, so a stale 0 here would silently
 	// swallow the first request for 0 deg.
-	PORT_STATE.rotator_position = PORT_STATE.rotator_target = lunatico_rotator_degrees(device, position);
+	PORT_STATE.rotator_commanded = false;
+	PORT_STATE.rotator_position = lunatico_rotator_degrees(device, position);
 	ROTATOR_POSITION_ITEM->number.value = PORT_STATE.rotator_position;
 	lunatico_rotator_resync(device);
 	if (!lunatico_set_speed(device, 0.1)) {

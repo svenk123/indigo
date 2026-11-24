@@ -110,6 +110,20 @@ static bool move_by(const char *direction, double steps) {
 
 // The driver reads every setting from the unit's SGETAL configuration line when it connects, so a
 // setting is only proven to have reached the unit once it comes back over a reconnect.
+// A request refused while a move runs is answered with a message only, the running move keeps its state.
+static bool refused_while_moving(const char *message) {
+	for (int i = 0; i < SHORT_TIMEOUT * 10; i++) {
+		pthread_mutex_lock(&hw_mutex);
+		bool seen = !strcmp(hw_last_message, message);
+		pthread_mutex_unlock(&hw_mutex);
+		if (seen) {
+			return true;
+		}
+		indigo_usleep(100000);
+	}
+	return false;
+}
+
 static bool reconnect(void) {
 	return hw_disconnect(focuser, SHORT_TIMEOUT) && hw_connect(focuser, SHORT_TIMEOUT);
 }
@@ -147,11 +161,16 @@ static void usbv3_publishes_the_property_contract(void) {
 	ASSERT_TRUE(hw_property_defined(focuser, X_FOCUSER_STEP_SIZE_PROPERTY_NAME));
 	ASSERT_TRUE(hw_property_defined(focuser, DEVICE_PORT_PROPERTY_NAME));
 	ASSERT_TRUE(hw_property_hidden(focuser, SIMULATION_PROPERTY_NAME));
-	// The speed is the unit's own 1 to 8 scale and the steps are its 16 bit range.
+	// The speed is the unit's own 1 to 8 scale; the steps reach at most the travel limit the unit
+	// reports, which is also the maximum of the position.
+	double travel_limit = 0;
 	ASSERT_TRUE(hw_number_item_range(focuser, FOCUSER_SPEED_PROPERTY_NAME, FOCUSER_SPEED_ITEM_NAME, &min, &max));
 	ASSERT_TRUE(min == 1 && max == 8);
+	ASSERT_TRUE(hw_number_item(focuser, FOCUSER_LIMITS_PROPERTY_NAME, FOCUSER_LIMITS_MAX_POSITION_ITEM_NAME, &travel_limit));
 	ASSERT_TRUE(hw_number_item_range(focuser, FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, &min, &max));
-	ASSERT_TRUE(min == 1 && max == 65535);
+	ASSERT_TRUE(min == 1 && max == travel_limit);
+	ASSERT_TRUE(hw_number_item_range(focuser, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, &min, &max));
+	ASSERT_TRUE(max == travel_limit);
 	ASSERT_TRUE(hw_number_item_range(focuser, FOCUSER_COMPENSATION_PROPERTY_NAME, FOCUSER_COMPENSATION_ITEM_NAME, &min, &max));
 	ASSERT_TRUE(min == -999 && max == 999);
 	ASSERT_TRUE(hw_number_item_range(focuser, FOCUSER_COMPENSATION_PROPERTY_NAME, FOCUSER_COMPENSATION_THRESHOLD_ITEM_NAME, &min, &max));
@@ -206,8 +225,16 @@ static void usbv3_rejects_an_overlapping_move(void) {
 	unsigned before = hw_revision(focuser, FOCUSER_POSITION_PROPERTY_NAME);
 	hw_request_number(focuser, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, start + 3 * MOVE_STEPS);
 	ASSERT_TRUE(hw_wait_settled(focuser, FOCUSER_POSITION_PROPERTY_NAME, INDIGO_BUSY_STATE, SHORT_TIMEOUT));
-	// The driver refuses a second motion request while one is running, with its own message.
-	ASSERT_TRUE(hw_set_number(focuser, FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, MOVE_STEPS, INDIGO_ALERT_STATE, SHORT_TIMEOUT));
+	// The driver refuses a second motion request while one is running, with its own message; the motion
+	// properties keep the running move's state and target.
+	pthread_mutex_lock(&hw_mutex);
+	*hw_last_message = 0;
+	pthread_mutex_unlock(&hw_mutex);
+	hw_request_number(focuser, FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, MOVE_STEPS);
+	ASSERT_TRUE(refused_while_moving("Another motion operation is pending"));
+	double target = 0;
+	ASSERT_TRUE(hw_property_state(focuser, FOCUSER_STEPS_PROPERTY_NAME) == INDIGO_BUSY_STATE && hw_property_state(focuser, FOCUSER_POSITION_PROPERTY_NAME) == INDIGO_BUSY_STATE);
+	ASSERT_TRUE(hw_number_item_target(focuser, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, &target) && target == start + 3 * MOVE_STEPS);
 	ASSERT_TRUE(hw_wait_state(focuser, FOCUSER_POSITION_PROPERTY_NAME, before, INDIGO_OK_STATE, MOVE_TIMEOUT));
 	ASSERT_TRUE(position() == start + 3 * MOVE_STEPS);
 	ASSERT_TRUE(move_to(start));
@@ -226,7 +253,12 @@ static void usbv3_aborts_a_move(void) {
 	stopped = position();
 	printf("    aborted at %g after starting from %g\n", stopped, start);
 	ASSERT_TRUE(stopped > start && stopped < start + 10 * MOVE_STEPS);
-	// A fresh move works right away and the unit agrees about where it is.
+	// The requested target is kept, also by the idle polls (every 2 s) that follow.
+	double target = -1;
+	indigo_usleep(4500000);
+	ASSERT_TRUE(hw_number_item_target(focuser, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, &target));
+	ASSERT_TRUE(target == start + 10 * MOVE_STEPS);
+	// A fresh move works and the unit agrees about where it is.
 	ASSERT_TRUE(move_to(start));
 	ASSERT_TRUE(reconnect());
 	ASSERT_TRUE(position() == start);

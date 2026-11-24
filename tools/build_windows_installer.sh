@@ -19,10 +19,11 @@
 # NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-# Builds the Windows INDIGO binaries with MSBuild (Visual Studio) and
+# Builds the Windows INDIGO binaries from scratch with MSBuild (Visual Studio) and
 # packages the whole build output (indigo_server, tools, indigo.dll and
 # every driver/agent DLL) into a Windows installer
-# (indigo_windows/installer/indigo.iss) using Inno Setup 6.
+# (indigo_windows/installer/indigo.iss) and indigo_solver alone into a second
+# one (indigo_windows/installer/indigo_solver.iss) using Inno Setup 6.
 #
 # Run this from a bash shell that has the usual POSIX build tools on PATH
 # (e.g. Git for Windows' bash, or MSYS2).
@@ -93,11 +94,22 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
         exit 1
     fi
 
+    # The installers package the whole output folder, so nothing left over from
+    # an earlier build may stay in it. The Clean target removes the intermediate
+    # files, the folder itself also holds files of projects that no longer exist.
+    echo "==> Cleaning the previous build"
+    "$MSBUILD" "$REPO_ROOT/indigo_windows.sln" \
+        "-t:Clean" \
+        "-p:Configuration=$INDIGO_BUILD_CONFIGURATION" \
+        "-p:Platform=$INDIGO_BUILD_PLATFORM" \
+        "-m"
+    rm -rf "$REPO_ROOT/build/$INDIGO_BUILD_CONFIGURATION/$INDIGO_BUILD_PLATFORM"
+
     echo "==> Building indigo_windows.sln with $MSBUILD"
     "$MSBUILD" "$REPO_ROOT/indigo_windows.sln" \
-        "/p:Configuration=$INDIGO_BUILD_CONFIGURATION" \
-        "/p:Platform=$INDIGO_BUILD_PLATFORM" \
-        "/m"
+        "-p:Configuration=$INDIGO_BUILD_CONFIGURATION" \
+        "-p:Platform=$INDIGO_BUILD_PLATFORM" \
+        "-m"
 else
     echo "==> SKIP_BUILD=1, not (re)building the solution"
 fi
@@ -109,10 +121,11 @@ if [ ! -d "$BUILD_DIR" ]; then
 fi
 
 # Generate the "indigo_drivers" metadata file (name/description of every
-# indigo_*.dll driver/agent next to indigo_server.exe). indigo_server looks
-# for this file next to its own executable on Windows (the equivalent of
-# /usr/share/indigo/indigo_drivers on Linux), and uses it to populate the
-# list of available drivers without having to load every DLL up front.
+# indigo_*.dll driver/agent next to indigo_server.exe). The installer puts
+# it into the "share" folder, where the installed indigo_server looks for it
+# (the equivalent of /usr/share/indigo/indigo_drivers on Linux), and uses it
+# to populate the list of available drivers without having to load every DLL
+# up front.
 if [ -x "$BUILD_DIR/make_indigo_drivers.exe" ]; then
     echo "==> Generating indigo_drivers metadata file"
     (cd "$BUILD_DIR" && ./make_indigo_drivers.exe)
@@ -145,7 +158,8 @@ fi
 
 mkdir -p "$REPO_ROOT/dist"
 
-echo "==> Building installer with $ISCC"
+echo "==> Building installers with $ISCC"
 "$ISCC" "$REPO_ROOT/indigo_windows/installer/indigo.iss"
+"$ISCC" "$REPO_ROOT/indigo_windows/installer/indigo_solver.iss"
 
-echo "==> Done. Installer written to $REPO_ROOT/dist/"
+echo "==> Done. Installers written to $REPO_ROOT/dist/"

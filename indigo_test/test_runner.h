@@ -82,11 +82,24 @@ static const char *indigo_current_test_name = NULL;
 	} \
 } while (0)
 
+// A NaN compares false with everything, so the plain distance test let a NaN result pass. The
+// tolerance must be finite and not negative; expected and actual must be finite, except that an
+// infinite expected value is matched exactly by an infinite actual value of the same sign.
 #define ASSERT_NEAR(expected, actual, tolerance) do { \
 	double indigo_assert_expected = (expected); \
 	double indigo_assert_actual = (actual); \
 	double indigo_assert_tolerance = (tolerance); \
-	if (fabs(indigo_assert_expected - indigo_assert_actual) > indigo_assert_tolerance) { \
+	bool indigo_assert_near; \
+	if (!isfinite(indigo_assert_tolerance) || indigo_assert_tolerance < 0) { \
+		indigo_assert_near = false; \
+	} else if (isinf(indigo_assert_expected) && isinf(indigo_assert_actual)) { \
+		indigo_assert_near = indigo_assert_expected == indigo_assert_actual; \
+	} else if (!isfinite(indigo_assert_expected) || !isfinite(indigo_assert_actual)) { \
+		indigo_assert_near = false; \
+	} else { \
+		indigo_assert_near = fabs(indigo_assert_expected - indigo_assert_actual) <= indigo_assert_tolerance; \
+	} \
+	if (!indigo_assert_near) { \
 		fprintf(stderr, "%s:%d: expected %.12g, got %.12g, tolerance %.12g\n", __FILE__, __LINE__, indigo_assert_expected, indigo_assert_actual, indigo_assert_tolerance); \
 		indigo_test_failures++; \
 		return; \
@@ -140,11 +153,9 @@ static bool indigo_test_set_private_home(const char *path) {
 		perror("setenv");
 		return false;
 	}
-	// indigo_ccd_attach() points CCD_LOCAL_MODE at $HOME/indigo_image_cache/ and the framework
-	// only checks that the folder is writable, it never creates it. An empty private home
-	// therefore makes every CCD driver publish CCD_LOCAL_MODE in ALERT, and a CONFIG LOAD that
-	// restores it never settles, which is what failed the ccd_svb config roundtrip. A real home
-	// has the folder, so a private one gets it too.
+	// indigo_ccd_attach() points CCD_LOCAL_MODE at $HOME/indigo_image_cache/. A missing folder below
+	// a writable home is accepted (the first saved image creates it), but a real home has the
+	// folder, so the private one gets it too and tests that save images behave as on a real host.
 	char image_cache[PATH_MAX];
 	snprintf(image_cache, sizeof(image_cache), "%s/indigo_image_cache", path);
 	if (mkdir(image_cache, 0755) != 0 && errno != EEXIST) {
@@ -229,6 +240,9 @@ static void indigo_test_record(const char *format, ...) {
 // inherit it, so the indigo_run_tests() call each of them makes does not plan its case again.
 static bool indigo_test_plan_recorded = false;
 
+// Exit status for a filtered suite with no selected cases; aggregate runners may skip it.
+#define INDIGO_TEST_SKIP 77
+
 // A runner that forks its cases calls this in the parent, before the first fork, with the number of
 // cases it selected and the filter it selected them by (NULL when it runs all of them). A case whose
 // child never reports then counts as planned but not passed, instead of disappearing from the run.
@@ -245,17 +259,25 @@ static int indigo_run_tests(const char *suite_name, const indigo_test_case *test
 	// INDIGO_TEST_CASE_FILTER runs only the cases whose name contains it, which is how a
 	// single case is repeated while a flaky or failing one is being tracked down.
 	const char *filter = getenv("INDIGO_TEST_CASE_FILTER");
-	if (!indigo_test_plan_recorded) {
-		int selected = 0;
-		for (int i = 0; i < count; i++) {
-			if (filter == NULL || strstr(tests[i].name, filter) != NULL) {
-				selected++;
-			}
+	int selected = 0;
+	for (int i = 0; i < count; i++) {
+		if (filter == NULL || strstr(tests[i].name, filter) != NULL) {
+			selected++;
 		}
+	}
+	if (!indigo_test_plan_recorded) {
 		if (filter != NULL) {
 			indigo_test_record("filter\t%s", filter);
 		}
 		indigo_test_record("plan\t%d\t%s", selected, suite_name);
+	}
+	if (selected == 0) {
+		if (filter != NULL && count > 0) {
+			printf("SKIP %s: no test cases matched the filter\n", suite_name);
+			return INDIGO_TEST_SKIP;
+		}
+		fprintf(stderr, "%s: no test cases registered\n", suite_name);
+		return 1;
 	}
 	printf("Running %s\n", suite_name);
 	for (int i = 0; i < count; i++) {

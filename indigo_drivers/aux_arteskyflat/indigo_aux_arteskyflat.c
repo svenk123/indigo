@@ -32,7 +32,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000009
+#define DRIVER_VERSION       0x0300000A
 #define DRIVER_NAME          "indigo_aux_arteskyflat"
 #define DRIVER_LABEL         "Artesky Flat Box USB"
 #define AUX_DEVICE_NAME      "Artesky Flat Box"
@@ -85,8 +85,8 @@ static bool arteskyflat_command(indigo_device *device, char operation, int expec
 	return response_value == expected_value;
 }
 
-static bool arteskyflat_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG);
+static bool arteskyflat_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial2(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG, error_message);
 	return PRIVATE_DATA->handle != NULL;
 }
 
@@ -101,14 +101,19 @@ static void arteskyflat_close(indigo_device *device) {
 static void aux_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = arteskyflat_open(device);
+		const char *error_message = NULL;
+		connection_result = arteskyflat_open(device, &error_message);
 		if (connection_result) {
 			indigo_define_property(device, AUX_LIGHT_SWITCH_PROPERTY, NULL);
 			indigo_define_property(device, AUX_LIGHT_INTENSITY_PROPERTY, NULL);
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}

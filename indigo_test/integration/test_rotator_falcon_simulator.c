@@ -379,6 +379,31 @@ cleanup:
 	stop_external_serial_simulator(&simulator);
 }
 
+// A reversal the rotator does not acknowledge with its FN:<n> echo, refused with ERR or left unanswered, is
+// reported with ALERT and the property keeps the flag the rotator still has.
+static void refused_direction_change_keeps_the_flag(void) {
+	static const char *faults[] = { "err", "silent" };
+	for (int i = 0; i < 2; i++) {
+		external_serial_simulator simulator = { 0 };
+		bool online = false;
+		const char *arguments[] = { "--fault-direction", faults[i], NULL };
+		fprintf(stderr, "Direction fault %s\n", faults[i]);
+		SERIAL_CHECK_TRUE(start_falcon(&simulator, arguments));
+		SERIAL_CHECK_TRUE(start_serial_driver(&falcon_rotator, simulator.port));
+		online = true;
+		assert_switch_item_value(ROTATOR_DIRECTION_PROPERTY_NAME, ROTATOR_DIRECTION_NORMAL_ITEM_NAME, true);
+		SERIAL_CHECK_TRUE(set_switch(ROTATOR_DIRECTION_PROPERTY_NAME, ROTATOR_DIRECTION_REVERSED_ITEM_NAME));
+		SERIAL_CHECK_TRUE(wait_for_property_state(ROTATOR_DIRECTION_PROPERTY_NAME, INDIGO_ALERT_STATE));
+		assert_switch_item_value(ROTATOR_DIRECTION_PROPERTY_NAME, ROTATOR_DIRECTION_NORMAL_ITEM_NAME, true);
+		assert_switch_item_value(ROTATOR_DIRECTION_PROPERTY_NAME, ROTATOR_DIRECTION_REVERSED_ITEM_NAME, false);
+		// The rotator still answers everything else.
+		SERIAL_CHECK_TRUE(goto_position(10));
+	cleanup:
+		if (online) { stop_serial_driver(&falcon_rotator); }
+		stop_external_serial_simulator(&simulator);
+	}
+}
+
 // The rotator keeps its angle across a session, so the connect handshake has to publish the angle it
 // reports rather than the driver's own last value.
 static void reconnect_adopts_the_rotator_angle(void) {
@@ -430,8 +455,53 @@ cleanup:
 	tear_down_serial_driver(&falcon_rotator);
 }
 
+static void progress_stays_busy_and_disconnect_is_prompt(void) {
+	external_serial_simulator simulator = { 0 };
+	SERIAL_CHECK_TRUE(start_falcon(&simulator, NULL));
+	SERIAL_CHECK_TRUE(start_serial_driver(&falcon_rotator, simulator.port));
+	SERIAL_CHECK_TRUE(sync_to(0));
+	SERIAL_CHECK_TRUE(request_position(350));
+	SERIAL_CHECK_TRUE(wait_for_property_state(ROTATOR_POSITION_PROPERTY_NAME, INDIGO_BUSY_STATE));
+	indigo_usleep(1200000);
+	SERIAL_CHECK_EQ_INT(INDIGO_BUSY_STATE, find_cached_property(ROTATOR_POSITION_PROPERTY_NAME)->state);
+	double started = indigo_monotonic_time();
+	disconnect_serial_device(&falcon_rotator);
+	SERIAL_CHECK_TRUE(!context.connected);
+	SERIAL_CHECK_TRUE(indigo_monotonic_time() - started < 3);
+	SERIAL_CHECK_TRUE(connect_serial_device(&falcon_rotator, simulator.port));
+	SERIAL_CHECK_TRUE(find_cached_property(ROTATOR_POSITION_PROPERTY_NAME)->state != INDIGO_BUSY_STATE);
+cleanup:
+	stop_serial_driver(&falcon_rotator);
+	stop_external_serial_simulator(&simulator);
+}
+
+static void stalled_motion_times_out_and_stops(void) {
+	external_serial_simulator simulator = { 0 };
+	const char *arguments[] = { "--stalled", NULL };
+	SERIAL_CHECK_TRUE(start_falcon(&simulator, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&falcon_rotator, simulator.port));
+	SERIAL_CHECK_TRUE(sync_to(0));
+	SERIAL_CHECK_TRUE(request_position(90));
+	SERIAL_CHECK_TRUE(wait_for_property_state(ROTATOR_POSITION_PROPERTY_NAME, INDIGO_BUSY_STATE));
+	double started = indigo_monotonic_time();
+	while (indigo_monotonic_time() - started < 125 && find_cached_property(ROTATOR_POSITION_PROPERTY_NAME)->state == INDIGO_BUSY_STATE) {
+		indigo_usleep(100000);
+	}
+	SERIAL_CHECK_EQ_INT(INDIGO_ALERT_STATE, find_cached_property(ROTATOR_POSITION_PROPERTY_NAME)->state);
+	SERIAL_CHECK_TRUE(indigo_monotonic_time() - started >= 119);
+	// Timeout halts the motor; a new session must not inherit moving state.
+	disconnect_serial_device(&falcon_rotator);
+	SERIAL_CHECK_TRUE(connect_serial_device(&falcon_rotator, simulator.port));
+	SERIAL_CHECK_TRUE(find_cached_property(ROTATOR_POSITION_PROPERTY_NAME)->state != INDIGO_BUSY_STATE);
+cleanup:
+	stop_serial_driver(&falcon_rotator);
+	stop_external_serial_simulator(&simulator);
+}
+
 int main(void) {
 	const indigo_test_case tests[] = {
+		{ "progress_stays_busy_and_disconnect_is_prompt", progress_stays_busy_and_disconnect_is_prompt },
+		{ "stalled_motion_times_out_and_stops", stalled_motion_times_out_and_stops },
 		{ "metadata_and_property_completeness", metadata_and_property_completeness },
 		{ "both_protocol_generations_are_identified", both_protocol_generations_are_identified },
 		{ "disconnect_clears_the_identity", disconnect_clears_the_identity },
@@ -442,6 +512,7 @@ int main(void) {
 		{ "abort_stops_a_move_short", abort_stops_a_move_short },
 		{ "the_two_motion_properties_refuse_to_overlap", the_two_motion_properties_refuse_to_overlap },
 		{ "direction_is_written_and_read_back", direction_is_written_and_read_back },
+		{ "refused_direction_change_keeps_the_flag", refused_direction_change_keeps_the_flag },
 		{ "reconnect_adopts_the_rotator_angle", reconnect_adopts_the_rotator_angle },
 		{ "repeated_disconnect_is_tolerated", repeated_disconnect_is_tolerated },
 		{ "vanished_port_is_refused", vanished_port_is_refused }

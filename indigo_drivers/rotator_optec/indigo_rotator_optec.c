@@ -32,7 +32,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000005
+#define DRIVER_VERSION       0x03000007
 #define DRIVER_NAME          "indigo_rotator_optec"
 #define DRIVER_LABEL         "Optec Pyxis Rotator"
 #define ROTATOR_DEVICE_NAME  "Optec Pyxis"
@@ -42,6 +42,7 @@
 
 #define OPTEC_RESPONSE_SIZE  64
 #define OPTEC_MOTION_POLL    0.05
+// the longest silence allowed during a move; every step is answered with '!'
 #define OPTEC_MOTION_MARGIN  5.0
 #define OPTEC_NO_MOTION      0
 #define OPTEC_POSITION_MOTION 1
@@ -125,8 +126,17 @@ static bool optec_ack_command(indigo_device *device, const char *format, ...) {
 	return indigo_uni_read(PRIVATE_DATA->handle, PRIVATE_DATA->response, 1) == 1 && PRIVATE_DATA->response[0] == '!';
 }
 
+// The manual: CWAKUP "is only recognized when the Pyxis is in the SLEEP mode". An awake Pyxis (after power-up
+// and homing it waits awake in the serial loop) does not answer, which the 2.0 driver took as awake; only a
+// wrong answer is a failure. CCLINK then confirms the serial loop.
 static bool optec_wakeup(indigo_device *device) {
-	if (!optec_line_command(device, "CWAKUP") || strcmp(PRIVATE_DATA->response, "!")) {
+	if (indigo_uni_discard(PRIVATE_DATA->handle) < 0 || !optec_write(device, "CWAKUP")) {
+		return false;
+	}
+	if (indigo_uni_wait_for_data(PRIVATE_DATA->handle, INDIGO_DELAY(0.3)) <= 0) {
+		return true;
+	}
+	if (!optec_read_line(device) || strcmp(PRIVATE_DATA->response, "!")) {
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to wake up");
 		return false;
 	}
@@ -150,8 +160,8 @@ static bool optec_read_integer(indigo_device *device, const char *command, int m
 	return true;
 }
 
-static bool optec_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 19200, INDIGO_LOG_DEBUG);
+static bool optec_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 19200, INDIGO_LOG_DEBUG, error_message);
 	if (PRIVATE_DATA->handle != NULL && optec_wakeup(device) && optec_line_command(device, "CCLINK") && !strcmp(PRIVATE_DATA->response, "!")) {
 		INDIGO_DRIVER_LOG(DRIVER_NAME, "Connected to %s", DEVICE_PORT_ITEM->text.value);
 		return true;
@@ -173,18 +183,21 @@ static void optec_close(indigo_device *device) {
 static void motion_finalizer(indigo_device *device) {
 	bool complete = false;
 	bool failed = false;
-	for (int pass = 0; pass < 4 && indigo_uni_wait_for_data(PRIVATE_DATA->handle, INDIGO_DELAY(0.001)) > 0; pass++) {
+	for (int pass = 0; pass < 4 && !complete && indigo_uni_wait_for_data(PRIVATE_DATA->handle, INDIGO_DELAY(0.001)) > 0; pass++) {
 		long count = indigo_uni_read_available(PRIVATE_DATA->handle, PRIVATE_DATA->response, sizeof(PRIVATE_DATA->response) - 1);
 		if (count <= 0) {
 			failed = true;
 			break;
 		}
-		for (long i = 0; i < count; i++) {
+		for (long i = 0; i < count && !complete; i++) {
 			if (PRIVATE_DATA->response[i] == '!') {
+				// every step renews the deadline: a move takes 120 ms (2-inch) to 785 ms (3-inch) per degree
+				// at the default rates, so only a silence ends it
 				PRIVATE_DATA->motion_steps++;
+				PRIVATE_DATA->motion_deadline = indigo_monotonic_time() + OPTEC_MOTION_MARGIN;
 			} else if (PRIVATE_DATA->response[i] == 'F') {
 				complete = true;
-			} else {
+			} else if (PRIVATE_DATA->response[i] != '\r' && PRIVATE_DATA->response[i] != '\n') {
 				failed = true;
 			}
 		}
@@ -227,7 +240,7 @@ static bool optec_start_motion(indigo_device *device, int motion, const char *co
 	}
 	PRIVATE_DATA->motion = motion;
 	PRIVATE_DATA->motion_steps = 0;
-	PRIVATE_DATA->motion_deadline = indigo_monotonic_time() + OPTEC_MOTION_MARGIN + 0.36 * (X_RATE_ITEM->number.value > 0 ? X_RATE_ITEM->number.value : 1);
+	PRIVATE_DATA->motion_deadline = indigo_monotonic_time() + OPTEC_MOTION_MARGIN;
 	indigo_execute_handler_in(device, OPTEC_MOTION_POLL, motion_finalizer);
 	return true;
 }
@@ -239,7 +252,8 @@ static bool optec_start_motion(indigo_device *device, int motion, const char *co
 static void rotator_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = optec_open(device);
+		const char *error_message = NULL;
+		connection_result = optec_open(device, &error_message);
 		if (connection_result) {
 			//+ rotator.on_connect
 			int direction = 0;
@@ -266,7 +280,11 @@ static void rotator_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", ROTATOR_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", ROTATOR_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", ROTATOR_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", ROTATOR_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}

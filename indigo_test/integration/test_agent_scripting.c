@@ -28,6 +28,7 @@
 #include <signal.h>
 #include <indigo/indigo_driver.h>
 #include <indigo/indigo_align.h>
+#include <indigo/indigo_token.h>
 #include <indigo/indigocat/indigocat_solar_system.h>
 #include <indigo_drivers/agent_scripting/indigo_agent_scripting.h>
 #include "../test_runner.h"
@@ -232,8 +233,11 @@ static indigo_property *request_snapshot(void) {
 
 static bool js_state(const char *script, indigo_property_state state) {
 	unsigned before = revision(RUN);
-	REQUIRE(indigo_change_text_property_1(&observer, AGENT, RUN, "SCRIPT", script) == INDIGO_OK);
-	REQUIRE(wait_property(RUN, before, state));
+	REQUIRE(indigo_change_text_property_1_raw(&observer, AGENT, RUN, "SCRIPT", script) == INDIGO_OK);
+	if (!wait_property(RUN, before, state)) {
+		fprintf(stderr, "Messages:\n%s", messages);
+		return false;
+	}
 	REQUIRE(drain());
 	return true;
 }
@@ -584,7 +588,7 @@ static void on_load_existing(void) {
 }
 
 static void on_unload_execution(void) {
-	ASSERT_TRUE(add_script("Unload", "indigo_send_message('unload-ran');"));
+	ASSERT_TRUE(add_script("Unload", "indigo_define_text_property('" AGENT "','UNLOAD_SNAPSHOT','JS','Unload',{A:'first'},{A:{label:'A'}},'Ok','RW',null); indigo_update_text_property('" AGENT "','UNLOAD_SNAPSHOT',{A:Array(701).join('x')},'Ok',null); indigo_send_message('unload-ran');"));
 	ASSERT_TRUE(change_switch(ON_UNLOAD, "AGENT_SCRIPTING_SCRIPT_0", true));
 	ASSERT_EQ_INT(INDIGO_OK, indigo_agent_scripting(INDIGO_DRIVER_SHUTDOWN, NULL));
 	running = false;
@@ -718,6 +722,29 @@ static void low_level_change_bindings(void) {
 	indigo_release_property(p);
 }
 
+static void change_bindings_forward_local_access_tokens(void) {
+	int before = atomic_load(&peer_changes);
+	indigo_set_master_token(0x1001);
+	ASSERT_TRUE(indigo_add_device_token(PEER, 0x2002));
+	peer.access_token = 0x2002;
+	ASSERT_TRUE(js("indigo_change_text_property('" PEER "','TARGET_TEXT',{FIRST:'authenticated'}); indigo_change_number_property('" PEER "','TARGET_NUMBER',{FIRST:12}); indigo_change_switch_property('" PEER "','TARGET_SWITCH',{ON:true});"));
+	bool device_forwarded = wait_counter(&peer_changes, before + 3);
+	indigo_property *request = request_snapshot();
+	bool device_token = request && request->access_token == 0x2002;
+	indigo_release_property(request);
+	ASSERT_TRUE(indigo_remove_device_token(PEER));
+	peer.access_token = 0x1001;
+	ASSERT_TRUE(js("indigo_change_text_property('" PEER "','TARGET_TEXT',{FIRST:'master'}); indigo_change_number_property('" PEER "','TARGET_NUMBER',{FIRST:13}); indigo_change_switch_property('" PEER "','TARGET_SWITCH',{ON:false});"));
+	bool master_forwarded = wait_counter(&peer_changes, before + 6);
+	request = request_snapshot();
+	bool master_token = request && request->access_token == 0x1001;
+	indigo_release_property(request);
+	peer.access_token = 0;
+	indigo_set_master_token(0);
+	ASSERT_TRUE(device_forwarded && device_token);
+	ASSERT_TRUE(master_forwarded && master_token);
+}
+
 static void enumeration_and_blob_enable(void) {
 	int enumerations = atomic_load(&peer_enumerations);
 	ASSERT_TRUE(js("indigo_enumerate_properties('" PEER "','PEER_TEXT');"));
@@ -799,6 +826,13 @@ static void define_update_redefine_delete(void) {
 	ASSERT_TRUE(js("indigo_delete_property('" AGENT "','JS_TEXT','text-deleted');"));
 	ASSERT_TRUE(snapshot(AGENT, "JS_TEXT") == NULL);
 	ASSERT_TRUE(has_message("text-deleted"));
+}
+
+static void queued_property_snapshots(void) {
+	ASSERT_TRUE(js("eventValues={}; var originalDefine=indigo_on_define_property, originalUpdate=indigo_on_update_property; function recordSnapshot(n,items){if(n.indexOf('SNAPSHOT_')===0){if(!eventValues[n])eventValues[n]=[];eventValues[n].push(items.A)}} indigo_on_define_property=function(d,n,label,items){recordSnapshot(n,items); return originalDefine.apply(this,arguments)}; indigo_on_update_property=function(d,n,items){recordSnapshot(n,items); return originalUpdate.apply(this,arguments)};"));
+	ASSERT_TRUE(js("var kinds=['text','number','switch','light']; var samples=[['first',Array(701).join('x'),'third','fourth'],[1,2,3,4],[true,false,true,false],['Ok','Busy','Alert','Idle']];"));
+	ASSERT_TRUE(js("for(var k=0;k<kinds.length;k++){var kind=kinds[k],name='SNAPSHOT_'+kind,values=samples[k],defs={A:{label:'A',format:'%g',min:0,max:10,step:1}}; var args=['" AGENT "',name,'JS','Snapshot',{A:values[0]},defs,'Ok']; if(kind!=='light')args.push('RW'); if(kind==='switch')args.push('ANY_OF_MANY'); args.push(null); this['indigo_define_'+kind+'_property'].apply(null,args); this['indigo_update_'+kind+'_property']('" AGENT "',name,{A:values[1]},'Busy',null); args[4]={A:values[2]}; this['indigo_redefine_'+kind+'_property'].apply(null,args); this['indigo_update_'+kind+'_property']('" AGENT "',name,{A:values[3]},'Alert',null);}"));
+	ASSERT_TRUE(check_js("kinds.every(function(kind,k){return JSON.stringify(eventValues['SNAPSHOT_'+kind])===JSON.stringify(samples[k])})"));
 }
 
 static void defaults_and_large_property(void) {
@@ -909,6 +943,22 @@ static void conversion_bindings(void) {
 	ASSERT_TRUE(js("testValue = 1;"));
 }
 
+// JPL Horizons apparent airless Sun elevation at the fixed time 2024-01-01 12:34:56 UTC;
+// precession since J2000 alone moves the result by about 0.3 deg, the tolerance covers nutation and aberration
+static void solar_altitude_reference(void) {
+	ASSERT_TRUE(js("var a=indigo_solar_altitude(48.15,17.11); if(Math.abs(a-15.377750482)>0.02) throw new Error('solar altitude '+a+' instead of 15.377750482');"));
+	ASSERT_TRUE(js("var a=indigo_solar_altitude(-30,-70); if(Math.abs(a-34.643634261)>0.02) throw new Error('solar altitude '+a+' instead of 34.643634261');"));
+}
+
+// Apparent airless elevation of fixed J2000 positions at the fixed time 2024-01-01 12:34:56 UTC, computed independently of INDIGO
+// (IAU 1976 precession, IAU 1980 nutation, annual aberration, mean sidereal time plus equation of the equinoxes); its sidereal time
+// and horizon conversion reproduce the JPL Horizons Sun elevations above within 0.004 deg. Using the J2000 position as coordinates of date
+// moves the results by -0.32 deg and +0.15 deg, the tolerance covers the nutation and aberration INDIGO does not apply
+static void target_altitude_reference(void) {
+	ASSERT_TRUE(js("var a=indigo_target_altitude(10,20,-30,-70); if(Math.abs(a-6.944816)>0.02) throw new Error('target altitude '+a+' instead of 6.944816');"));
+	ASSERT_TRUE(js("var a=indigo_target_altitude(3,40,48.15,17.11); if(Math.abs(a-23.642420)>0.02) throw new Error('target altitude '+a+' instead of 23.642420');"));
+}
+
 static void timer_bindings(void) {
 	int messages_before = atomic_load(&message_count);
 	ASSERT_TRUE(js("var fired=indigo_set_timer(function(){indigo_send_message('timer-fired')},0.01); if(fired<0) throw new Error('timer failed');"));
@@ -997,14 +1047,18 @@ static const indigo_test_case tests[] = {
 	{ "invalid rename recovery", invalid_rename_recovery },
 	{ "configuration save failure recovery", save_failure_recovery },
 	{ "low-level change bindings", low_level_change_bindings },
+	{ "change bindings forward local access tokens", change_bindings_forward_local_access_tokens },
 	{ "enumeration and BLOB enable bindings", enumeration_and_blob_enable },
 	{ "define update redefine delete bindings", define_update_redefine_delete },
+	{ "queued property snapshots", queued_property_snapshots },
 	{ "binding defaults and large property", defaults_and_large_property },
 	{ "cached property capacity and reuse", cached_property_capacity },
 	{ "boot.js cache and callbacks", boot_cache_and_callbacks },
 	{ "boot.js property change helper", peer_property_change_helper },
 	{ "BLOB populate and save bindings", blob_bindings },
 	{ "conversion and astronomy bindings", conversion_bindings },
+	{ "solar altitude matches reference", solar_altitude_reference },
+	{ "J2000 target altitude matches reference", target_altitude_reference },
 	{ "timer scheduling cancellation capacity", timer_bindings },
 	{ "shutdown cancels pending timers", shutdown_cancels_timers },
 	{ "logging and message bindings", logging_and_messages },

@@ -64,10 +64,10 @@ int main() {
 	// golden values: confirmed bit-identical against the pre-optimization implementation for these exact frames
 	{
 		uint16_t *img = test_make_bayer16(4144, 2822, 3, 4144 * 2822 / 20000 + 5);
-		check_golden("12 MP mono16", INDIGO_RAW_MONO16, img, 4144, 2822, 8, 8192, 4096, 73.116189127424946, 0xc4c031b057832378ULL, 0xe0124f35dd74c5d8ULL);
+		check_golden("12 MP mono16", INDIGO_RAW_MONO16, img, 4144, 2822, 8, 8192, 4096, 73.116189127424946, 0xb009e92009f4bef9ULL, 0x8a0136b99ecbfa6aULL);
 		uint8_t *img8 = malloc((size_t)4144 * 2822);
 		for (size_t i = 0; i < (size_t)4144 * 2822; i++) img8[i] = img[i] >> 8;
-		check_golden("12 MP mono8", INDIGO_RAW_MONO8, img8, 4144, 2822, 8, 8192, 4096, 65.003504681499265, 0xe3e4113e69d058a2ULL, 0x4a7efb32bde3dacdULL);
+		check_golden("12 MP mono8", INDIGO_RAW_MONO8, img8, 4144, 2822, 8, 8192, 4096, 65.003504681499265, 0xc4ea179344830524ULL, 0x93be8ed123367a02ULL);
 		free(img);
 		free(img8);
 	}

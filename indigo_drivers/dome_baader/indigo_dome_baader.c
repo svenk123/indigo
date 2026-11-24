@@ -40,7 +40,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000010
+#define DRIVER_VERSION       0x03000012
 #define DRIVER_NAME          "indigo_dome_baader"
 #define DRIVER_LABEL         "Baader Classic Dome"
 #define DOME_DEVICE_NAME     "Baader Classic Dome"
@@ -294,12 +294,12 @@ static void baader_emergency_message(int flags, char *message, int size) {
 	}
 }
 
-static bool baader_open(indigo_device *device) {
+static bool baader_open(indigo_device *device, const char **error_message) {
 	char *name = DEVICE_PORT_ITEM->text.value;
 	if (indigo_uni_is_url(name, "baader")) {
 		PRIVATE_DATA->handle = indigo_uni_open_url(name, BAADER_NETWORK_PORT, INDIGO_TCP_HANDLE, INDIGO_LOG_DEBUG);
 	} else {
-		PRIVATE_DATA->handle = indigo_uni_open_serial(name, INDIGO_LOG_DEBUG);
+		PRIVATE_DATA->handle = indigo_uni_open_serial2(name, INDIGO_LOG_DEBUG, error_message);
 	}
 	if (PRIVATE_DATA->handle != NULL) {
 		char serial_number[INDIGO_VALUE_SIZE] = "N/A";
@@ -529,7 +529,8 @@ static void dome_status_poll(indigo_device *device) {
 static void dome_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = baader_open(device);
+		const char *error_message = NULL;
+		connection_result = baader_open(device, &error_message);
 		if (connection_result) {
 			//+ dome.on_connect
 			baader_rc_t rc;
@@ -559,7 +560,11 @@ static void dome_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -708,7 +713,8 @@ static void dome_abort_motion_handler(indigo_device *device) {
 	indigo_cancel_pending_handler(device, dome_shutter_handler);
 	indigo_cancel_pending_handler(device, dome_flap_handler);
 	if (!PRIVATE_DATA->rotation_active && (DOME_HORIZONTAL_COORDINATES_PROPERTY->state == INDIGO_BUSY_STATE || DOME_STEPS_PROPERTY->state == INDIGO_BUSY_STATE)) {
-		DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.value = DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.target = PRIVATE_DATA->current_position;
+		// the cancelled request was never sent: the dome stays where it is and the target keeps the request
+		DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.value = PRIVATE_DATA->current_position;
 		INDIGO_UPDATE_PROPERTY_STATE(DOME_HORIZONTAL_COORDINATES_PROPERTY, INDIGO_OK_STATE, NULL);
 		INDIGO_UPDATE_PROPERTY_STATE(DOME_STEPS_PROPERTY, INDIGO_OK_STATE, NULL);
 	}

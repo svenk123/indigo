@@ -24,6 +24,13 @@
 #include <string.h>
 #include <math.h>
 #include <assert.h>
+
+//+ include
+
+#include <ctype.h>
+
+//- include
+
 #include <indigo/indigo_driver_xml.h>
 #include <indigo/indigo_aux_driver.h>
 #include <indigo/indigo_uni_io.h>
@@ -32,11 +39,19 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x0300000A
+#define DRIVER_VERSION       0x0300000E
 #define DRIVER_NAME          "indigo_aux_flipflat"
 #define DRIVER_LABEL         "Alnitak Astrosystems FlipFlat"
 #define AUX_DEVICE_NAME      "FlipFlat"
 #define PRIVATE_DATA         ((flipflat_private_data *)device->private_data)
+
+//+ define
+
+// The cover is given 30 s to report open or closed, as the INDI driver does.
+#define COVER_TIMEOUT        30
+#define COVER_POLL           1
+
+//- define
 
 #pragma mark - Property definitions
 
@@ -61,6 +76,7 @@ typedef struct {
 	//+ data
 	int type;
 	char response[16];
+	double cover_deadline;
 	//- data
 } flipflat_private_data;
 
@@ -69,21 +85,43 @@ typedef struct {
 //+ code
 
 static bool flipflat_command(indigo_device *device, char *command, ...) {
+	char request[16];
+	va_list args, copy;
+	va_start(args, command);
+	va_copy(copy, args);
+	vsnprintf(request, sizeof(request), command, copy);
+	va_end(copy);
 	long result = indigo_uni_discard(PRIVATE_DATA->handle);
 	if (result >= 0) {
-		va_list args;
-		va_start(args, command);
 		result = indigo_uni_vtprintf(PRIVATE_DATA->handle, command, args, "\r");
-		va_end(args);
 		if (result > 0) {
 			result = indigo_uni_read_section(PRIVATE_DATA->handle, PRIVATE_DATA->response, sizeof(PRIVATE_DATA->response) - 1, "\n", "\n", INDIGO_DELAY(1));
 		}
 	}
-	return result > 0 && PRIVATE_DATA->response[0] == '*';
+	va_end(args);
+	if (result < 5 || (request[1] != 'V' && result != 7) || PRIVATE_DATA->response[0] != '*' || PRIVATE_DATA->response[1] != request[1] || !isdigit((unsigned char)PRIVATE_DATA->response[2]) || !isdigit((unsigned char)PRIVATE_DATA->response[3])) {
+		return false;
+	}
+	int type = (PRIVATE_DATA->response[2] - '0') * 10 + PRIVATE_DATA->response[3] - '0';
+	if (request[1] != 'P' && type != PRIVATE_DATA->type) {
+		return false;
+	}
+	if (request[1] == 'V') {
+		return true;
+	}
+	if (strchr("POLDC", request[1]) != NULL) {
+		return !strcmp(PRIVATE_DATA->response + 4, "OOO");
+	}
+	for (int i = 4; i < 7; i++) {
+		if (!isdigit((unsigned char)PRIVATE_DATA->response[i])) {
+			return false;
+		}
+	}
+	return request[1] != 'B' || !strcmp(PRIVATE_DATA->response + 4, request + 2);
 }
 
-static bool flipflat_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG);
+static bool flipflat_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial2(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG, error_message);
 	if (PRIVATE_DATA->handle != NULL) {
 		indigo_uni_set_dtr(PRIVATE_DATA->handle, true);
 		indigo_usleep(INDIGO_DELAY(0.1));
@@ -117,7 +155,7 @@ static bool flipflat_open(indigo_device *device) {
 				case 99:
 					AUX_LIGHT_SWITCH_PROPERTY->hidden = AUX_LIGHT_INTENSITY_PROPERTY->hidden = false;
 					AUX_COVER_PROPERTY->hidden = false;
-					INDIGO_COPY_VALUE(INFO_DEVICE_MODEL_ITEM->text.value, "Flip-Flap");
+					INDIGO_COPY_VALUE(INFO_DEVICE_MODEL_ITEM->text.value, "Flip-Flat");
 					break;
 				default:
 					AUX_LIGHT_SWITCH_PROPERTY->hidden = AUX_LIGHT_INTENSITY_PROPERTY->hidden = false;
@@ -144,15 +182,38 @@ static void flipflat_close(indigo_device *device) {
 
 //- code
 
+//+ aux.code
+
+static void aux_cover_finalizer(indigo_device *device) {
+	if (flipflat_command(device, ">SOOO")) {
+		int type, q, r, s;
+		if (sscanf(PRIVATE_DATA->response, "*S%02d%1d%1d%1d", &type, &q, &r, &s) == 4) {
+			if ((AUX_COVER_OPEN_ITEM->sw.value && s == 2) || (AUX_COVER_CLOSE_ITEM->sw.value && s == 1)) {
+				INDIGO_UPDATE_PROPERTY_STATE(AUX_COVER_PROPERTY, INDIGO_OK_STATE, NULL);
+				return;
+			}
+		}
+	}
+	if (indigo_monotonic_time() < PRIVATE_DATA->cover_deadline) {
+		indigo_execute_handler_in(device, COVER_POLL, aux_cover_finalizer);
+	} else {
+		INDIGO_UPDATE_PROPERTY_STATE(AUX_COVER_PROPERTY, INDIGO_ALERT_STATE, "The cover did not reach its position in time");
+	}
+}
+
+//- aux.code
+
 #pragma mark - High level code (aux)
 
 static void aux_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = flipflat_open(device);
+		const char *error_message = NULL;
+		connection_result = flipflat_open(device, &error_message);
 		if (connection_result) {
 			//+ aux.on_connect
-			if (!AUX_LIGHT_SWITCH_PROPERTY->hidden) {
+			// The status carries both the cover and the light, so it is read for a dust cover without light too.
+			if (!AUX_LIGHT_SWITCH_PROPERTY->hidden || !AUX_COVER_PROPERTY->hidden) {
 				AUX_LIGHT_SWITCH_PROPERTY->state = INDIGO_ALERT_STATE;
 				AUX_COVER_PROPERTY->state = INDIGO_ALERT_STATE;
 				if (flipflat_command(device, ">SOOO")) {
@@ -186,7 +247,11 @@ static void aux_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -214,28 +279,15 @@ static void aux_connection_handler(indigo_device *device) {
 }
 
 static void aux_cover_handler(indigo_device *device) {
-	AUX_COVER_PROPERTY->state = INDIGO_OK_STATE;
 	//+ aux.AUX_COVER.on_change
 	if (flipflat_command(device, ">%cOOO", AUX_COVER_OPEN_ITEM->sw.value ? 'O' : 'C')) {
+		PRIVATE_DATA->cover_deadline = indigo_monotonic_time() + COVER_TIMEOUT;
 		INDIGO_UPDATE_PROPERTY_STATE(AUX_COVER_PROPERTY, INDIGO_BUSY_STATE, NULL);
-		AUX_COVER_PROPERTY->state = INDIGO_ALERT_STATE;
-		for (int i = 0; i < 10; i++) {
-			indigo_sleep(1);
-			if (flipflat_command(device, ">SOOO")) {
-				int type, q, r, s;
-				if (sscanf(PRIVATE_DATA->response, "*S%02d%1d%1d%1d", &type, &q, &r, &s) == 4) {
-					if ((AUX_COVER_OPEN_ITEM->sw.value && s == 2) || (AUX_COVER_CLOSE_ITEM->sw.value && s == 1)) {
-						AUX_COVER_PROPERTY->state = INDIGO_OK_STATE;
-						break;
-					}
-				}
-			}
-		}
+		indigo_execute_handler_in(device, COVER_POLL, aux_cover_finalizer);
 	} else {
-		AUX_COVER_PROPERTY->state = INDIGO_ALERT_STATE;
+		INDIGO_UPDATE_PROPERTY_STATE(AUX_COVER_PROPERTY, INDIGO_ALERT_STATE, NULL);
 	}
 	//- aux.AUX_COVER.on_change
-	indigo_update_property(device, AUX_COVER_PROPERTY, NULL);
 }
 
 static void aux_light_switch_handler(indigo_device *device) {

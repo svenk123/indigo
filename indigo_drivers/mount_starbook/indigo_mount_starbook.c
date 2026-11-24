@@ -45,7 +45,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x0300000B
+#define DRIVER_VERSION       0x0300000F
 #define DRIVER_NAME          "indigo_mount_starbook"
 #define DRIVER_LABEL         "Vixen StarBook Mount"
 #define MOUNT_DEVICE_NAME    "Mount Vixen StarBook"
@@ -99,10 +99,10 @@ typedef struct {
 	char response[4096];
 	size_t response_size;
 	double version;
-	double current_ra, current_dec;
 	double goto_deadline;
 	int current_state, current_speed;
 	bool move_north, move_south, move_east, move_west;
+	bool place_valid;
 	//- data
 } starbook_private_data;
 
@@ -132,7 +132,9 @@ static bool starbook_http_get(indigo_device *device, const char *path) {
 			} else {
 				PRIVATE_DATA->response_size += count;
 				PRIVATE_DATA->response[PRIVATE_DATA->response_size] = 0;
-				if (strstr(PRIVATE_DATA->response, "</html>") != NULL) break;
+				if (strstr(PRIVATE_DATA->response, "</html>") != NULL) {
+					break;
+				}
 			}
 		} else if (available < 0) {
 			break;
@@ -140,7 +142,9 @@ static bool starbook_http_get(indigo_device *device, const char *path) {
 	}
 	indigo_uni_close(&handle);
 	ok = ok && (strstr(PRIVATE_DATA->response, "HTTP/1.0 200") == PRIVATE_DATA->response || strstr(PRIVATE_DATA->response, "HTTP/1.1 200") == PRIVATE_DATA->response) && strstr(PRIVATE_DATA->response, "</html>") != NULL;
-	if (!ok) INDIGO_DRIVER_ERROR(DRIVER_NAME, "GET %s failed", path);
+	if (!ok) {
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "GET %s failed", path);
+	}
 	return ok;
 }
 
@@ -236,11 +240,17 @@ static bool starbook_set(indigo_device *device, const char *path, int *error) {
 		return true;
 	}
 	if (error != NULL) {
-		if (!strcmp(PRIVATE_DATA->response, "ERROR:ILLEGAL STATE")) *error = STARBOOK_ERROR_ILLEGAL_STATE;
-		else if (!strcmp(PRIVATE_DATA->response, "ERROR:FORMAT")) *error = STARBOOK_ERROR_FORMAT;
-		else if (!strcmp(PRIVATE_DATA->response, "ERROR:BELOW HORIZON") || !strcmp(PRIVATE_DATA->response, "ERROR:BELOW HORIZONE")) *error = STARBOOK_ERROR_BELOW_HORIZON;
-		else if (!strcmp(PRIVATE_DATA->response, "WARNING:NEAR SUN")) *error = STARBOOK_WARNING_NEAR_SUN;
-		else *error = STARBOOK_ERROR_UNKNOWN;
+		if (!strcmp(PRIVATE_DATA->response, "ERROR:ILLEGAL STATE")) {
+			*error = STARBOOK_ERROR_ILLEGAL_STATE;
+		} else if (!strcmp(PRIVATE_DATA->response, "ERROR:FORMAT")) {
+			*error = STARBOOK_ERROR_FORMAT;
+		} else if (!strcmp(PRIVATE_DATA->response, "ERROR:BELOW HORIZON") || !strcmp(PRIVATE_DATA->response, "ERROR:BELOW HORIZONE")) {
+			*error = STARBOOK_ERROR_BELOW_HORIZON;
+		} else if (!strcmp(PRIVATE_DATA->response, "WARNING:NEAR SUN")) {
+			*error = STARBOOK_WARNING_NEAR_SUN;
+		} else {
+			*error = STARBOOK_ERROR_UNKNOWN;
+		}
 	}
 	return false;
 }
@@ -262,35 +272,58 @@ static bool starbook_get_version(indigo_device *device, double *version) {
 
 static bool starbook_parse_degree_minute(const char *query, const char *key, double *value) {
 	char text[64], *separator, *end;
-	if (!starbook_query_value(query, key, text, sizeof(text))) return false;
+	if (!starbook_query_value(query, key, text, sizeof(text))) {
+		return false;
+	}
 	int sign = text[0] == '-' ? -1 : 1;
 	char *start = text + (text[0] == '-' || text[0] == '+' ? 1 : 0);
 	separator = strchr(start, '+');
-	if (separator == NULL) return false;
+	if (separator == NULL) {
+		return false;
+	}
 	*separator = 0;
 	errno = 0;
 	long degrees = strtol(start, &end, 10);
-	if (errno != 0 || *end != 0) return false;
+	if (errno != 0 || *end != 0) {
+		return false;
+	}
 	double minutes = strtod(separator + 1, &end);
-	if (errno != 0 || *end != 0 || minutes < 0 || minutes >= 60) return false;
+	if (errno != 0 || *end != 0 || minutes < 0 || minutes >= 60) {
+		return false;
+	}
 	*value = sign * (degrees + minutes / 60.0);
 	return true;
 }
 
 static bool starbook_get_status(indigo_device *device, double *ra, double *dec, int *going, int *state) {
 	bool high_precision = PRIVATE_DATA->version >= 4.20;
-	if (!starbook_get(device, high_precision ? "/GETSTATUS2" : "/GETSTATUS")) return false;
+	if (!starbook_get(device, high_precision ? "/GETSTATUS2" : "/GETSTATUS")) {
+		return false;
+	}
 	if (high_precision) {
-		if (!starbook_query_double(PRIVATE_DATA->response, "RA=", ra) || !starbook_query_double(PRIVATE_DATA->response, "DEC=", dec)) return false;
-	} else if (!starbook_parse_degree_minute(PRIVATE_DATA->response, "RA=", ra) || !starbook_parse_degree_minute(PRIVATE_DATA->response, "DEC=", dec)) return false;
+		if (!starbook_query_double(PRIVATE_DATA->response, "RA=", ra) || !starbook_query_double(PRIVATE_DATA->response, "DEC=", dec)) {
+			return false;
+		}
+	} else if (!starbook_parse_degree_minute(PRIVATE_DATA->response, "RA=", ra) || !starbook_parse_degree_minute(PRIVATE_DATA->response, "DEC=", dec)) {
+		return false;
+	}
 	char text[32];
-	if (!starbook_query_int(PRIVATE_DATA->response, "GOTO=", going) || (*going != 0 && *going != 1) || !starbook_query_value(PRIVATE_DATA->response, "STATE=", text, sizeof(text))) return false;
-	if (!strcmp(text, "INIT")) *state = STARBOOK_STATE_INIT;
-	else if (!strcmp(text, "SCOPE")) *state = STARBOOK_STATE_SCOPE;
-	else if (!strcmp(text, "CHART")) *state = STARBOOK_STATE_CHART;
-	else if (!strcmp(text, "STOP")) *state = STARBOOK_STATE_STOP;
-	else if (!strcmp(text, "TRACK")) *state = STARBOOK_STATE_TRACK;
-	else return false;
+	if (!starbook_query_int(PRIVATE_DATA->response, "GOTO=", going) || (*going != 0 && *going != 1) || !starbook_query_value(PRIVATE_DATA->response, "STATE=", text, sizeof(text))) {
+		return false;
+	}
+	if (!strcmp(text, "INIT")) {
+		*state = STARBOOK_STATE_INIT;
+	} else if (!strcmp(text, "SCOPE")) {
+		*state = STARBOOK_STATE_SCOPE;
+	} else if (!strcmp(text, "CHART")) {
+		*state = STARBOOK_STATE_CHART;
+	} else if (!strcmp(text, "STOP")) {
+		*state = STARBOOK_STATE_STOP;
+	} else if (!strcmp(text, "TRACK")) {
+		*state = STARBOOK_STATE_TRACK;
+	} else {
+		return false;
+	}
 	return *ra >= 0 && *ra <= 24 && *dec >= -90 && *dec <= 90;
 }
 
@@ -304,19 +337,32 @@ static bool starbook_get_pierside(indigo_device *device, int *side) {
 
 static bool starbook_get_place(indigo_device *device, double *longitude, double *latitude, int *timezone) {
 	char text[64], *separator, *end;
-	if (!starbook_get(device, "/GETPLACE") || !starbook_query_value(PRIVATE_DATA->response, "LONGITUDE=", text, sizeof(text)) || (text[0] != 'E' && text[0] != 'W') || (separator = strchr(text + 1, '+')) == NULL) return false;
+	if (!starbook_get(device, "/GETPLACE") || !starbook_query_value(PRIVATE_DATA->response, "LONGITUDE=", text, sizeof(text)) || (text[0] != 'E' && text[0] != 'W') || (separator = strchr(text + 1, '+')) == NULL) {
+		return false;
+	}
 	*separator = 0;
 	double degrees = strtod(text + 1, &end);
-	if (*end != 0) return false;
+	if (*end != 0) {
+		return false;
+	}
 	double minutes = strtod(separator + 1, &end);
-	if (*end != 0 || degrees > 180 || minutes < 0 || minutes >= 60) return false;
-	*longitude = (text[0] == 'W' ? -1 : 1) * (degrees + minutes / 60.0);
-	if (!starbook_query_value(PRIVATE_DATA->response, "LATITUDE=", text, sizeof(text)) || (text[0] != 'N' && text[0] != 'S') || (separator = strchr(text + 1, '+')) == NULL) return false;
+	if (*end != 0 || degrees > 180 || minutes < 0 || minutes >= 60) {
+		return false;
+	}
+	// INDIGO longitude runs from 0 to 360 degrees east.
+	*longitude = text[0] == 'W' && degrees + minutes > 0 ? 360 - (degrees + minutes / 60.0) : degrees + minutes / 60.0;
+	if (!starbook_query_value(PRIVATE_DATA->response, "LATITUDE=", text, sizeof(text)) || (text[0] != 'N' && text[0] != 'S') || (separator = strchr(text + 1, '+')) == NULL) {
+		return false;
+	}
 	*separator = 0;
 	degrees = strtod(text + 1, &end);
-	if (*end != 0) return false;
+	if (*end != 0) {
+		return false;
+	}
 	minutes = strtod(separator + 1, &end);
-	if (*end != 0 || degrees > 90 || minutes < 0 || minutes >= 60) return false;
+	if (*end != 0 || degrees > 90 || minutes < 0 || minutes >= 60) {
+		return false;
+	}
 	*latitude = (text[0] == 'S' ? -1 : 1) * (degrees + minutes / 60.0);
 	return starbook_query_int(PRIVATE_DATA->response, "TIMEZONE=", timezone) && *timezone >= -12 && *timezone <= 12;
 }
@@ -324,7 +370,9 @@ static bool starbook_get_place(indigo_device *device, double *longitude, double 
 static bool starbook_get_utc(indigo_device *device, time_t *utc, int *offset) {
 	char text[64];
 	int year, month, day, hour, minute, second;
-	if (!starbook_get(device, "/GETTIME") || !starbook_query_value(PRIVATE_DATA->response, "TIME=", text, sizeof(text)) || sscanf(text, "%d+%d+%d+%d+%d+%d", &year, &month, &day, &hour, &minute, &second) != 6 || year < 2000 || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) return false;
+	if (!starbook_get(device, "/GETTIME") || !starbook_query_value(PRIVATE_DATA->response, "TIME=", text, sizeof(text)) || sscanf(text, "%d+%d+%d+%d+%d+%d", &year, &month, &day, &hour, &minute, &second) != 6 || year < 2000 || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
+		return false;
+	}
 	struct tm value = { 0 };
 	value.tm_year = year - 1900;
 	value.tm_mon = month - 1;
@@ -347,21 +395,56 @@ static bool starbook_set_utc(indigo_device *device, time_t utc, int offset) {
 }
 
 static bool starbook_set_place(indigo_device *device, double longitude, double latitude, int timezone) {
-	double longitude_degrees, latitude_degrees;
-	double longitude_fraction = modf(fabs(longitude), &longitude_degrees);
-	double latitude_fraction = modf(fabs(latitude), &latitude_degrees);
+	// Longitude east of 180 degrees is west of Greenwich; both values are rounded to whole minutes with carry.
+	if (longitude > 180) {
+		longitude -= 360;
+	}
+	long longitude_minutes = lround(fabs(longitude) * 60);
+	long latitude_minutes = lround(fabs(latitude) * 60);
 	char path[192];
-	snprintf(path, sizeof(path), "/SETPLACE?LONGITUDE=%c%d+%d&LATITUDE=%c%d+%d&TIMEZONE=%d", longitude < 0 ? 'W' : 'E', (int)longitude_degrees, (int)(longitude_fraction * 60), latitude < 0 ? 'S' : 'N', (int)latitude_degrees, (int)(latitude_fraction * 60), timezone);
+	snprintf(path, sizeof(path), "/SETPLACE?LONGITUDE=%c%ld+%ld&LATITUDE=%c%ld+%ld&TIMEZONE=%d", longitude < 0 && longitude_minutes > 0 ? 'W' : 'E', longitude_minutes / 60, longitude_minutes % 60, latitude < 0 && latitude_minutes > 0 ? 'S' : 'N', latitude_minutes / 60, latitude_minutes % 60, timezone);
 	return starbook_set(device, path, NULL);
 }
 
+static bool starbook_refresh_place(indigo_device *device) {
+	double longitude, latitude;
+	int timezone;
+	if (!starbook_get_place(device, &longitude, &latitude, &timezone)) {
+		return false;
+	}
+	MOUNT_GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM->number.value = MOUNT_GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM->number.target = longitude;
+	MOUNT_GEOGRAPHIC_COORDINATES_LATITUDE_ITEM->number.value = MOUNT_GEOGRAPHIC_COORDINATES_LATITUDE_ITEM->number.target = latitude;
+	TIMEZONE_VALUE_ITEM->number.value = TIMEZONE_VALUE_ITEM->number.target = timezone;
+	PRIVATE_DATA->place_valid = true;
+	return true;
+}
+
+static bool starbook_place_settable(indigo_device *device) {
+	return PRIVATE_DATA->version > 2.7 || PRIVATE_DATA->current_state == STARBOOK_STATE_INIT;
+}
+
 static bool starbook_set_coordinates(indigo_device *device, bool sync, double ra, double dec, int *error) {
-	double ra_degrees, dec_degrees;
-	double ra_fraction = modf(fabs(ra), &ra_degrees);
-	double dec_fraction = modf(fabs(dec), &dec_degrees);
+	// Rounded in the unit sent (1/1000 or 1/10 RA minute, 1/100 or 1 DEC minute) so that a carry reaches the hour
+	// or degree and 24 h wraps to 0 h; minutes never read 60.
+	bool high_precision = PRIVATE_DATA->version >= 4.20;
+	long ra_scale = high_precision ? 1000 : 10, dec_scale = high_precision ? 100 : 1;
+	long ra_units = lround(ra * 60 * ra_scale) % (24 * 60 * ra_scale);
+	if (ra_units < 0) {
+		ra_units += 24 * 60 * ra_scale;
+	}
+	long dec_units = lround(fabs(dec) * 60 * dec_scale);
+	if (dec_units > 90 * 60 * dec_scale) {
+		dec_units = 90 * 60 * dec_scale;
+	}
+	char sign = dec < 0 && dec_units > 0 ? '-' : '+';
+	long ra_hours = ra_units / (60 * ra_scale), dec_degrees = dec_units / (60 * dec_scale);
+	double ra_minutes = (double)(ra_units % (60 * ra_scale)) / ra_scale, dec_minutes = (double)(dec_units % (60 * dec_scale)) / dec_scale;
 	char path[192];
-	if (PRIVATE_DATA->version >= 4.20) snprintf(path, sizeof(path), "/%s?ra=%d+%04.3f&dec=%c%d+%05.2f", sync ? "ALIGN" : "GOTORADEC", (int)ra_degrees, ra_fraction * 60, dec < 0 ? '-' : '+', (int)dec_degrees, dec_fraction * 60);
-	else snprintf(path, sizeof(path), "/%s?ra=%d+%02.1f&dec=%c%d+%02d", sync ? "ALIGN" : "GOTORADEC", (int)ra_degrees, ra_fraction * 60, dec < 0 ? '-' : '+', (int)dec_degrees, (int)(dec_fraction * 60));
+	if (high_precision) {
+		snprintf(path, sizeof(path), "/%s?ra=%ld+%04.3f&dec=%c%ld+%05.2f", sync ? "ALIGN" : "GOTORADEC", ra_hours, ra_minutes, sign, dec_degrees, dec_minutes);
+	} else {
+		snprintf(path, sizeof(path), "/%s?ra=%ld+%02.1f&dec=%c%ld+%02ld", sync ? "ALIGN" : "GOTORADEC", ra_hours, ra_minutes, sign, dec_degrees, dec_units % 60);
+	}
 	return starbook_set(device, path, error);
 }
 
@@ -370,10 +453,14 @@ static bool starbook_start(indigo_device *device) {
 }
 
 static bool starbook_move(indigo_device *device, bool north, bool south, bool east, bool west) {
-	if (PRIVATE_DATA->move_north == north && PRIVATE_DATA->move_south == south && PRIVATE_DATA->move_east == east && PRIVATE_DATA->move_west == west) return true;
+	if (PRIVATE_DATA->move_north == north && PRIVATE_DATA->move_south == south && PRIVATE_DATA->move_east == east && PRIVATE_DATA->move_west == west) {
+		return true;
+	}
 	char path[128];
 	snprintf(path, sizeof(path), "/MOVE?NORTH=%d&SOUTH=%d&EAST=%d&WEST=%d", north, south, east, west);
-	if (!starbook_set(device, path, NULL)) return false;
+	if (!starbook_set(device, path, NULL)) {
+		return false;
+	}
 	PRIVATE_DATA->move_north = north;
 	PRIVATE_DATA->move_south = south;
 	PRIVATE_DATA->move_east = east;
@@ -382,10 +469,14 @@ static bool starbook_move(indigo_device *device, bool north, bool south, bool ea
 }
 
 static bool starbook_set_speed(indigo_device *device, int speed) {
-	if (PRIVATE_DATA->current_speed == speed) return true;
+	if (PRIVATE_DATA->current_speed == speed) {
+		return true;
+	}
 	char path[64];
 	snprintf(path, sizeof(path), "/SETSPEED?speed=%d", speed);
-	if (!starbook_set(device, path, NULL)) return false;
+	if (!starbook_set(device, path, NULL)) {
+		return false;
+	}
 	PRIVATE_DATA->current_speed = speed;
 	return true;
 }
@@ -396,10 +487,14 @@ static bool starbook_pulse(indigo_device *device, int direction, int duration) {
 	return starbook_set(device, path, NULL);
 }
 
-static bool starbook_open(indigo_device *device) {
+static bool starbook_open(indigo_device *device, const char **error_message) {
 	const char *address = DEVICE_PORT_ITEM->text.value;
-	if (!strncmp(address, "http://", 7)) address += 7;
-	if (snprintf(PRIVATE_DATA->endpoint, sizeof(PRIVATE_DATA->endpoint), "tcp://%s", address) >= (int)sizeof(PRIVATE_DATA->endpoint) || snprintf(PRIVATE_DATA->host_header, sizeof(PRIVATE_DATA->host_header), "%s", address) >= (int)sizeof(PRIVATE_DATA->host_header)) return false;
+	if (!strncmp(address, "http://", 7)) {
+		address += 7;
+	}
+	if (snprintf(PRIVATE_DATA->endpoint, sizeof(PRIVATE_DATA->endpoint), "tcp://%s", address) >= (int)sizeof(PRIVATE_DATA->endpoint) || snprintf(PRIVATE_DATA->host_header, sizeof(PRIVATE_DATA->host_header), "%s", address) >= (int)sizeof(PRIVATE_DATA->host_header)) {
+		return false;
+	}
 	PRIVATE_DATA->current_speed = -1;
 	PRIVATE_DATA->move_north = PRIVATE_DATA->move_south = PRIVATE_DATA->move_east = PRIVATE_DATA->move_west = false;
 	return starbook_get_version(device, &PRIVATE_DATA->version);
@@ -412,9 +507,9 @@ static void starbook_close(indigo_device *device) {
 static bool starbook_update_position(indigo_device *device) {
 	int going, state;
 	double ra, dec;
-	if (!starbook_get_status(device, &ra, &dec, &going, &state)) return false;
-	PRIVATE_DATA->current_ra = ra;
-	PRIVATE_DATA->current_dec = dec;
+	if (!starbook_get_status(device, &ra, &dec, &going, &state)) {
+		return false;
+	}
 	PRIVATE_DATA->current_state = state;
 	MOUNT_EQUATORIAL_COORDINATES_RA_ITEM->number.value = ra;
 	MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM->number.value = dec;
@@ -426,10 +521,12 @@ static void mount_goto_finalizer(indigo_device *device) {
 	double ra, dec;
 	if (!IS_CONNECTED || indigo_monotonic_time() > PRIVATE_DATA->goto_deadline || !starbook_get_status(device, &ra, &dec, &going, &state)) {
 		MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = INDIGO_ALERT_STATE;
-		if (IS_CONNECTED) starbook_set(device, "/STOP", NULL);
+		if (IS_CONNECTED) {
+			starbook_set(device, "/STOP", NULL);
+		}
 	} else {
-		PRIVATE_DATA->current_ra = MOUNT_EQUATORIAL_COORDINATES_RA_ITEM->number.value = ra;
-		PRIVATE_DATA->current_dec = MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM->number.value = dec;
+		MOUNT_EQUATORIAL_COORDINATES_RA_ITEM->number.value = ra;
+		MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM->number.value = dec;
 		PRIVATE_DATA->current_state = state;
 		if (going) {
 			indigo_update_coordinates(device, NULL);
@@ -465,16 +562,25 @@ static void mount_timer_callback(indigo_device *device) {
 	}
 	//+ mount.on_timer
 	bool ok = starbook_update_position(device);
-	if (MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state != INDIGO_BUSY_STATE) MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = ok ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+	if (MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state != INDIGO_BUSY_STATE) {
+		MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = ok ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+	}
 	indigo_update_coordinates(device, NULL);
 	if (PRIVATE_DATA->version > 2.7) {
 		int tracking;
 		MOUNT_TRACKING_PROPERTY->state = starbook_get_track_status(device, &tracking) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
-		if (MOUNT_TRACKING_PROPERTY->state == INDIGO_OK_STATE) indigo_set_switch(MOUNT_TRACKING_PROPERTY, tracking == STARBOOK_TRACK_STATE_STOP ? MOUNT_TRACKING_OFF_ITEM : MOUNT_TRACKING_ON_ITEM, true);
+		// Only a change is set: indigo_set_switch() marks the other items of a one-of-many switch for update even when nothing changed.
+		indigo_item *tracking_item = tracking == STARBOOK_TRACK_STATE_STOP ? MOUNT_TRACKING_OFF_ITEM : MOUNT_TRACKING_ON_ITEM;
+		if (MOUNT_TRACKING_PROPERTY->state == INDIGO_OK_STATE && !tracking_item->sw.value) {
+			indigo_set_switch(MOUNT_TRACKING_PROPERTY, tracking_item, true);
+		}
 		indigo_update_property(device, MOUNT_TRACKING_PROPERTY, NULL);
 		int side;
 		MOUNT_SIDE_OF_PIER_PROPERTY->state = starbook_get_pierside(device, &side) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
-		if (MOUNT_SIDE_OF_PIER_PROPERTY->state == INDIGO_OK_STATE) indigo_set_switch(MOUNT_SIDE_OF_PIER_PROPERTY, side == STARBOOK_PIERSIDE_EAST ? MOUNT_SIDE_OF_PIER_EAST_ITEM : MOUNT_SIDE_OF_PIER_WEST_ITEM, true);
+		indigo_item *side_item = side == STARBOOK_PIERSIDE_EAST ? MOUNT_SIDE_OF_PIER_EAST_ITEM : MOUNT_SIDE_OF_PIER_WEST_ITEM;
+		if (MOUNT_SIDE_OF_PIER_PROPERTY->state == INDIGO_OK_STATE && !side_item->sw.value) {
+			indigo_set_switch(MOUNT_SIDE_OF_PIER_PROPERTY, side_item, true);
+		}
 		indigo_update_property(device, MOUNT_SIDE_OF_PIER_PROPERTY, NULL);
 	}
 	time_t utc;
@@ -486,7 +592,9 @@ static void mount_timer_callback(indigo_device *device) {
 			indigo_timetoisogm(utc, MOUNT_UTC_ITEM->text.value, INDIGO_VALUE_SIZE);
 			snprintf(MOUNT_UTC_OFFSET_ITEM->text.value, INDIGO_VALUE_SIZE, "%d", offset);
 			MOUNT_UTC_TIME_PROPERTY->state = INDIGO_OK_STATE;
-		} else MOUNT_UTC_TIME_PROPERTY->state = INDIGO_ALERT_STATE;
+		} else {
+			MOUNT_UTC_TIME_PROPERTY->state = INDIGO_ALERT_STATE;
+		}
 	}
 	indigo_update_property(device, MOUNT_UTC_TIME_PROPERTY, NULL);
 	indigo_execute_handler_in(device, 0.5, mount_timer_callback);
@@ -496,8 +604,9 @@ static void mount_timer_callback(indigo_device *device) {
 static void mount_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = starbook_open(device);
+			connection_result = starbook_open(device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -511,14 +620,9 @@ static void mount_connection_handler(indigo_device *device) {
 			MOUNT_SIDE_OF_PIER_PROPERTY->hidden = PRIVATE_DATA->version <= 2.7;
 			connection_result = starbook_update_position(device);
 			if (connection_result) {
-				double longitude, latitude;
-				int timezone;
-				connection_result = starbook_get_place(device, &longitude, &latitude, &timezone);
-				if (connection_result) {
-					MOUNT_GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM->number.value = longitude;
-					MOUNT_GEOGRAPHIC_COORDINATES_LATITUDE_ITEM->number.value = latitude;
-					TIMEZONE_VALUE_ITEM->number.value = timezone;
-				}
+				// A site the mount does not report readably marks only the site ALERT; the next site write reads it again.
+				PRIVATE_DATA->place_valid = false;
+				MOUNT_GEOGRAPHIC_COORDINATES_PROPERTY->state = TIMEZONE_PROPERTY->state = starbook_refresh_place(device) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
 			}
 			//- mount.on_connect
 		}
@@ -528,7 +632,11 @@ static void mount_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", MOUNT_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", MOUNT_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", MOUNT_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", MOUNT_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				starbook_close(device);
 			}
@@ -541,6 +649,13 @@ static void mount_connection_handler(indigo_device *device) {
 		indigo_cancel_pending_handlers(device);
 		starbook_move(device, false, false, false, false);
 		starbook_set(device, "/STOP", NULL);
+		// The mount is stopped, so the next session starts with no motion selected and no GOTO running.
+		MOUNT_MOTION_NORTH_ITEM->sw.value = MOUNT_MOTION_SOUTH_ITEM->sw.value = false;
+		MOUNT_MOTION_EAST_ITEM->sw.value = MOUNT_MOTION_WEST_ITEM->sw.value = false;
+		MOUNT_MOTION_DEC_PROPERTY->state = MOUNT_MOTION_RA_PROPERTY->state = INDIGO_OK_STATE;
+		if (MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state == INDIGO_BUSY_STATE) {
+			MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = INDIGO_ALERT_STATE;
+		}
 		//- mount.on_disconnect
 		// Cancelled change handlers must not leave properties BUSY: a new session starts in a clean state.
 		indigo_property *cancelled_properties[] = {
@@ -550,8 +665,6 @@ static void mount_connection_handler(indigo_device *device) {
 			MOUNT_UTC_TIME_PROPERTY,
 			MOUNT_TRACK_RATE_PROPERTY,
 			MOUNT_GUIDE_RATE_PROPERTY,
-			MOUNT_PARK_POSITION_PROPERTY,
-			MOUNT_PARK_SET_PROPERTY,
 			MOUNT_SIDE_OF_PIER_PROPERTY,
 			MOUNT_PARK_PROPERTY,
 			MOUNT_GEOGRAPHIC_COORDINATES_PROPERTY,
@@ -582,8 +695,18 @@ static void mount_connection_handler(indigo_device *device) {
 }
 
 static void mount_timezone_handler(indigo_device *device) {
+	TIMEZONE_PROPERTY->state = INDIGO_OK_STATE;
 	//+ mount.TIMEZONE.on_change
-	TIMEZONE_PROPERTY->state = starbook_set_place(device, MOUNT_GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM->number.value, MOUNT_GEOGRAPHIC_COORDINATES_LATITUDE_ITEM->number.value, (int)TIMEZONE_VALUE_ITEM->number.value) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+	// The site is one command, so the coordinates sent along are the mount's, read again if unknown.
+	int timezone = (int)TIMEZONE_VALUE_ITEM->number.value;
+	bool known = PRIVATE_DATA->place_valid || starbook_refresh_place(device);
+	TIMEZONE_VALUE_ITEM->number.value = timezone;
+	if (known && starbook_place_settable(device) && starbook_set_place(device, MOUNT_GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM->number.value, MOUNT_GEOGRAPHIC_COORDINATES_LATITUDE_ITEM->number.value, timezone)) {
+		MOUNT_GEOGRAPHIC_COORDINATES_PROPERTY->state = INDIGO_OK_STATE;
+		indigo_update_property(device, MOUNT_GEOGRAPHIC_COORDINATES_PROPERTY, NULL);
+	} else {
+		TIMEZONE_PROPERTY->state = INDIGO_ALERT_STATE;
+	}
 	//- mount.TIMEZONE.on_change
 	indigo_update_property(device, TIMEZONE_PROPERTY, NULL);
 }
@@ -640,34 +763,52 @@ static void mount_park_handler(indigo_device *device) {
 static void mount_geographic_coordinates_handler(indigo_device *device) {
 	MOUNT_GEOGRAPHIC_COORDINATES_PROPERTY->state = INDIGO_OK_STATE;
 	//+ mount.MOUNT_GEOGRAPHIC_COORDINATES.on_change
-	bool settable = PRIVATE_DATA->version > 2.7 || PRIVATE_DATA->current_state == STARBOOK_STATE_INIT;
-	MOUNT_GEOGRAPHIC_COORDINATES_PROPERTY->state = settable && starbook_set_place(device, MOUNT_GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM->number.value, MOUNT_GEOGRAPHIC_COORDINATES_LATITUDE_ITEM->number.value, (int)TIMEZONE_VALUE_ITEM->number.value) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+	// The site is one command, so the time zone sent along is the mount's, read again if unknown.
+	double longitude = MOUNT_GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM->number.value, latitude = MOUNT_GEOGRAPHIC_COORDINATES_LATITUDE_ITEM->number.value;
+	bool known = PRIVATE_DATA->place_valid || starbook_refresh_place(device);
+	MOUNT_GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM->number.value = longitude;
+	MOUNT_GEOGRAPHIC_COORDINATES_LATITUDE_ITEM->number.value = latitude;
+	if (known && starbook_place_settable(device) && starbook_set_place(device, longitude, latitude, (int)TIMEZONE_VALUE_ITEM->number.value)) {
+		TIMEZONE_PROPERTY->state = INDIGO_OK_STATE;
+		indigo_update_property(device, TIMEZONE_PROPERTY, NULL);
+	} else {
+		MOUNT_GEOGRAPHIC_COORDINATES_PROPERTY->state = INDIGO_ALERT_STATE;
+	}
 	//- mount.MOUNT_GEOGRAPHIC_COORDINATES.on_change
 	indigo_update_property(device, MOUNT_GEOGRAPHIC_COORDINATES_PROPERTY, NULL);
 }
 
 static void mount_equatorial_coordinates_handler(indigo_device *device) {
 	if (!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value) {
-		indigo_send_message(device, MOUNT_EQUATORIAL_COORDINATES_PROPERTY, "Mount is parked!");
-		INDIGO_UPDATE_PROPERTY_STATE(MOUNT_EQUATORIAL_COORDINATES_PROPERTY, INDIGO_ALERT_STATE, NULL);
+		indigo_reject_coordinates_change(device, "Mount is parked!");
 		return;
 	}
 	//+ mount.MOUNT_EQUATORIAL_COORDINATES.on_change
+	// The generated handler publishes the coordinates once, after this block.
 	if (PRIVATE_DATA->current_state == STARBOOK_STATE_INIT && !starbook_start(device)) {
 		MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = INDIGO_ALERT_STATE;
-		indigo_update_coordinates(device, NULL);
 	} else {
 		int error = STARBOOK_ERROR_NONE;
 		bool sync = MOUNT_ON_COORDINATES_SET_SYNC_ITEM->sw.value;
 		bool ok = starbook_set_coordinates(device, sync, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM->number.target, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM->number.target, &error);
-		if (!sync && !ok && error == STARBOOK_WARNING_NEAR_SUN) ok = starbook_set_coordinates(device, false, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM->number.target, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM->number.target, &error);
+		if (!sync && !ok && error == STARBOOK_WARNING_NEAR_SUN) {
+			ok = starbook_set_coordinates(device, false, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM->number.target, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM->number.target, &error);
+		}
 		if (sync || !ok) {
+			// A synchronized position is published as the mount reads it back.
+			if (sync && ok) {
+				ok = starbook_update_position(device);
+			}
 			MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = ok ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
-			indigo_update_coordinates(device, starbook_error_text(error));
+			// The generated update carries no message, the reason of a refusal is sent with the property.
+			const char *reason = starbook_error_text(error);
+			if (reason != NULL) {
+				indigo_send_message(device, MOUNT_EQUATORIAL_COORDINATES_PROPERTY, "%s", reason);
+			}
 		} else {
 			MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = INDIGO_BUSY_STATE;
 			PRIVATE_DATA->goto_deadline = indigo_monotonic_time() + 600;
-			indigo_update_coordinates(device, NULL);
+			// The finalizer runs on this device's queue, so only after the BUSY update below this block.
 			indigo_execute_handler_in(device, 0.1, mount_goto_finalizer);
 		}
 	}
@@ -702,8 +843,11 @@ static void mount_motion_dec_handler(indigo_device *device) {
 	}
 	MOUNT_MOTION_DEC_PROPERTY->state = INDIGO_OK_STATE;
 	//+ mount.MOUNT_MOTION_DEC.on_change
-	if (PRIVATE_DATA->current_state == STARBOOK_STATE_INIT && !starbook_start(device)) MOUNT_MOTION_DEC_PROPERTY->state = INDIGO_ALERT_STATE;
-	else MOUNT_MOTION_DEC_PROPERTY->state = starbook_move(device, MOUNT_MOTION_NORTH_ITEM->sw.value, MOUNT_MOTION_SOUTH_ITEM->sw.value, MOUNT_MOTION_EAST_ITEM->sw.value, MOUNT_MOTION_WEST_ITEM->sw.value) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+	if (PRIVATE_DATA->current_state == STARBOOK_STATE_INIT && !starbook_start(device)) {
+		MOUNT_MOTION_DEC_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else {
+		MOUNT_MOTION_DEC_PROPERTY->state = starbook_move(device, MOUNT_MOTION_NORTH_ITEM->sw.value, MOUNT_MOTION_SOUTH_ITEM->sw.value, MOUNT_MOTION_EAST_ITEM->sw.value, MOUNT_MOTION_WEST_ITEM->sw.value) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+	}
 	//- mount.MOUNT_MOTION_DEC.on_change
 	indigo_update_property(device, MOUNT_MOTION_DEC_PROPERTY, NULL);
 	indigo_mount_commit_motion_client(device, MOUNT_MOTION_DEC_PROPERTY);
@@ -718,8 +862,11 @@ static void mount_motion_ra_handler(indigo_device *device) {
 	}
 	MOUNT_MOTION_RA_PROPERTY->state = INDIGO_OK_STATE;
 	//+ mount.MOUNT_MOTION_RA.on_change
-	if (PRIVATE_DATA->current_state == STARBOOK_STATE_INIT && !starbook_start(device)) MOUNT_MOTION_RA_PROPERTY->state = INDIGO_ALERT_STATE;
-	else MOUNT_MOTION_RA_PROPERTY->state = starbook_move(device, MOUNT_MOTION_NORTH_ITEM->sw.value, MOUNT_MOTION_SOUTH_ITEM->sw.value, MOUNT_MOTION_EAST_ITEM->sw.value, MOUNT_MOTION_WEST_ITEM->sw.value) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+	if (PRIVATE_DATA->current_state == STARBOOK_STATE_INIT && !starbook_start(device)) {
+		MOUNT_MOTION_RA_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else {
+		MOUNT_MOTION_RA_PROPERTY->state = starbook_move(device, MOUNT_MOTION_NORTH_ITEM->sw.value, MOUNT_MOTION_SOUTH_ITEM->sw.value, MOUNT_MOTION_EAST_ITEM->sw.value, MOUNT_MOTION_WEST_ITEM->sw.value) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+	}
 	//- mount.MOUNT_MOTION_RA.on_change
 	indigo_update_property(device, MOUNT_MOTION_RA_PROPERTY, NULL);
 	indigo_mount_commit_motion_client(device, MOUNT_MOTION_RA_PROPERTY);
@@ -749,8 +896,6 @@ static indigo_result mount_attach(indigo_device *device) {
 		MOUNT_TRACKING_PROPERTY->perm = INDIGO_RO_PERM;
 		MOUNT_PARK_PROPERTY->count = 1;
 		MOUNT_PARK_PARKED_ITEM->sw.value = false;
-		MOUNT_PARK_POSITION_PROPERTY->hidden = false;
-		MOUNT_PARK_SET_PROPERTY->hidden = false;
 		MOUNT_ON_COORDINATES_SET_PROPERTY->count = 2;
 		MOUNT_EPOCH_PROPERTY->perm = INDIGO_RO_PERM;
 		DEVICE_PORT_PROPERTY->hidden = false;
@@ -770,8 +915,6 @@ static indigo_result mount_attach(indigo_device *device) {
 		MOUNT_UTC_TIME_PROPERTY->hidden = false;
 		MOUNT_TRACK_RATE_PROPERTY->hidden = true;
 		MOUNT_GUIDE_RATE_PROPERTY->hidden = true;
-		MOUNT_PARK_POSITION_PROPERTY->hidden = false;
-		MOUNT_PARK_SET_PROPERTY->hidden = false;
 		MOUNT_SIDE_OF_PIER_PROPERTY->hidden = false;
 		MOUNT_PARK_PROPERTY->hidden = false;
 		MOUNT_GEOGRAPHIC_COORDINATES_PROPERTY->hidden = false;
@@ -823,8 +966,8 @@ static indigo_result mount_change_property(indigo_device *device, indigo_client 
 		INDIGO_COPY_VALUES_PROCESS_CHANGE(MOUNT_GEOGRAPHIC_COORDINATES_PROPERTY, mount_geographic_coordinates_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(MOUNT_EQUATORIAL_COORDINATES_PROPERTY, property)) {
-		INDIGO_REJECT_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, MOUNT_EQUATORIAL_COORDINATES_PROPERTY, "Mount is parked!");
-		INDIGO_COPY_VALUES_PROCESS_CHANGE(MOUNT_EQUATORIAL_COORDINATES_PROPERTY, mount_equatorial_coordinates_handler);
+		INDIGO_REJECT_COORDINATES_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, "Mount is parked!");
+		INDIGO_COPY_TARGETS_PROCESS_COORDINATES_CHANGE(mount_equatorial_coordinates_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(MOUNT_ABORT_MOTION_PROPERTY, property)) {
 		INDIGO_COPY_VALUES_PROCESS_URGENT_CHANGE(MOUNT_ABORT_MOTION_PROPERTY, mount_abort_motion_handler);
@@ -866,8 +1009,9 @@ static indigo_result mount_detach(indigo_device *device) {
 static void guider_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = starbook_open(device->master_device);
+			connection_result = starbook_open(device->master_device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -876,7 +1020,11 @@ static void guider_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", GUIDER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", GUIDER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", GUIDER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", GUIDER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				starbook_close(device);
 			}

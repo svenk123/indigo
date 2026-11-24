@@ -187,7 +187,7 @@ if (set_tracking(device, on)) {
 }
 ```
 
-The poll keeps its <span style="color:orange">**BUSY**</span> check. Only requests guarded by <span style="color:orange">**BUSY**</span> (`INDIGO_COPY_VALUES_PROCESS_CHANGE`) may rely on the target: a request accepted while <span style="color:orange">**BUSY**</span> (the `_ANYTIME` variants) may overwrite the targets while the handler reads them. Selector properties that an action reads right after them on the bus thread (for example `MOUNT_ON_COORDINATES_SET`) stay synchronous and do not need the target. Text items have no target.
+The poll keeps its <span style="color:orange">**BUSY**</span> check. Only requests guarded by <span style="color:orange">**BUSY**</span> (`INDIGO_COPY_VALUES_PROCESS_CHANGE`) may rely on the target: a request accepted while <span style="color:orange">**BUSY**</span> (the `_ANYTIME` variants) may overwrite the targets while the handler reads them. Selector properties that an action reads right after them on the bus thread (for example `MOUNT_ON_COORDINATES_SET`) stay synchronous and do not need the target. `MOUNT_ON_COORDINATES_SET` cannot change while `MOUNT_EQUATORIAL_COORDINATES` is <span style="color:orange">**BUSY**</span> (`indigo_mount_change_property()` refuses the change), so the queued coordinates handler and its finalizer read the mode selected when the request was admitted, provided the coordinates stay <span style="color:orange">**BUSY**</span> from the admission of the request until the handler has read the mode for the last time. Text items have no target.
 
 ## Types of INDIGO Drivers
 
@@ -594,6 +594,10 @@ typedef struct {
 
 When opening a handle you pass a **log level** (one of *INDIGO_LOG_ERROR*, *INDIGO_LOG_INFO*, *INDIGO_LOG_DEBUG*, ...) which controls how the traffic on that handle is logged. For devices that exchange binary (non text) data, OR the level with the *BINARY_LOG* flag so that the log is rendered as a hex dump instead of text.
 
+Serial open functions request exclusive access to the port. Windows opens with sharing disabled; Linux and macOS set the terminal's exclusive mode with `TIOCEXCL`. On Linux, a process with `CAP_SYS_ADMIN` can bypass terminal exclusive mode.
+
+The error-reporting variants *indigo_uni_open_serial2()*, *indigo_uni_open_serial_with_speed2()* and *indigo_uni_open_serial_with_config2()* take an additional optional `const char **error_message` argument. It receives `NULL` on success or a pointer to a static, human readable message on failure, suitable for showing to the user (for example in the connection property message). The message is tailored to the platform: on Windows an access denied failure notes that the COM port may already be in use, because Windows reports both cases the same way. The string must not be freed or modified. Native error details remain in the log. Existing serial open functions retain their signatures.
+
 Open functions:
 
 - *indigo_uni_open_serial()* - open serial communication at 9600-8N1
@@ -666,6 +670,94 @@ The above considers **tcp://**, **udp://** and **nexdome://** prefixes as networ
 Many hardware vendors provide their own Software Development Kit (SDK) for their products in this case the communication with the devices can be done using the SDK provided by the hardware vendor.
 
 Examples for all types of communication are available in the [INDIGO driver base](https://github.com/indigo-astronomy/indigo/blob/master/indigo_drivers/).
+
+#### Serial port list and hot-plug
+
+A serial device shows `DEVICE_PORT` and `DEVICE_PORTS` and fills the list once, in its attach function:
+
+```C
+DEVICE_PORT_PROPERTY->hidden = false;
+DEVICE_PORTS_PROPERTY->hidden = false;
+indigo_enumerate_serial_ports(device, DEVICE_PORTS_PROPERTY);
+```
+
+Everything else is done by the framework, the driver must not enumerate the ports again:
+- The ports are enumerated once per process and the list is shared by all devices. Attaching many serial drivers costs one scan, not one per device.
+- *indigo_enumerate_serial_ports()* also registers the device for updates and *indigo_device_detach()* unregisters it.
+- On every USB hot-plug event the framework rescans the ports after a short delay (1 s, and once more after 2 s if nothing changed yet). Only when the list really changed, `DEVICE_PORTS` of every registered device is rebuilt from the new list. A USB event of a device that is not a serial port, e.g. a camera, costs one or two scans and no property traffic. The event comes from the shared USB hot-plug polling, so ports appear and disappear within about 3 to 6 seconds on Linux, macOS and Windows.
+- A *Refresh* request on `DEVICE_PORTS` rescans the ports too and, if they changed, updates the other devices as well. Use it for ports without a USB event, e.g. Bluetooth serial ports on macOS or a link created in */dev* by hand.
+- A disconnected device with an `auto://` port re-runs the auto-selection when the list changes, so it picks up its device as soon as it is plugged in. The port of a connected or connecting device is never changed.
+- On Linux the ports are taken from udev's `tty` devices: a USB-serial port (`ttyUSB*`, `ttyACM*`) is listed by its USB device, a UART of the kernel serial core (`ttyS*`, `ttyAMA*`, ...) when its `type` attribute is not 0 (`PORT_UNKNOWN`). Symbolic links directly in */dev* to a listed port are listed as links, both the ones udev created, e.g. */dev/serial0* or one from a user rule, and the ones made by hand; links into */proc* like */dev/stdin* and links in subdirectories like */dev/serial/by-id* are not. No device node is opened during the scan, so the scan does not toggle DTR or reset Arduino-based devices.
+- Not listed on Linux: Bluetooth `rfcomm*` ports, pseudo-terminals (e.g. a socat virtual port) and USB gadget ports (`ttyGS*`), as before, and multiport cards whose driver does not use the serial core, which the earlier scan could find by opening them. Their path can be typed into `DEVICE_PORT`.
+- The list holds up to 19 ports.
+
+A driver that finds devices of its own, e.g. over the network, must not add items to `DEVICE_PORTS` directly, as the next rebuild drops them and the rebuild may run concurrently on the hot-plug thread. It passes them to *indigo_set_additional_ports()* instead:
+
+```C
+const char *names[] = { "askar://192.168.1.20:8080" };
+const char *labels[] = { "Askar-WAF (192.168.1.20:8080)" };
+indigo_set_additional_ports(device, 1, names, labels);
+```
+
+- The items belong to the driver, not to the device: they are appended to `DEVICE_PORTS` of every device of the same driver (same `INFO.DEVICE_DRIVER`), so additional instances share them and the driver runs its discovery once. Other drivers never see them.
+- Every call replaces the previous items of the driver and redefines `DEVICE_PORTS` of all its devices, even with no items, so it also completes a BUSY refresh. A count of 0 removes the items.
+- The items are kept when the serial ports change and released with the last device of the driver.
+- Run the discovery itself without holding any lock, e.g. in a handler, and call *indigo_set_additional_ports()* with the result. See *scan_ports_finalizer()* in *indigo_focuser_askar.driver*.
+- A refresh that takes longer than the serial rescan, like such a discovery, keeps `DEVICE_PORTS` BUSY until it is done: set the property BUSY before passing the request to the base class, which then rescans the serial ports but leaves the state alone, queue the discovery, and set it OK in the handler before calling *indigo_set_additional_ports()*. Reject `DEVICE_PORTS` changes while it is BUSY (`reject_change` in a generated driver), so repeated refresh requests do not queue repeated discoveries. Decide whether the request is a refresh from the request itself in the change branch, not from the property in the handler, as the base class resets the REFRESH item meanwhile.
+
+The list, the additional items and the registered devices are guarded by the bus lock, so the updates are serialized with the change requests dispatched by the bus. *indigo_enumerate_usbserial_devices()* is still available for drivers that need the raw USB-serial information, but it always scans and does not update `DEVICE_PORTS`.
+
+#### Ports in use
+
+Auto-selection prefers serial ports that no other device has open or is opening, so devices get different ports while free ports remain:
+- VID/PID and other match patterns are preferences, not restrictions. A free matching port is preferred; if none is available, an existing free auto-selected port is kept, or the first free USB-serial port is selected. An occupied matching port never takes precedence over a free nonmatching port, so drivers supporting both uniquely identified devices and generic adapters can use both.
+- When a valid connect request passes *indigo_ignore_connection_change()*, the base class resolves the port (a plain `auto://`, or an `auto://` port used by another device, is selected again) and claims it in the same bus lock section. Two devices connected at the same moment therefore never get the same port.
+- A disconnected device whose `auto://` port was just claimed selects a port again at once and publishes `DEVICE_PORT`. A port set without `auto://` is claimed too, so auto-selection avoids it, but it is never changed.
+- The claim becomes the recorded port of the connection (see below) when CONNECTION ends OK, and is released when it ends in any other state, and when the device is detached. It also expires 5 s after the request once CONNECTION is no longer BUSY, so a driver that does not report the end of its connection through the base class cannot leave a port blocked.
+- Devices sharing a master device never block each other.
+- If every port is in use, the selection is the same as before, and the connection fails when the driver opens the port.
+
+#### Lost connections
+
+The framework disconnects a device whose USB-serial port disappears, without any code in the driver:
+- When a device connects, the base class records the port it connected on: `DEVICE_PORT` with `auto://` removed and a link resolved (on Windows the COM name without `\\.\` and `:`). A network URL is not recorded.
+- When the serial port list changes (a USB hot-plug event or a *Refresh*) and a recorded port was in the previous list and is missing from the new one, the device and every connected device that shares the port through it as its master device get a regular disconnection request.
+- The base class publishes the end of that disconnection ALERT with "Connection to <port> lost" instead of OK.
+- Only a port the list knew is acted on, so native ports without a USB event, Bluetooth and network connections, and ports the scan does not list are not covered; that is what the driver check below is for.
+- A driver must disconnect its devices before it detaches them. A device detached while still connected over a serial port is a driver bug: the framework logs "Driver <name> misbehaves: device '<device>' was detached while still connected, its serial port <port> is probably left open" and then fails an assertion, so the driver crashes in development and has to be fixed. A build with `NDEBUG`, e.g. the Windows release build, only logs it. The port is not closed: the open handle belongs to the driver, so closing it behind the driver's back could free it twice.
+
+This takes 1 to 6 seconds after the unplug and works for every driver that uses `DEVICE_PORT`. A driver that checks the port itself notices the loss at its next command, also for a network connection, and whichever comes first disconnects; the second request is ignored.
+
+A serial adapter can be unplugged and a network controller can drop its connection. A driver that disconnects in that case uses *indigo_uni_is_connection_lost()*. It reports a lost connection, and only that:
+- an error left on the handle by a read or write, which fails every later one;
+- a serial device that is gone or a TCP connection that was reset (*indigo_uni_is_valid()*);
+- a TCP connection the peer closed (readable, and a peek finds the end of the stream).
+
+A missing or garbled reply is never a lost connection. It fails its command, the property shows ALERT and the next command starts clean after *indigo_uni_discard()*. During the connect handshake a bad reply still refuses the connection, through the failed open or `on_connect`.
+
+The pattern, see *askar_port_valid()* in *indigo_focuser_askar.driver*:
+
+```C
+static bool device_port_valid(indigo_device *device) {
+	if (PRIVATE_DATA->handle == NULL || PRIVATE_DATA->lost) {
+		return false;
+	}
+	if (!indigo_uni_is_connection_lost(PRIVATE_DATA->handle)) {
+		return true;
+	}
+	if (IS_CONNECTED) {
+		PRIVATE_DATA->lost = true;
+		indigo_execute_handler(device, device_connection_lost);
+	}
+	return false;
+}
+```
+
+- Call it before every command and again after a failed discard, write or read.
+- Queue the disconnection once; the flag keeps the commands that fail meanwhile from queueing it again.
+- `device_connection_lost()` runs the regular disconnection first and then publishes `CONNECTION` ALERT with a message. The regular disconnection ends OK, so setting ALERT before it would be overwritten.
+- Clear the flag when the port is opened again, before the first handshake command. Clearing it in `on_connect` is too late: the commands of the open itself would fail and the device could not reconnect without a restart.
+- Devices that share a port (a mount and its guider, focuser and aux) close the port and queue the lost handler for the master and every slave from *indigo_query_slave_devices()*; each one runs the regular disconnection of its own device and then publishes ALERT, see *meade_validate_handle()* in *indigo_mount_lx200.driver*. *indigo_disconnect_slave_devices()* only requests the regular disconnection, which ends OK. The handlers run on the shared queue of the master, so a handler queued behind the disconnection would be cancelled by it (*indigo_cancel_pending_handlers()*); the lost handler calls the connection handler itself instead.
 
 ### Conflicting Drivers
 

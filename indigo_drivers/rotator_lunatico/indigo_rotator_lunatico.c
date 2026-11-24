@@ -45,7 +45,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x0300000E
+#define DRIVER_VERSION       0x03000014
 #define DRIVER_NAME          "indigo_rotator_lunatico"
 #define DRIVER_LABEL         "Lunatico Astronomia Rotator"
 #define ROTATOR_MAIN_DEVICE_NAME "Rotator Lunatico (Main)"
@@ -370,8 +370,9 @@ typedef struct {
 static void rotator_main_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = lunatico_open(device);
+			connection_result = lunatico_open(device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -389,7 +390,11 @@ static void rotator_main_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", ROTATOR_MAIN_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", ROTATOR_MAIN_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", ROTATOR_MAIN_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", ROTATOR_MAIN_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				lunatico_close(device);
 			}
@@ -673,8 +678,9 @@ static void focuser_exp_timer_callback(indigo_device *device) {
 static void focuser_exp_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = lunatico_open(device->master_device);
+			connection_result = lunatico_open(device->master_device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -693,7 +699,11 @@ static void focuser_exp_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", FOCUSER_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", FOCUSER_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				lunatico_close(device);
 			}
@@ -803,9 +813,12 @@ static void focuser_exp_focuser_abort_motion_handler(indigo_device *device) {
 	// An urgent abort can overtake a queued move, so the start
 	// handlers of this device are cancelled together with the
 	// completion poll they would have scheduled.
+	pthread_mutex_lock(&lunatico_request_mutex);
 	indigo_cancel_pending_handler(device, focuser_exp_focuser_position_handler);
 	indigo_cancel_pending_handler(device, focuser_exp_focuser_steps_handler);
 	indigo_cancel_pending_handler(device, focuser_motion_finalizer);
+	PORT_STATE.focuser_pending = 0;
+	pthread_mutex_unlock(&lunatico_request_mutex);
 	lunatico_focuser_abort(device);
 	//- focuser_exp.FOCUSER_ABORT_MOTION.on_change
 }
@@ -866,6 +879,7 @@ static indigo_result focuser_exp_attach(indigo_device *device) {
 	if (indigo_focuser_attach(device, DRIVER_NAME, DRIVER_VERSION) == INDIGO_OK) {
 		//+ focuser_exp.on_attach
 		device->gp_bits = 1;
+		lunatico_focuser_bind_requests(device);
 		INFO_PROPERTY->count = 6;
 		//- focuser_exp.on_attach
 		FOCUSER_TEMPERATURE_PROPERTY->hidden = false;
@@ -1051,8 +1065,9 @@ static indigo_result focuser_exp_detach(indigo_device *device) {
 static void rotator_exp_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = lunatico_open(device->master_device);
+			connection_result = lunatico_open(device->master_device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -1070,7 +1085,11 @@ static void rotator_exp_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", ROTATOR_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", ROTATOR_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", ROTATOR_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", ROTATOR_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				lunatico_close(device);
 			}
@@ -1349,8 +1368,9 @@ static void aux_exp_timer_callback(indigo_device *device) {
 static void aux_exp_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = lunatico_open(device->master_device);
+			connection_result = lunatico_open(device->master_device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -1366,7 +1386,11 @@ static void aux_exp_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_EXP_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				lunatico_close(device);
 			}
@@ -1543,8 +1567,9 @@ static void focuser_third_timer_callback(indigo_device *device) {
 static void focuser_third_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = lunatico_open(device->master_device);
+			connection_result = lunatico_open(device->master_device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -1563,7 +1588,11 @@ static void focuser_third_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", FOCUSER_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", FOCUSER_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				lunatico_close(device);
 			}
@@ -1673,9 +1702,12 @@ static void focuser_third_focuser_abort_motion_handler(indigo_device *device) {
 	// An urgent abort can overtake a queued move, so the start
 	// handlers of this device are cancelled together with the
 	// completion poll they would have scheduled.
+	pthread_mutex_lock(&lunatico_request_mutex);
 	indigo_cancel_pending_handler(device, focuser_third_focuser_position_handler);
 	indigo_cancel_pending_handler(device, focuser_third_focuser_steps_handler);
 	indigo_cancel_pending_handler(device, focuser_motion_finalizer);
+	PORT_STATE.focuser_pending = 0;
+	pthread_mutex_unlock(&lunatico_request_mutex);
 	lunatico_focuser_abort(device);
 	//- focuser_third.FOCUSER_ABORT_MOTION.on_change
 }
@@ -1736,6 +1768,7 @@ static indigo_result focuser_third_attach(indigo_device *device) {
 	if (indigo_focuser_attach(device, DRIVER_NAME, DRIVER_VERSION) == INDIGO_OK) {
 		//+ focuser_third.on_attach
 		device->gp_bits = 2;
+		lunatico_focuser_bind_requests(device);
 		INFO_PROPERTY->count = 6;
 		//- focuser_third.on_attach
 		FOCUSER_TEMPERATURE_PROPERTY->hidden = false;
@@ -1921,8 +1954,9 @@ static indigo_result focuser_third_detach(indigo_device *device) {
 static void rotator_third_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = lunatico_open(device->master_device);
+			connection_result = lunatico_open(device->master_device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -1940,7 +1974,11 @@ static void rotator_third_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", ROTATOR_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", ROTATOR_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", ROTATOR_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", ROTATOR_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				lunatico_close(device);
 			}
@@ -2219,8 +2257,9 @@ static void aux_third_timer_callback(indigo_device *device) {
 static void aux_third_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = lunatico_open(device->master_device);
+			connection_result = lunatico_open(device->master_device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -2236,7 +2275,11 @@ static void aux_third_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_THIRD_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				lunatico_close(device);
 			}

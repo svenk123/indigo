@@ -34,6 +34,7 @@
 #include <signal.h>
 #include <limits.h>
 #include <time.h>
+#include <math.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -105,7 +106,10 @@ typedef struct {
 	uint32_t dec_features;
 	const char *ready_file;
 	int stop_lag;
+	double home_start_degrees;
 	double ppec_training_seconds;
+	int encoder_counts;
+	int32_t encoder_offsets[2];
 } simulator_options;
 
 static simulator_options options = {
@@ -123,7 +127,9 @@ static simulator_options options = {
 	.dec_features = FEATURES,
 	.ready_file = NULL,
 	.stop_lag = 0,
-	.ppec_training_seconds = 0
+	.ppec_training_seconds = 0,
+	.encoder_counts = 0,
+	.encoder_offsets = { 512, 1024 }
 };
 
 static const char *simulator_name = "mount_synscan";
@@ -138,10 +144,18 @@ static void usage(const char *name) {
 	printf("  --ready-file <path>     Write INDIGO_SIMULATOR_PORT after PTY setup\n");
 	printf("  --trace                 Log protocol requests and replies\n");
 	printf("  --pcdirect              Start axes as initialized for PC Direct style probing\n");
+	printf("  --home-start-degrees <d>  Physical initial angle relative to each home sensor (default 0)\n");
 	printf("  --stop-lag <n>          Report an axis as still running for n status queries after a stop\n");
 	printf("  --ppec-training-seconds <s>  End PPEC training by itself s seconds after it started, as the\n");
 	printf("                          mount does after one worm revolution (default: never)\n");
-	printf("  The tests inject refused commands through <ready-file>.fault, \"<prefix> <reply> <count>\"\n");
+	printf("  --encoder-counts <n>    Count the :d encoder reading n times per axis revolution instead of in steps\n");
+	printf("                          (an AZ-GTi counts 1068 against 2073600 steps; default: in steps). Enabling the\n");
+	printf("                          dual encoder (:W..04) then re-bases the step counter from the encoder reading\n");
+	printf("                          when they disagree, snapped to the encoder grid, as an AZ-GTi does\n");
+	printf("  --encoder-offsets <ra>,<dec>  Offset of the :d reading from the step counter, in encoder counts with\n");
+	printf("                          --encoder-counts, in steps without it (default 512,1024)\n");
+	printf("  The tests inject refused commands through <ready-file>.fault, \"<prefix> <reply> <count>\" per line;\n");
+	printf("                          the replies \"silent\", \"lost\" and \"late:<ms>\" model lost requests, lost and late replies\n");
 	printf("  --model-code <hex>      Motor controller model code for :e replies\n");
 	printf("  --ra-features <hex>     Override RA axis feature bits for :q1000100 replies\n");
 	printf("  --dec-features <hex>    Override DEC axis feature bits for :q2000100 replies\n");
@@ -220,6 +234,16 @@ static bool parse_args(int argc, char *argv[]) {
 			}
 			options.udp = true;
 			options.udp_port = atoi(argv[i]);
+		} else if (!strcmp(argv[i], "--home-start-degrees")) {
+			if (++i == argc) {
+				return false;
+			}
+			char *end = NULL;
+			double value = strtod(argv[i], &end);
+			if (end == argv[i] || *end != 0 || !isfinite(value) || value < -90 || value > 90) {
+				return false;
+			}
+			options.home_start_degrees = value;
 		} else if (!strcmp(argv[i], "--stop-lag")) {
 			if (++i == argc) {
 				fprintf(stderr, "--stop-lag requires a value\n");
@@ -244,6 +268,38 @@ static bool parse_args(int argc, char *argv[]) {
 				return false;
 			}
 			options.ppec_training_seconds = value;
+		} else if (!strcmp(argv[i], "--encoder-counts")) {
+			if (++i == argc) {
+				fprintf(stderr, "--encoder-counts requires a value\n");
+				return false;
+			}
+			char *end = NULL;
+			long value = strtol(argv[i], &end, 10);
+			if (end == argv[i] || *end != 0 || value < 1 || value > STEPS_PER_REVOLUTION) {
+				fprintf(stderr, "--encoder-counts requires a count between 1 and %d\n", STEPS_PER_REVOLUTION);
+				return false;
+			}
+			options.encoder_counts = (int)value;
+		} else if (!strcmp(argv[i], "--encoder-offsets")) {
+			if (++i == argc) {
+				fprintf(stderr, "--encoder-offsets requires a value\n");
+				return false;
+			}
+			char *end = NULL;
+			long ra = strtol(argv[i], &end, 10);
+			long dec = 0;
+			bool valid = end != argv[i] && *end == ',';
+			if (valid) {
+				char *dec_text = end + 1;
+				dec = strtol(dec_text, &end, 10);
+				valid = end != dec_text && *end == 0;
+			}
+			if (!valid || labs(ra) > STEPS_PER_REVOLUTION || labs(dec) > STEPS_PER_REVOLUTION) {
+				fprintf(stderr, "--encoder-offsets requires two numbers <ra>,<dec> within one revolution\n");
+				return false;
+			}
+			options.encoder_offsets[0] = (int32_t)ra;
+			options.encoder_offsets[1] = (int32_t)dec;
 		} else if (!strcmp(argv[i], "--ready-file")) {
 			if (++i == argc) {
 				fprintf(stderr, "--ready-file requires a path\n");
@@ -263,7 +319,9 @@ static bool parse_args(int argc, char *argv[]) {
 static volatile sig_atomic_t running = 1;
 
 // Command log for tests and reference traces, "<ready-file>.events": one "<monotonic seconds>\t<command>"
-// line per command the simulator executed, including commands whose reply is withheld.
+// line per command the simulator executed, including commands whose reply is withheld. Physical events are logged
+// the same way with an '@' instead of the command: "@index<axis>" when an axis crosses its home sensor and
+// "@arrived<axis>" when a GoTo of an axis reaches its target and the axis stops.
 static FILE *events;
 
 static double monotonic_seconds(void) {
@@ -305,7 +363,46 @@ static int32_t axis_home_index[2] = { 0, 0 };
 static double axis_ppec_training_started[2] = { 0, 0 };
 static bool axis_home_index_hit[2] = { false, false };
 
+// The :d reading of an axis: the step counter plus an offset, or with --encoder-counts the encoder ticks of the axis
+// turn from the step zero 0x800000 (rounded down) plus the same offset in ticks, around the same 0x800000.
+// The encoder ticks of the step counter of an axis alone, from the step zero 0x800000, rounded down.
+static int64_t encoder_ticks(int axis) {
+	int64_t ticks = (int64_t)(int32_t)(axis_position[axis] - 0x800000) * options.encoder_counts;
+	return ticks >= 0 ? ticks / STEPS_PER_REVOLUTION : -((-ticks + STEPS_PER_REVOLUTION - 1) / STEPS_PER_REVOLUTION);
+}
+
+static uint32_t encoder_reading(int axis) {
+	if (options.encoder_counts == 0) {
+		return axis_position[axis] + axis_aux_position_offset[axis];
+	}
+	return (uint32_t)(0x800000 + encoder_ticks(axis) + axis_aux_position_offset[axis]) & 0xFFFFFF;
+}
+
+// Enabling the dual encoder of an AZ-GTi re-bases its step counter from the encoder at once when the two disagree: the
+// counter becomes the encoder count times the steps per count, rounded towards zero (2073600 / 1068 per count, so -263
+// counts give -510633 steps), and the encoder keeps its reading. Disabling it leaves the counter as it is. Modelled
+// with --encoder-counts only; an encoder that counts in steps is left alone.
+static void rebase_from_encoder(int axis) {
+	if (options.encoder_counts == 0) {
+		return;
+	}
+	int64_t counts = (int64_t)((encoder_reading(axis) - 0x800000) & 0xFFFFFF);
+	if (counts >= 0x800000) {
+		counts -= 0x1000000;
+	}
+	if (counts == encoder_ticks(axis)) {
+		return;
+	}
+	int64_t product = counts * STEPS_PER_REVOLUTION;
+	int64_t steps = product >= 0 ? (product + options.encoder_counts - 1) / options.encoder_counts : -(-product / options.encoder_counts);
+	axis_position[axis] = (uint32_t)(0x800000 + steps) & 0xFFFFFF;
+	axis_aux_position_offset[axis] = 0;
+}
+
 static void initialize_state(void) {
+	axis_aux_position_offset[0] = (uint32_t)options.encoder_offsets[0];
+	axis_aux_position_offset[1] = (uint32_t)options.encoder_offsets[1];
+	axis_abs_position[0] = axis_abs_position[1] = (int32_t)(options.home_start_degrees / 360.0 * STEPS_PER_REVOLUTION);
 	if (options.pcdirect) {
 		axis_status[0] = INITIALIZED;
 		axis_status[1] = INITIALIZED;
@@ -373,9 +470,15 @@ static uint8_t parse_8(const char *buffer) {
 	return (HEX(buffer[0]) << 4) | HEX(buffer[1]);
 }
 
-// Fault injection for tests, "<ready-file>.fault": "<command prefix> <reply> <count>". The next <count> commands
-// starting with the prefix are answered with <reply>, e.g. "!0", and not executed, as a controller that refuses a
-// command does. The file is rewritten with the remaining count and removed when it is used up.
+// Fault injection for tests, "<ready-file>.fault": one "<command prefix> <reply> <count>" rule per line. A command
+// takes the first rule whose prefix it starts with, so the next <count> such commands are answered with <reply>, e.g.
+// "!0", and not executed, as a controller that refuses a command does; the reply "silent" sends nothing and does not
+// execute the command, as a request lost on its way to the mount. Two replies execute the command: "lost" withholds
+// its reply, as a reply datagram lost on its way back, and "late:<ms>" sends the reply <ms> milliseconds later (UDP),
+// as a reply delayed on the network; the replies after it wait for it. The file is rewritten with the remaining counts
+// and removed when it is used up.
+#define MAX_FAULT_RULES 8
+
 static char fault_path[PATH_MAX];
 static char fault_reply[16];
 
@@ -387,21 +490,43 @@ static const char *injected_fault(const char *command) {
 	if (file == NULL) {
 		return NULL;
 	}
-	char prefix[16] = "";
-	int count = 0;
-	int fields = fscanf(file, "%15s %15s %d", prefix, fault_reply, &count);
+	char prefixes[MAX_FAULT_RULES][16];
+	char replies[MAX_FAULT_RULES][16];
+	int counts[MAX_FAULT_RULES];
+	int rules = 0;
+	while (rules < MAX_FAULT_RULES && fscanf(file, "%15s %15s %d", prefixes[rules], replies[rules], &counts[rules]) == 3) {
+		if (counts[rules] > 0) {
+			rules++;
+		}
+	}
 	fclose(file);
-	if (fields != 3 || count <= 0 || strncmp(command, prefix, strlen(prefix))) {
+	int match = -1;
+	for (int i = 0; i < rules && match < 0; i++) {
+		if (!strncmp(command, prefixes[i], strlen(prefixes[i]))) {
+			match = i;
+		}
+	}
+	if (match < 0) {
 		return NULL;
 	}
-	if (--count == 0) {
+	snprintf(fault_reply, sizeof(fault_reply), "%s", replies[match]);
+	counts[match]--;
+	int remaining = 0;
+	for (int i = 0; i < rules; i++) {
+		remaining += counts[i] > 0;
+	}
+	if (remaining == 0) {
 		unlink(fault_path);
 	} else {
 		char temporary[PATH_MAX + 8];
 		snprintf(temporary, sizeof(temporary), "%s.sim", fault_path);
 		file = fopen(temporary, "w");
 		if (file != NULL) {
-			fprintf(file, "%s %s %d\n", prefix, fault_reply, count);
+			for (int i = 0; i < rules; i++) {
+				if (counts[i] > 0) {
+					fprintf(file, "%s %s %d\n", prefixes[i], replies[i], counts[i]);
+				}
+			}
 			fclose(file);
 			rename(temporary, fault_path);
 		}
@@ -409,11 +534,21 @@ static const char *injected_fault(const char *command) {
 	return fault_reply;
 }
 
+// How the reply to the command just processed is delivered: 0 at once, -1 never ("lost"), > 0 after that many ms
+static int reply_delay_ms = 0;
+
 static char *process_command(char *buffer) {
 	record_event(buffer);
+	reply_delay_ms = 0;
 	const char *fault = injected_fault(buffer);
 	if (fault != NULL) {
-		return (char *)fault;
+		if (!strcmp(fault, "lost")) {
+			reply_delay_ms = -1;
+		} else if (!strncmp(fault, "late:", 5)) {
+			reply_delay_ms = atoi(fault + 5) > 0 ? atoi(fault + 5) : 0;
+		} else {
+			return (char *)fault;
+		}
 	}
 	if (buffer[0] != ':') {
 		return "!3";
@@ -429,7 +564,7 @@ static char *process_command(char *buffer) {
 		case 'D':
 			return reply_24(100);
 		case 'd':
-			return reply_24(axis_position[axis] + axis_aux_position_offset[axis]);
+			return reply_24(encoder_reading(axis));
 		case 'E':
 			axis_position[axis] = parse_24(buffer + 3);
 			return "=";
@@ -549,8 +684,11 @@ static char *process_command(char *buffer) {
 					axis_features[axis] &= ~IN_PPEC;
 					return "=";
 				case ENCODER_ON_CMD:
+					rebase_from_encoder(axis);
 					return "=";
 				case ENCODER_OFF_CMD:
+					// the step counter and the encoder of the simulator never slip apart, so with the dual encoder off
+					// nothing re-bases the counter any more and the counter keeps its value
 					return "=";
 				case DISABLE_FULL_CURRENT_LOW_SPEED_CMD:
 					return "=";
@@ -619,6 +757,13 @@ static void process_home_index(uint8_t axis, int32_t steps) {
 		axis_home_index_hit[axis] = true;
 		axis_home_index[axis] = axis_position[axis] - axis_abs_position[axis];
 	}
+	if (axis_home_index_hit[axis]) {
+		char event[32];
+		snprintf(event, sizeof(event), "@index%d", axis + 1);
+		if ((axis_abs_position[axis] < 0) != (axis_abs_position[axis] + steps < 0)) {
+			record_event(event);
+		}
+	}
 	axis_abs_position[axis] += steps;
 }
 
@@ -658,6 +803,9 @@ static void process_axis_timer(uint8_t axis) {
 					axis_position[axis] += steps;
 				}
 			} else {
+				char event[32];
+				snprintf(event, sizeof(event), "@arrived%d", axis + 1);
+				record_event(event);
 				axis_status[axis] &= ~RUNNING;
 			}
 		}
@@ -725,22 +873,123 @@ static bool sim_write_udp_reply(int fd, const char *reply, struct sockaddr_in *c
 
 static void dispatch_command(int fd, char *command) {
 	char reply[16];
+	int delay_ms;
 
 	pthread_mutex_lock(&state_mutex);
 	snprintf(reply, sizeof(reply), "%s", process_command(command));
+	delay_ms = reply_delay_ms;
 	pthread_mutex_unlock(&state_mutex);
 
-	sim_write_reply(fd, reply);
+	if (strcmp(reply, "silent") && delay_ms >= 0) {
+		sim_write_reply(fd, reply);
+	}
+}
+
+// Replies leave in the order of their commands, as on the AZ-GTi, where no reply overtook an earlier one: a late reply
+// holds back the replies after it. Each reply gets a sequence number and is sent only after the one before it.
+typedef struct {
+	int fd;
+	unsigned sequence;
+	double release;
+	char reply[16];
+	struct sockaddr_in address;
+	socklen_t address_length;
+} delayed_udp_reply;
+
+static pthread_mutex_t udp_order_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t udp_order_cond = PTHREAD_COND_INITIALIZER;
+static unsigned udp_next_sequence, udp_sent_sequence;
+static double udp_last_release;
+
+static double udp_now(void) {
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return now.tv_sec + now.tv_nsec / 1e9;
+}
+
+static void *send_delayed_udp_reply(void *arg) {
+	delayed_udp_reply *pending = arg;
+	double wait = pending->release - udp_now();
+	if (wait > 0) {
+		usleep((useconds_t)(wait * 1e6));
+	}
+	pthread_mutex_lock(&udp_order_mutex);
+	while (udp_sent_sequence != pending->sequence) {
+		pthread_cond_wait(&udp_order_cond, &udp_order_mutex);
+	}
+	pthread_mutex_unlock(&udp_order_mutex);
+	if (running) {
+		sim_write_udp_reply(pending->fd, pending->reply, &pending->address, pending->address_length);
+	}
+	pthread_mutex_lock(&udp_order_mutex);
+	udp_sent_sequence++;
+	pthread_cond_broadcast(&udp_order_cond);
+	pthread_mutex_unlock(&udp_order_mutex);
+	free(pending);
+	return NULL;
 }
 
 static void dispatch_udp_command(int fd, char *command, struct sockaddr_in *client_address, socklen_t client_address_length) {
 	char reply[16];
+	int delay_ms;
 
 	pthread_mutex_lock(&state_mutex);
 	snprintf(reply, sizeof(reply), "%s", process_command(command));
+	delay_ms = reply_delay_ms;
 	pthread_mutex_unlock(&state_mutex);
 
-	sim_write_udp_reply(fd, reply, client_address, client_address_length);
+	if (!strcmp(reply, "silent")) {
+		return;
+	}
+	if (delay_ms < 0) {
+		serial_simulator_trace_line(options.trace, "<-", "(reply lost)");
+		return;
+	}
+	if (fd < 0) {
+		return;
+	}
+	double now = udp_now();
+	double release = now + delay_ms / 1000.0;
+	pthread_mutex_lock(&udp_order_mutex);
+	if (release < udp_last_release) {
+		release = udp_last_release;
+	}
+	if (udp_next_sequence == udp_sent_sequence && release <= now) {
+		// nothing is held back, the reply leaves at once
+		udp_next_sequence++;
+		udp_sent_sequence++;
+		udp_last_release = now;
+		pthread_mutex_unlock(&udp_order_mutex);
+		sim_write_udp_reply(fd, reply, client_address, client_address_length);
+		return;
+	}
+	delayed_udp_reply *pending = calloc(1, sizeof(delayed_udp_reply));
+	pthread_t thread;
+	if (pending == NULL) {
+		pthread_mutex_unlock(&udp_order_mutex);
+		return;
+	}
+	pending->fd = fd;
+	pending->sequence = udp_next_sequence++;
+	pending->release = release;
+	udp_last_release = release;
+	snprintf(pending->reply, sizeof(pending->reply), "%s", reply);
+	pending->address = *client_address;
+	pending->address_length = client_address_length;
+	pthread_mutex_unlock(&udp_order_mutex);
+	if (pthread_create(&thread, NULL, send_delayed_udp_reply, pending) == 0) {
+		pthread_detach(thread);
+	} else {
+		// the sequence must not stall: give the reply up and let the next one go
+		pthread_mutex_lock(&udp_order_mutex);
+		while (udp_sent_sequence != pending->sequence) {
+			pthread_cond_wait(&udp_order_cond, &udp_order_mutex);
+		}
+		udp_sent_sequence++;
+		pthread_cond_broadcast(&udp_order_cond);
+		pthread_mutex_unlock(&udp_order_mutex);
+		free(pending);
+	}
 }
 
 static bool open_udp_socket(char *port, size_t port_size) {

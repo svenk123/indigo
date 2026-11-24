@@ -1,8 +1,20 @@
+# Test rules
+
+- Derive expected behavior from acceptance criteria and public contracts, not implementation details.
+- Preserve regression coverage. Do not remove, skip, or weaken assertions to conceal failures.
+- Keep tests deterministic; control time, randomness, data, and cleanup where necessary.
+- Use synthetic fixtures. Never copy private production data or credentials.
+- Prefer the lowest test layer that catches the risk. Do not mock away the behavior under test.
+- Keep unit tests independent of external services. Make integration requirements and safe test environments explicit.
+- Record baseline failures and separate expected pre-fix failures of new tests.
+- Tests touching filesystem, network, databases, or accounts must use isolated test resources.
+- Write descriptions and test documentation in English.
+
 # Automated Test Guidelines
 
 ## Scope
 
-This directory contains the automated, hardware-free INDIGO test suite. Keep this guide focused on tests only. General repository coding rules, driver conventions, and build-system guidance live in the repository root `AGENTS.md`.
+This directory contains the automated, hardware-free INDIGO test suite and the separate opt-in shell compliance tools. Keep this guide focused on tests only. General repository coding rules, driver conventions, and build-system guidance live in the repository root `AGENTS.md`.
 
 For CCD, mount, wheel, focuser, rotator, guider, AO and GPS validation, follow the shared scope and class standards in [Driver Testing Rules](DRIVER_TESTING_RULES.md).
 
@@ -38,21 +50,29 @@ All source files and headers under `indigo_test/`, including new files, must use
 - `test_runner.h` provides the local dependency-free C test runner and assertion macros.
 - `unit/` contains fast deterministic tests for library helpers, property helpers, protocol adapters/parsers, tokens, RAW helpers, math helpers, and similar code.
 - `integration/` contains in-process bus and simulator-driver tests.
+- `shell_compliance/` contains Bash tools for a selected running server; these are outside routine automated targets and may require hardware.
 - `benchmark/` contains measurement tools that report timing rather than passing or failing.
+- `leak/` contains the opt-in memory leak check of the `indigo_server` executable with the simulator drivers under Valgrind.
 - `integration/simulator_test_common.h` contains shared simulator lifecycle helpers, the in-process client, property cache, wait helpers, and compliance-style assertions.
 - `fixtures/protocol/` contains fixed XML and JSON protocol parser fixtures.
-- Driver-local `REFACTOR.md` files summarize current driver coverage and deferred automated-test work.
 
 ## Running Tests
 
 Run `make all` from the repository root first if `build/lib/libindigo` or the required simulator driver archives are missing.
 
 - `make -C indigo_test test` runs all automated unit and integration tests.
-- `make -C indigo_test test-unit` runs unit tests only.
+- `make -C indigo_test test-unit` runs native unit tests only.
+- `make -C indigo_test test-driver-test-recording` runs isolated Python regressions for driver result recording; the full `test` target includes it.
 - `make -C indigo_test test-integration` runs bus and simulator-driver integration tests only.
+- `make -C indigo_test test-server-leaks` (opt-in, several minutes, needs Valgrind) runs `indigo_server` with the simulator drivers under Valgrind memcheck, exercises every device `LEAK_CYCLES` times and reports the leaks by allocating INDIGO function; it fails on definitely or indirectly lost memory. Compare one cycle with several to tell a leak per operation from a single one.
+- `make -C indigo_test test-agent-platesolver-simulator` (opt-in, about ten minutes) runs the Platesolver Agent with its native quad solver and the real Tycho-2 indexes against the CCD Imager Simulator (Rosetta frame) and 120 setups of the CCD Guider Simulator through the Imager and Guider agents. The 2° and 5° indexes come from the persistent cache `$INDIGO_CACHE_BASE/solver` (default `~/.indigo/solver`); a missing one is downloaded there by the agent once, never on every run. `INDIGO_SOLVER_SETUP` reproduces one guider setup by hand, see the test header. `tools/run_driver_test.py agent_platesolver` includes it.
+- `make -C indigo_test test-imager-download` runs the browser download regression with Node.js 18+ and its built-in test runner; it needs no native build. The full `test` target includes this check.
+- `make -C indigo_test test-indigo-js-formatting` runs the Node.js regression of the sexagesimal and HOST_TIME timestamp helpers in `indigo_server/resource/indigo.js`; the full `test` target includes it.
 - `make -C indigo_test benchmark` builds and runs the benchmarks. They are not part of `test`.
 - `make -C indigo_test test-clean` removes generated `indigo_test/build` binaries and dSYM files.
 - Setting `INDIGO_SIMULATOR_TRACE_DIR=<dir>` on a serial simulator test run copies every fixture's simulator command event log into that directory as `<test case>-<n>.events`. Use it to record a reference trace before a driver refactoring and to compare the ordered protocol interactions afterwards.
+
+For native solver algorithms, index requirements and validation references, see the [native INDIGO solver reference](../indigo_drivers/agent_platesolver/doc/PLATESOLVER.md).
 
 After validating changes that build tests, run `make -C indigo_test test-clean` unless the user asks to keep build artifacts.
 
@@ -92,7 +112,7 @@ Records from forked children land in the same file.
   `tools/run_driver_test.py` records one line per tagged device instead of one
   per run: the type is the model of the device from its `device` record (the
   device name without one), the counts are that device's own cases, and the line
-  is OK only when all of them passed. Devices of the same model share a line. A
+  is OK only when all of them passed and every test process exited successfully. Devices of the same model share a line. A
   run without tags is recorded exactly as before.
 - A hardware suite reads the port or URL of its device with `hw_port("<SUITE>_HW_PORT")`
   from the same header, never with `getenv()` alone. It falls back to `INDIGO_TEST_PORT`, which
@@ -123,6 +143,12 @@ such cases several at a time.
   when measuring timing or bisecting a flaky case.
 - Keep cases that bind a fixed loopback port serial by setting the runner's
   `jobs` field to 1 for that mode.
+- In an AddressSanitizer build with LeakSanitizer (GCC, Linux Clang; run with
+  `ASAN_OPTIONS=detect_leaks=1`) the child calls
+  `__lsan_do_recoverable_leak_check()` after the case returns, because `_exit()`
+  skips the at-exit check; a leak fails a case that would otherwise pass, with
+  the report in that case's captured output. Apple Clang has no leak detector,
+  so the check is a no-op there. Other builds are unaffected.
 - Add `integration/parallel_case_runner.h` to the prerequisites of every test
   rule that includes it, like any other shared test header.
 
@@ -228,7 +254,7 @@ implement.
   into the simulator or fake SDK**, together with a test that pins it down. This
   is not optional cleanup afterwards: a hardware run that finds a defect is
   finished only when the same defect can be reproduced hardware-free. Say in the
-  driver's `REFACTOR.md` which hardware observation each addition came from.
+  task's `verification.md` which hardware observation each addition came from.
 - Model the quirk, not the symptom. A camera that reports a cooler power level
   below the minimum it advertised, a setpoint no one ever wrote, a reply read
   from data an earlier transfer left in the pipe - reproduce the behaviour that
@@ -242,7 +268,7 @@ implement.
   on hardware over round ones: they are what the driver's arithmetic has to
   survive, and they document the model in the test.
 - When a defect cannot be reproduced hardware-free, say so explicitly in
-  `REFACTOR.md` with the reason, and do not count the scenario as covered.
+  the task's `verification.md` with the reason, and do not count the scenario as covered.
 - A simulator change that makes a case pass by being less like the hardware is a
   defect in the simulator. Fix the driver instead.
 
@@ -258,7 +284,7 @@ implement.
 - Build every harness being compared with identical compiler flags; mismatched flags have
   already produced a false finding once.
 - For driver-related benchmarks, record comparison results, environment, sample counts
-  and anything left open in the relevant driver's `REFACTOR.md`.
+  and anything left open in the task's `verification.md`.
 
 ## Test Naming
 
@@ -535,6 +561,8 @@ otherwise the cable has to be pulled by hand.
 
 ## Building the Real Astrometry.net Solver
 
+The native Platesolver Agent uses a separate in-process backend; see the [native INDIGO solver reference](../indigo_drivers/agent_platesolver/doc/PLATESOLVER.md) for its prerequisites and index setup.
+
 `test_agent_astrometry` runs against fake `solve-field` and `image2xy` scripts.
 Exercising the agent with the real solver needs the INDIGO build of
 astrometry.net: `solve-field`, `image2xy`, `new-wcs`, `astrometry-engine` and
@@ -594,8 +622,9 @@ following the rules below, only a run the script cannot perform.
 After every driver test run, record the outcome in that driver's `README.md`:
 
 - Add a `## Testing` section if the file does not have one yet.
-- Write one line per run to that section, in the form
-  `<timestamp> <version> <os> <architecture> <type> <result>`:
+- Write one markdown list item per run to that section, in the form
+  `- <timestamp> <version> <os> <architecture> <type> <result>`, so that every
+  run renders on its own line:
   - `<timestamp>` is the date and time of the run in `YYYY-MM-DD HH:MM` format.
   - `<version>` is the version of the tested driver, written the way INDIGO
     reports it, e.g. `3.0.0.17` for `DRIVER_VERSION` `0x03000011`, which a
@@ -622,8 +651,8 @@ the first one because it has the same operating system, architecture and type:
 ```markdown
 ## Testing
 
-2026-09-20 15:04 3.0.0.7 mac arm64 Optec FocusLynx 12/11 Failed
-2026-09-21 09:15 3.0.0.8 mac arm64 simulator 12/12 OK
+- 2026-09-20 15:04 3.0.0.7 mac arm64 Optec FocusLynx 12/11 Failed
+- 2026-09-21 09:15 3.0.0.8 mac arm64 simulator 12/12 OK
 ```
 
 After updating the `README.md`, run `tools/make_test_summary.py` from the
@@ -647,5 +676,5 @@ of the same test run.
 
 ## Documentation
 
-- Update the relevant driver's `REFACTOR.md` when adding meaningful new test coverage or deferring known work.
+- Record meaningful new test coverage and deferred known work in the task's `verification.md`.
 - Update `DRIVER_TESTING_RULES.md` when base driver property visibility, simulator compliance coverage, or driver-class test scenarios change.

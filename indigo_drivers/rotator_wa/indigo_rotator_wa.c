@@ -39,7 +39,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000006
+#define DRIVER_VERSION       0x0300000A
 #define DRIVER_NAME          "indigo_rotator_wa"
 #define DRIVER_LABEL         "WandererAstro rotator"
 #define ROTATOR_DEVICE_NAME  "WandererAstro rotator"
@@ -91,7 +91,9 @@ static bool wa_write(indigo_device *device, const char *format, ...) {
 }
 
 static bool wa_read(indigo_device *device) {
-	long count = indigo_uni_read_section2(PRIVATE_DATA->handle, PRIVATE_DATA->response, sizeof(PRIVATE_DATA->response) - 1, "\n", "\r", INDIGO_DELAY(1), INDIGO_DELAY(0.1));
+	// the box can pause inside a line (the completion feedback after a move), so a pause between bytes is waited out up
+	// to 5 s; the 3.0-7 driver read the rest of a started line without any timeout
+	long count = indigo_uni_read_section2(PRIVATE_DATA->handle, PRIVATE_DATA->response, sizeof(PRIVATE_DATA->response) - 1, "\n", "\r", INDIGO_DELAY(1), INDIGO_DELAY(5));
 	if (count <= 1 || count >= (long)sizeof(PRIVATE_DATA->response) - 1 || PRIVATE_DATA->response[count - 1] != '\n') {
 		return false;
 	}
@@ -157,12 +159,29 @@ static bool wa_parse(indigo_device *device, bool handshake) {
 	return true;
 }
 
+// a move interrupted by stop is still reported with its completion feedback (xx.xxAxxxxxxA), which the box sends
+// once it has stopped and so may come after the stale input was dropped; that line updates the position and the
+// status reply is the next one
 static bool wa_status(indigo_device *device) {
-	return indigo_uni_discard(PRIVATE_DATA->handle) >= 0 && wa_write(device, "1500001\n") && wa_read(device) && wa_parse(device, true);
+	if (indigo_uni_discard(PRIVATE_DATA->handle) < 0 || !wa_write(device, "1500001\n")) {
+		return false;
+	}
+	for (int i = 0; i < 3; i++) {
+		if (!wa_read(device)) {
+			return false;
+		}
+		if (!strncmp(PRIVATE_DATA->response, "Wanderer", strlen("Wanderer"))) {
+			return wa_parse(device, true);
+		}
+		if (!wa_parse(device, false)) {
+			return false;
+		}
+	}
+	return false;
 }
 
-static bool wa_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 19200, INDIGO_LOG_DEBUG);
+static bool wa_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 19200, INDIGO_LOG_DEBUG, error_message);
 	if (PRIVATE_DATA->handle != NULL) {
 		indigo_sleep(2);
 		if (wa_status(device)) {
@@ -223,11 +242,12 @@ static void motion_finalizer(indigo_device *device) {
 	}
 }
 
-static void wa_start_motion(indigo_device *device, double degrees) {
+// a GOTO is sent as steps + 1000000 (fast speed) and a relative move with plain steps, as the 3.0-7 driver did
+static void wa_start_motion(indigo_device *device, double degrees, bool fast) {
 	int steps = (int)round(degrees * PRIVATE_DATA->steps_degree);
 	if (steps == 0) {
 		wa_finish(device, true);
-	} else if (indigo_uni_discard(PRIVATE_DATA->handle) >= 0 && wa_write(device, "%d\n", steps)) {
+	} else if (indigo_uni_discard(PRIVATE_DATA->handle) >= 0 && wa_write(device, "%d\n", fast ? steps + 1000000 : steps)) {
 		PRIVATE_DATA->motion = true;
 		PRIVATE_DATA->motion_deadline = indigo_monotonic_time() + 30 + fabs(degrees) * 2;
 		ROTATOR_POSITION_PROPERTY->state = ROTATOR_RELATIVE_MOVE_PROPERTY->state = INDIGO_BUSY_STATE;
@@ -246,7 +266,8 @@ static void wa_start_motion(indigo_device *device, double degrees) {
 static void rotator_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = wa_open(device);
+		const char *error_message = NULL;
+		connection_result = wa_open(device, &error_message);
 		if (connection_result) {
 			//+ rotator.on_connect
 			PRIVATE_DATA->motion = false;
@@ -268,7 +289,11 @@ static void rotator_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", ROTATOR_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", ROTATOR_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", ROTATOR_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", ROTATOR_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -334,7 +359,7 @@ static void rotator_position_handler(indigo_device *device) {
 		} else if (move > 0 && base + move > PRIVATE_DATA->pivot_position + 180) {
 			move -= 360;
 		}
-		wa_start_motion(device, move); // motion_finalizer completes the operation
+		wa_start_motion(device, move, true); // motion_finalizer completes the operation
 	} else {
 		wa_finish(device, false);
 	}
@@ -343,7 +368,7 @@ static void rotator_position_handler(indigo_device *device) {
 
 static void rotator_relative_move_handler(indigo_device *device) {
 	//+ rotator.ROTATOR_RELATIVE_MOVE.on_change
-	wa_start_motion(device, ROTATOR_RELATIVE_MOVE_ITEM->number.target); /* motion_finalizer */
+	wa_start_motion(device, ROTATOR_RELATIVE_MOVE_ITEM->number.target, false); /* motion_finalizer */
 	//- rotator.ROTATOR_RELATIVE_MOVE.on_change
 }
 
@@ -356,11 +381,16 @@ static void rotator_abort_motion_handler(indigo_device *device) {
 		indigo_cancel_pending_handler(device, rotator_position_handler);
 		indigo_cancel_pending_handler(device, rotator_relative_move_handler);
 		indigo_cancel_pending_handler(device, motion_finalizer);
-		bool success = wa_write(device, "stop\n") && wa_status(device);
-		wa_finish(device, false);
-		if (!success) {
+		// the box does not answer stop, so only a failed write fails the abort; the position read after it is best
+		// effort and a failure keeps the last known position
+		if (wa_write(device, "stop\n")) {
+			if (!wa_status(device)) {
+				INDIGO_DRIVER_ERROR(DRIVER_NAME, "Failed to read the position after stop");
+			}
+		} else {
 			ROTATOR_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
 		}
+		wa_finish(device, false);
 	}
 	indigo_update_property(device, ROTATOR_ABORT_MOTION_PROPERTY, NULL);
 	//- rotator.ROTATOR_ABORT_MOTION.on_change

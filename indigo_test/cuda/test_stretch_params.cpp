@@ -94,7 +94,7 @@ struct result {
 	int channels;
 };
 
-static bool same(const char *name, int width, int height, const result &expected, const result &actual, float B, float C) {
+static bool same(const char *name, int width, int height, const result &expected, const result &actual, double B, double C) {
 	checks++;
 	for (int i = 0; i < expected.channels; i++) {
 		bool ok = memcmp(&expected.shadows[i], &actual.shadows[i], sizeof(double)) == 0 && memcmp(&expected.midtones[i], &actual.midtones[i], sizeof(double)) == 0 && memcmp(&expected.highlights[i], &actual.highlights[i], sizeof(double)) == 0 && memcmp(expected.histogram[i], actual.histogram[i], sizeof(expected.histogram[i])) == 0 && expected.totals[i] == actual.totals[i];
@@ -122,7 +122,7 @@ static void bayer_planes(int pattern, int *column, int *row) {
 	}
 }
 
-template <typename T> static void run_bayer(const char *name, const T *data, int width, int height, int pattern, float B, float C, void (*lib)(const T *, int, int, int, double *, double *, double *, unsigned long **, unsigned long *, float, float)) {
+template <typename T> static void run_bayer(const char *name, const T *data, int width, int height, int pattern, double B, double C, void (*lib)(const T *, int, int, int, double *, double *, double *, unsigned long **, unsigned long *, double, double)) {
 	const int sample_by = width < 0x1FF ? 1 : width / 0x1FF;
 	const int columns_by = sample_by * 2, rows_by = 2;
 	result expected, actual;
@@ -152,7 +152,7 @@ template <typename T> static void run_bayer(const char *name, const T *data, int
 }
 
 // interleaved RGB: 24 (8 bit) / 48 (16 bit)
-template <typename T> static void run_rgb(const char *name, const T *data, int width, int height, float B, float C, void (*lib)(const T *, int, int, int, double *, double *, double *, unsigned long **, unsigned long *, float, float)) {
+template <typename T> static void run_rgb(const char *name, const T *data, int width, int height, double B, double C, void (*lib)(const T *, int, int, int, double *, double *, double *, unsigned long **, unsigned long *, double, double)) {
 	const int sample_by = width < 0x1FF ? 1 : width / 0x1FF;
 	result expected, actual;
 	memset(&expected, 0, sizeof(expected));
@@ -171,7 +171,7 @@ template <typename T> static void run_rgb(const char *name, const T *data, int w
 }
 
 // mono: indigo_compute_stretch_params_8 / _16 (no totals)
-template <typename T> static void run_mono(const char *name, const T *data, int width, int height, float B, float C, void (*lib)(const T *, int, int, int, double *, double *, double *, unsigned long **, float, float)) {
+template <typename T> static void run_mono(const char *name, const T *data, int width, int height, double B, double C, void (*lib)(const T *, int, int, int, double *, double *, double *, unsigned long **, double, double)) {
 	const int sample_by = width < 0x1FF ? 1 : width / 0x1FF;
 	result expected, actual;
 	memset(&expected, 0, sizeof(expected));
@@ -211,7 +211,7 @@ static void run_all(const char *label, const uint16_t *frame16, const uint8_t *f
 	memcpy(data8, frame8, size);
 	const float params[2][2] = { { 0.25f, -2.8f }, { 0.1f, -1.5f } };
 	for (int p = 0; p < 2; p++) {
-		float B = params[p][0], C = params[p][1];
+		double B = params[p][0], C = params[p][1];
 		char name[128];
 		snprintf(name, sizeof(name), "%s 16 rggb", label); run_bayer<uint16_t>(name, data16, width, height, 0, B, C, indigo_compute_stretch_params_16_rggb);
 		snprintf(name, sizeof(name), "%s 16 gbrg", label); run_bayer<uint16_t>(name, data16, width, height, 1, B, C, indigo_compute_stretch_params_16_gbrg);

@@ -18,8 +18,6 @@
 
 // This file generated from indigo_aux_wcv4ec.driver
 
-// TODO: Test with real hardware or simulator!!!
-
 #pragma mark - Includes
 
 #include <stdlib.h>
@@ -34,7 +32,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x0300000B
+#define DRIVER_VERSION       0x03000012
 #define DRIVER_NAME          "indigo_aux_wcv4ec"
 #define DRIVER_LABEL         "WandererCover V4-EC Cover"
 #define AUX_DEVICE_NAME      "WandererCover V4-EC"
@@ -96,6 +94,7 @@ typedef struct {
 	//+ data
 	time_t operation_start_time;
 	bool operation_running;
+	indigo_item *operation_target;
 	char model_id[1550];
 	char firmware[20];
 	double close_position;
@@ -194,8 +193,8 @@ static bool wcv4ec_command(indigo_device *device, int command) {
 	return false;
 }
 
-static bool wcv4ec_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 19200, INDIGO_LOG_DEBUG);
+static bool wcv4ec_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 19200, INDIGO_LOG_DEBUG, error_message);
 	if (PRIVATE_DATA->handle != NULL) {
 		indigo_sleep(1);
 		if (wcv4ec_read_status(device)) {
@@ -215,6 +214,15 @@ static bool wcv4ec_open(indigo_device *device) {
 static void wcv4ec_show_cover(indigo_device *device) {
 	AUX_COVER_CLOSE_ITEM->sw.value = fabs(PRIVATE_DATA->close_position - PRIVATE_DATA->current_position) < 6;
 	AUX_COVER_OPEN_ITEM->sw.value = !AUX_COVER_CLOSE_ITEM->sw.value && fabs(PRIVATE_DATA->open_position - PRIVATE_DATA->current_position) < 6;
+}
+
+// the box applies a brightness some time after the command, so a request ends a second later; 0 turns the light off
+static bool wcv4ec_set_light(indigo_device *device, int brightness) {
+	if (wcv4ec_command(device, brightness > 0 ? brightness : 9999)) {
+		indigo_sleep(1);
+		return true;
+	}
+	return false;
 }
 
 static void wcv4ec_close(indigo_device *device) {
@@ -238,7 +246,11 @@ static void aux_timer_callback(indigo_device *device) {
 		// a cover request copied after AUX_DETECT_OPEN_CLOSE is BUSY before its handler starts the move and sets
 		// operation_start_time; its value and state belong to that handler, so only the detection is finished here
 		bool cover_pending = AUX_COVER_PROPERTY->state == INDIGO_BUSY_STATE && PRIVATE_DATA->operation_start_time == 0;
-		if (fabs(PRIVATE_DATA->close_position - PRIVATE_DATA->current_position) < 6 && PRIVATE_DATA->operation_running) {
+		// a move ends only at the side it was asked for: until the servo starts, the box keeps reporting the side
+		// it is leaving; a detection (no target) ends at whichever side the cover is on
+		bool at_close = fabs(PRIVATE_DATA->close_position - PRIVATE_DATA->current_position) < 6 && PRIVATE_DATA->operation_target != AUX_COVER_OPEN_ITEM;
+		bool at_open = fabs(PRIVATE_DATA->open_position - PRIVATE_DATA->current_position) < 6 && PRIVATE_DATA->operation_target != AUX_COVER_CLOSE_ITEM;
+		if (at_close && PRIVATE_DATA->operation_running) {
 			INDIGO_DRIVER_DEBUG(DRIVER_NAME,"Close");
 			if (!cover_pending) {
 				AUX_COVER_CLOSE_ITEM->sw.value = true;
@@ -248,7 +260,7 @@ static void aux_timer_callback(indigo_device *device) {
 			}
 			PRIVATE_DATA->operation_running = false;
 			PRIVATE_DATA->operation_start_time = 0;
-		} else if (fabs(PRIVATE_DATA->open_position - PRIVATE_DATA->current_position) < 6 && PRIVATE_DATA->operation_running) {
+		} else if (at_open && PRIVATE_DATA->operation_running) {
 			INDIGO_DRIVER_DEBUG(DRIVER_NAME,"Open");
 			if (!cover_pending) {
 				AUX_COVER_CLOSE_ITEM->sw.value = false;
@@ -306,7 +318,17 @@ static void aux_timer_callback(indigo_device *device) {
 static void aux_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = wcv4ec_open(device);
+		const char *error_message = NULL;
+		connection_result = wcv4ec_open(device, &error_message);
+		if (connection_result) {
+			//+ aux.on_connect
+			// the cover switch starts at the side the first status frame shows, none when the cover is in between; a move
+			// a disconnect interrupted is no longer followed, so it must not refuse the next request
+			PRIVATE_DATA->operation_running = false;
+			PRIVATE_DATA->operation_start_time = 0;
+			wcv4ec_show_cover(device);
+			//- aux.on_connect
+		}
 		if (connection_result) {
 			indigo_define_property(device, AUX_LIGHT_SWITCH_PROPERTY, NULL);
 			indigo_define_property(device, AUX_LIGHT_INTENSITY_PROPERTY, NULL);
@@ -317,7 +339,11 @@ static void aux_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -360,7 +386,7 @@ static void aux_connection_handler(indigo_device *device) {
 static void aux_light_switch_handler(indigo_device *device) {
 	AUX_LIGHT_SWITCH_PROPERTY->state = INDIGO_OK_STATE;
 	//+ aux.AUX_LIGHT_SWITCH.on_change
-	if (!wcv4ec_command(device, AUX_LIGHT_SWITCH_ON_ITEM->sw.value ? (int)(AUX_LIGHT_INTENSITY_ITEM->number.value) : 9999)) {
+	if (!wcv4ec_set_light(device, AUX_LIGHT_SWITCH_ON_ITEM->sw.value ? (int)(AUX_LIGHT_INTENSITY_ITEM->number.value) : 0)) {
 		AUX_LIGHT_SWITCH_PROPERTY->state = INDIGO_ALERT_STATE;
 	}
 	//- aux.AUX_LIGHT_SWITCH.on_change
@@ -371,7 +397,7 @@ static void aux_light_intensity_handler(indigo_device *device) {
 	AUX_LIGHT_INTENSITY_PROPERTY->state = INDIGO_OK_STATE;
 	//+ aux.AUX_LIGHT_INTENSITY.on_change
 	if (AUX_LIGHT_SWITCH_ON_ITEM->sw.value) {
-		if (!wcv4ec_command(device, (int)(AUX_LIGHT_INTENSITY_ITEM->number.value))) {
+		if (!wcv4ec_set_light(device, (int)(AUX_LIGHT_INTENSITY_ITEM->number.value))) {
 			AUX_LIGHT_INTENSITY_PROPERTY->state = INDIGO_ALERT_STATE;
 		}
 		indigo_set_switch(AUX_LIGHT_SWITCH_PROPERTY, AUX_LIGHT_SWITCH_ON_ITEM, true);
@@ -399,14 +425,18 @@ static void aux_detect_open_close_handler(indigo_device *device) {
 		}
 		if (success) {
 			PRIVATE_DATA->operation_running = true; // let the status callback set correct open/close when we are done
+			PRIVATE_DATA->operation_target = NULL;
 			char status_line[128] = { 0 };
-			// the box sends a status frame every second, so a reply lost on the wire is given up after ten lines or 5 s of silence
+			// the detection can take a while, with status frames or silence before the reply; 3.0-7 waited for it without
+			// a limit, here a reply lost on the wire is given up after 120 s
 			bool confirmed = false;
-			for (int i = 0; i < 10 && !confirmed; i++) {
-				if (indigo_uni_read_section2(PRIVATE_DATA->handle, status_line, sizeof(status_line) - 1, "\n", "\r\n", INDIGO_DELAY(5), INDIGO_DELAY(1)) <= 0) {
+			double deadline = indigo_monotonic_time() + 120;
+			while (!confirmed && indigo_monotonic_time() < deadline) {
+				long res = indigo_uni_read_section2(PRIVATE_DATA->handle, status_line, sizeof(status_line) - 1, "\n", "\r\n", INDIGO_DELAY(5), INDIGO_DELAY(1));
+				if (res < 0) {
 					break;
 				}
-				confirmed = !strncmp(status_line, "OpenSet", strlen("OpenSet")) || !strncmp(status_line, "CloseSet", strlen("CloseSet"));
+				confirmed = res > 0 && (!strncmp(status_line, "OpenSet", strlen("OpenSet")) || !strncmp(status_line, "CloseSet", strlen("CloseSet")));
 			}
 			if (!confirmed) {
 				AUX_DETECT_OPEN_CLOSE_PROPERTY->state = INDIGO_ALERT_STATE;
@@ -476,10 +506,12 @@ static void aux_cover_handler(indigo_device *device) {
 		INDIGO_UPDATE_PROPERTY_STATE(AUX_COVER_PROPERTY, INDIGO_ALERT_STATE, "Operation in progress");
 		return;
 	}
-	if (wcv4ec_command(device, indigo_get_switch_target(AUX_COVER_PROPERTY, AUX_COVER_OPEN_ITEM_NAME) ? 1001 : 1000)) {
+	bool open = indigo_get_switch_target(AUX_COVER_PROPERTY, AUX_COVER_OPEN_ITEM_NAME);
+	if (wcv4ec_command(device, open ? 1001 : 1000)) {
 		indigo_apply_switch_targets(AUX_COVER_PROPERTY);
 		PRIVATE_DATA->operation_start_time = time(NULL);
 		PRIVATE_DATA->operation_running = true;
+		PRIVATE_DATA->operation_target = open ? AUX_COVER_OPEN_ITEM : AUX_COVER_CLOSE_ITEM;
 		AUX_COVER_PROPERTY->state = INDIGO_BUSY_STATE;
 		indigo_sleep(1);
 	} else {

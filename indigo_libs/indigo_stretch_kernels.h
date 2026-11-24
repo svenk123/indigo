@@ -38,6 +38,24 @@
 // red, gree, blue - debayered pixel as an mean value of 1 to 4 pixels
 
 template <typename T> static INDIGO_HD inline void indigo_debayer_pixel(const T *raw, int index, int row, int column, int width, int height, int offsets, float &red, float &green, float &blue) {
+	if (width == 1 || height == 1) {
+		float sums[3] = { 0, 0, 0 };
+		int counts[3] = { 0, 0, 0 };
+		const int first_row = row > 0 ? row - 1 : 0, last_row = row < height - 1 ? row + 1 : height - 1;
+		const int first_column = column > 0 ? column - 1 : 0, last_column = column < width - 1 ? column + 1 : width - 1;
+		for (int y = first_row; y <= last_row; y++) {
+			for (int x = first_column; x <= last_column; x++) {
+				const int color = offsets ^ ((x & 1) << 4 | (y & 1));
+				const int channel = color == 0 ? 0 : color == 0x11 ? 2 : 1;
+				sums[channel] += raw[y * width + x];
+				counts[channel]++;
+			}
+		}
+		red = counts[0] ? sums[0] / counts[0] : raw[index];
+		green = counts[1] ? sums[1] / counts[1] : raw[index];
+		blue = counts[2] ? sums[2] / counts[2] : raw[index];
+		return;
+	}
 	switch (offsets ^ ((column & 1) << 4 | (row & 1))) {
 		case 0x00:
 			red = raw[index];
@@ -55,10 +73,10 @@ template <typename T> static INDIGO_HD inline void indigo_debayer_pixel(const T 
 			} else if (column == width - 1) {
 				if (row == 0) {
 					green = (raw[index - 1] + raw[index + width]) / 2.0f;
-					blue = (raw[index + width - 1] + raw[index + width + 1]) / 2.0f;
+					blue = raw[index + width - 1];
 				} else if (row == height - 1) {
 					green = (raw[index - 1] + raw[index - width]) / 2.0f;
-					blue = (raw[index - width - 1] + raw[index - width + 1]) / 2.0f;
+					blue = raw[index - width - 1];
 				} else {
 					green = (raw[index - 1] + raw[index + width] + raw[index - width]) / 3.0f;
 					blue = (raw[index - width - 1] + raw[index + width - 1]) / 2.0f;
@@ -119,7 +137,7 @@ template <typename T> static INDIGO_HD inline void indigo_debayer_pixel(const T 
 					red = raw[index - width + 1];
 					green = (raw[index + 1] + raw[index - width]) / 2.0f;
 				} else {
-					red = raw[index - width + 1];
+					red = (raw[index - width + 1] + raw[index + width + 1]) / 2.0f;
 					green = (raw[index + 1] + raw[index + width] + raw[index - width]) / 3.0f;
 				}
 			} else if (column == width - 1) {
@@ -152,17 +170,20 @@ template <typename T> static INDIGO_HD inline void indigo_debayer_pixel(const T 
 
 // value - pixel value
 // native_shadows, native_highlights - shadows and highlights thresholds in input range
-// k1_k2 = k1 * k2
-// midtones_k2 = midtones / k2
+// k1, k2 - rational transfer coefficients without division by the midpoint term
 
-static INDIGO_HD inline uint8_t indigo_stretch_value(float value, int native_shadows, int native_highlights, float k1_k2, float midtones_k2) {
-	if (value < native_shadows) {
+static INDIGO_HD inline uint8_t indigo_stretch_value(float value, int native_shadows, int native_highlights, float k1, float k2, float midtones) {
+	if (value <= native_shadows) {
 		return 0;
-	} else if (value > native_highlights) {
+	} else if (value >= native_highlights) {
 		return 0xFF;
+	} else if (midtones == 0) {
+		return 0xFF;
+	} else if (midtones == 1) {
+		return 0;
 	} else {
 		const float input_floored = (value - native_shadows);
-		return k1_k2 * input_floored / (input_floored - midtones_k2);
+		return (uint8_t)(k1 * input_floored / (k2 * input_floored - midtones));
 	}
 }
 
@@ -170,18 +191,17 @@ static INDIGO_HD inline uint8_t indigo_stretch_value(float value, int native_sha
 
 typedef struct {
 	int native_shadows, native_highlights;
-	float k1_k2, midtones_k2;
+	float k1, k2, midtones;
 } indigo_stretch_channel;
 
 static inline indigo_stretch_channel indigo_make_stretch_channel(double shadows, double midtones, double highlights, double max_input) {
 	indigo_stretch_channel channel;
 	const float hs_range_factor = highlights == shadows ? 1.0f : 1.0f / (highlights - shadows);
-	channel.native_shadows = shadows * max_input;
-	channel.native_highlights = highlights * max_input;
-	const float k1 = (midtones - 1) * hs_range_factor * 0xFF / max_input;
-	const float k2 = ((2 * midtones) - 1) * hs_range_factor / max_input;
-	channel.k1_k2 = k1 / k2;
-	channel.midtones_k2 = midtones / k2;
+	channel.native_shadows = (int)(shadows * max_input);
+	channel.native_highlights = (int)(highlights * max_input);
+	channel.k1 = (midtones - 1) * hs_range_factor * 0xFF / max_input;
+	channel.k2 = ((2 * midtones) - 1) * hs_range_factor / max_input;
+	channel.midtones = midtones;
 	return channel;
 }
 

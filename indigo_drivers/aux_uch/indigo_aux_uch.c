@@ -32,7 +32,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000008
+#define DRIVER_VERSION       0x03000009
 #define DRIVER_NAME          "indigo_aux_uch"
 #define DRIVER_LABEL         "PegasusAstro USB Control Hub"
 #define AUX_DEVICE_NAME      "USB Control Hub"
@@ -110,8 +110,8 @@ static bool uch_command(indigo_device *device, char *command, ...) {
 	return result > 0;
 }
 
-static bool uch_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG);
+static bool uch_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial2(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG, error_message);
 	if (PRIVATE_DATA->handle != NULL) {
 		if (uch_command(device, "P#")) {
 			if (!strcmp(PRIVATE_DATA->response, "UCH_OK")) {
@@ -197,7 +197,8 @@ static void aux_timer_callback(indigo_device *device) {
 static void aux_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = uch_open(device);
+		const char *error_message = NULL;
+		connection_result = uch_open(device, &error_message);
 		if (connection_result) {
 			//+ aux.on_connect
 			if (uch_command(device, "PA") && !strncmp(PRIVATE_DATA->response, "UCH", 3)) {
@@ -224,7 +225,11 @@ static void aux_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}

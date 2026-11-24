@@ -21,9 +21,13 @@
 #include <indigo_drivers/mount_temma/indigo_mount_temma.h>
 
 #include <float.h>
+#include <pthread.h>
 #include <unistd.h>
 
+#include <indigo/indigo_align.h>
+
 #include "serial_simulator_test_common.h"
+#include "mount_coordinates_test_common.h"
 
 #ifndef MOUNT_TEMMA_SIMULATOR_EXECUTABLE
 #define MOUNT_TEMMA_SIMULATOR_EXECUTABLE "build/integration/mount_temma_simulator"
@@ -265,11 +269,26 @@ static bool set_master_port(const char *port) {
 }
 
 static void assert_mount_property_contract(void) {
-	static const char *properties[] = { MOUNT_INFO_PROPERTY_NAME, GEOGRAPHIC_COORDINATES_PROPERTY_NAME, MOUNT_LST_TIME_PROPERTY_NAME, MOUNT_PARK_PROPERTY_NAME, MOUNT_PARK_SET_PROPERTY_NAME, MOUNT_PARK_POSITION_PROPERTY_NAME, MOUNT_SLEW_RATE_PROPERTY_NAME, MOUNT_MOTION_DEC_PROPERTY_NAME, MOUNT_MOTION_RA_PROPERTY_NAME, MOUNT_TRACK_RATE_PROPERTY_NAME, MOUNT_TRACKING_PROPERTY_NAME, MOUNT_GUIDE_RATE_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_HORIZONTAL_COORDINATES_PROPERTY_NAME, MOUNT_ABORT_MOTION_PROPERTY_NAME, MOUNT_EPOCH_PROPERTY_NAME, MOUNT_SIDE_OF_PIER_PROPERTY_NAME, X_TEMMA_CORRECTION_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_ZENITH_PROPERTY_NAME };
+	static const char *properties[] = { MOUNT_INFO_PROPERTY_NAME, GEOGRAPHIC_COORDINATES_PROPERTY_NAME, MOUNT_LST_TIME_PROPERTY_NAME, MOUNT_PARK_PROPERTY_NAME, MOUNT_PARK_SET_PROPERTY_NAME, MOUNT_PARK_POSITION_PROPERTY_NAME, MOUNT_SLEW_RATE_PROPERTY_NAME, MOUNT_MOTION_DEC_PROPERTY_NAME, MOUNT_MOTION_RA_PROPERTY_NAME, MOUNT_TRACK_RATE_PROPERTY_NAME, MOUNT_TRACKING_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_HORIZONTAL_COORDINATES_PROPERTY_NAME, MOUNT_ABORT_MOTION_PROPERTY_NAME, MOUNT_EPOCH_PROPERTY_NAME, MOUNT_SIDE_OF_PIER_PROPERTY_NAME, X_TEMMA_CORRECTION_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_ZENITH_PROPERTY_NAME };
 	assert_defined_properties(properties, ARRAY_SIZE(properties));
 	assert_not_defined_property("TEMMA_CORRECTION_SPEED");
+	assert_not_defined_property(MOUNT_GUIDE_RATE_PROPERTY_NAME);
 	assert_not_defined_property("TEMMA_HIGH_SPEED");
 	assert_not_defined_property("TEMMA_ZENITH");
+	// The negative contract: Temma has neither home, nor clock, nor PEC commands, LL and LK are its only
+	// tracking rates, the SLEW item of the coordinate action is not offered and the park switch is momentary.
+	static const char *absent[] = { MOUNT_HOME_PROPERTY_NAME, MOUNT_HOME_SET_PROPERTY_NAME, MOUNT_HOME_POSITION_PROPERTY_NAME, UTC_TIME_PROPERTY_NAME, MOUNT_SET_HOST_TIME_PROPERTY_NAME, MOUNT_CUSTOM_TRACKING_RATE_PROPERTY_NAME, MOUNT_PEC_PROPERTY_NAME, MOUNT_PEC_TRAINING_PROPERTY_NAME, MOUNT_STATE_PROPERTY_NAME };
+	assert_not_defined_properties(absent, ARRAY_SIZE(absent));
+	indigo_property *track_rate = find_cached_property(MOUNT_TRACK_RATE_PROPERTY_NAME);
+	ASSERT_TRUE(track_rate != NULL && track_rate->count == 2);
+	assert_property_has_item(MOUNT_TRACK_RATE_PROPERTY_NAME, MOUNT_TRACK_RATE_SIDEREAL_ITEM_NAME);
+	assert_property_has_item(MOUNT_TRACK_RATE_PROPERTY_NAME, MOUNT_TRACK_RATE_SOLAR_ITEM_NAME);
+	ASSERT_TRUE(find_cached_item(MOUNT_TRACK_RATE_PROPERTY_NAME, MOUNT_TRACK_RATE_LUNAR_ITEM_NAME) == NULL);
+	indigo_property *on_set = find_cached_property(MOUNT_ON_COORDINATES_SET_PROPERTY_NAME);
+	ASSERT_TRUE(on_set != NULL && on_set->count == 2);
+	ASSERT_TRUE(find_cached_item(MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_SLEW_ITEM_NAME) == NULL);
+	indigo_property *park = find_cached_property(MOUNT_PARK_PROPERTY_NAME);
+	ASSERT_TRUE(park != NULL && park->count == 1);
 	assert_property_has_item(MOUNT_INFO_PROPERTY_NAME, MOUNT_INFO_VENDOR_ITEM_NAME);
 	assert_property_has_item(MOUNT_INFO_PROPERTY_NAME, MOUNT_INFO_MODEL_ITEM_NAME);
 	assert_property_has_item(MOUNT_INFO_PROPERTY_NAME, MOUNT_INFO_FIRMWARE_ITEM_NAME);
@@ -287,8 +306,6 @@ static void assert_mount_property_contract(void) {
 	assert_property_has_item(MOUNT_MOTION_RA_PROPERTY_NAME, MOUNT_MOTION_WEST_ITEM_NAME);
 	assert_property_has_item(MOUNT_MOTION_DEC_PROPERTY_NAME, MOUNT_MOTION_NORTH_ITEM_NAME);
 	assert_property_has_item(MOUNT_MOTION_DEC_PROPERTY_NAME, MOUNT_MOTION_SOUTH_ITEM_NAME);
-	assert_property_has_item(MOUNT_GUIDE_RATE_PROPERTY_NAME, MOUNT_GUIDE_RATE_RA_ITEM_NAME);
-	assert_property_has_item(MOUNT_GUIDE_RATE_PROPERTY_NAME, MOUNT_GUIDE_RATE_DEC_ITEM_NAME);
 	assert_property_has_item(MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME);
 	assert_property_has_item(MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_SYNC_ITEM_NAME);
 	assert_property_has_item(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME);
@@ -305,8 +322,6 @@ static void assert_mount_property_contract(void) {
 	assert_property_has_item(X_TEMMA_ZENITH_PROPERTY_NAME, X_TEMMA_ZENITH_WEST_ITEM_NAME);
 	assert_number_item_in_range(GEOGRAPHIC_COORDINATES_PROPERTY_NAME, GEOGRAPHIC_COORDINATES_LATITUDE_ITEM_NAME);
 	assert_number_item_in_range(GEOGRAPHIC_COORDINATES_PROPERTY_NAME, GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM_NAME);
-	assert_number_item_in_range(MOUNT_GUIDE_RATE_PROPERTY_NAME, MOUNT_GUIDE_RATE_RA_ITEM_NAME);
-	assert_number_item_in_range(MOUNT_GUIDE_RATE_PROPERTY_NAME, MOUNT_GUIDE_RATE_DEC_ITEM_NAME);
 	assert_number_item_in_range(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME);
 	assert_number_item_in_range(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME);
 }
@@ -379,7 +394,6 @@ static void temma_mount_controls_emit_exact_commands(void) {
 	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_TRACK_RATE_PROPERTY_NAME, MOUNT_TRACK_RATE_SIDEREAL_ITEM_NAME, true, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(trace_contains_after(trace_path, "LL", mark));
 	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_SLEW_RATE_PROPERTY_NAME, MOUNT_SLEW_RATE_MAX_ITEM_NAME, true, INDIGO_OK_STATE));
-	SERIAL_CHECK_TRUE(change_number_and_wait(&temma_mount, MOUNT_GUIDE_RATE_PROPERTY_NAME, MOUNT_GUIDE_RATE_RA_ITEM_NAME, 55, INDIGO_OK_STATE));
 cleanup:
 	if (driver_started) {
 		stop_serial_driver(&temma_mount);
@@ -686,9 +700,10 @@ cleanup:
 	}
 }
 
-// Changes the side flag of the simulated mount the way the hand controller does, through the
-// simulator's control file, and waits until the simulator has consumed the request.
-static bool set_simulator_side(external_serial_simulator *simulator, char side) {
+// Sends one line to the simulator's control file and waits until the simulator has consumed it:
+// "side E" or "side W" changes the side flag the way the hand controller does, "fault <cmd> <reply>"
+// and "drop <cmd>" arm a one-shot reply override for the next matching command.
+static bool simulator_control(external_serial_simulator *simulator, const char *line) {
 	char path[PATH_MAX], temporary[PATH_MAX];
 	if (!simulator_fixture_path(path, sizeof(path), "%s.control", simulator->ready_file, NULL) || !simulator_fixture_path(temporary, sizeof(temporary), "%s.inject", simulator->ready_file, NULL)) {
 		return false;
@@ -697,7 +712,7 @@ static bool set_simulator_side(external_serial_simulator *simulator, char side) 
 	if (file == NULL) {
 		return false;
 	}
-	fprintf(file, "side %c\n", side);
+	fprintf(file, "%s\n", line);
 	fclose(file);
 	if (rename(temporary, path) != 0) {
 		return false;
@@ -706,6 +721,275 @@ static bool set_simulator_side(external_serial_simulator *simulator, char side) 
 		indigo_usleep(10000);
 	}
 	return access(path, F_OK) != 0;
+}
+
+static bool set_simulator_side(external_serial_simulator *simulator, char side) {
+	char line[16];
+	snprintf(line, sizeof(line), "side %c", side);
+	return simulator_control(simulator, line);
+}
+
+// Counts the commands after the mark that match the pattern, a trailing '*' matching any rest.
+static int trace_count_matching(const char *path, const char *pattern, int after) {
+	temma_trace_event events[MAX_TRACE_EVENTS];
+	int count = load_trace(path, events, ARRAY_SIZE(events));
+	int matches = 0;
+	for (int i = after; i < count; i++) {
+		if (event_matches_pattern(events + i, pattern)) {
+			matches++;
+		}
+	}
+	return matches;
+}
+
+// Waits until at least count commands matching the pattern arrived after the mark.
+static bool trace_wait_count(const char *path, const char *pattern, int after, int count) {
+	for (int attempt = 0; attempt < 100; attempt++) {
+		if (trace_count_matching(path, pattern, after) >= count) {
+			return true;
+		}
+		indigo_usleep(20000);
+	}
+	return false;
+}
+
+// The last of the standby commands after the mark, or "" when none was sent.
+static const char *trace_last_standby(const char *path, int after) {
+	temma_trace_event events[MAX_TRACE_EVENTS];
+	int count = load_trace(path, events, ARRAY_SIZE(events));
+	const char *last = "";
+	for (int i = after; i < count; i++) {
+		if (event_matches(events + i, "STN-ON")) {
+			last = "STN-ON";
+		} else if (event_matches(events + i, "STN-OFF")) {
+			last = "STN-OFF";
+		}
+	}
+	return last;
+}
+
+// The right ascension of a D or P command, HHMMcc in hundredths of a minute.
+static double command_ra(const char *command) {
+	int hours = 0, minutes = 0, hundredths = 0;
+	if (strlen(command) != 13 || sscanf(command + 1, "%02d%02d%02d", &hours, &minutes, &hundredths) != 3) {
+		return NAN;
+	}
+	return hours + minutes / 60.0 + hundredths / 6000.0;
+}
+
+static double hours_apart(double a, double b) {
+	return fabs(remainder(a - b, 24.0));
+}
+
+// T carries the local sidereal time as HHMMSS: it has to be the sidereal time at the longitude.
+static bool lst_command_matches(const char *command, double longitude) {
+	int hours = 0, minutes = 0, seconds = 0;
+	if (strlen(command) != 7 || command[0] != 'T' || sscanf(command + 1, "%02d%02d%02d", &hours, &minutes, &seconds) != 3) {
+		fprintf(stderr, "    '%s' is not a sidereal time command\n", command);
+		return false;
+	}
+	double expected = indigo_lst(NULL, longitude);
+	double sent = hours + minutes / 60.0 + seconds / 3600.0;
+	if (hours_apart(sent, expected) > 5.0 / 3600.0) {
+		fprintf(stderr, "    %s is not the sidereal time %.5f h at longitude %.2f\n", command, expected, longitude);
+		return false;
+	}
+	return true;
+}
+
+static const char *cached_text_value(const char *property_name, const char *item_name) {
+	indigo_item *item = find_cached_item(property_name, item_name);
+	return item == NULL ? "" : indigo_get_text_item_value(item);
+}
+
+// The mount device seen by the client, for queue gates, the first publication of a watched property in
+// a watched state, and the last message the driver sent.
+static _Atomic(indigo_device *) mount_device;
+static char watched_name[INDIGO_NAME_SIZE];
+static atomic_int watched_state;
+static atomic_bool watch_armed, watch_seen;
+static double watched_ra, watched_dec;
+static atomic_int tracking_ok_publications;
+static pthread_mutex_t message_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char last_message[INDIGO_VALUE_SIZE];
+
+static void remember_message(const char *message) {
+	if (message != NULL && *message) {
+		pthread_mutex_lock(&message_mutex);
+		snprintf(last_message, sizeof(last_message), "%s", message);
+		pthread_mutex_unlock(&message_mutex);
+	}
+}
+
+static bool last_message_contains(const char *text) {
+	for (int i = 0; i < 50; i++) {
+		pthread_mutex_lock(&message_mutex);
+		bool found = strstr(last_message, text) != NULL;
+		pthread_mutex_unlock(&message_mutex);
+		if (found) {
+			return true;
+		}
+		indigo_usleep(20000);
+	}
+	fprintf(stderr, "    no message containing '%s', the last one was '%s'\n", text, last_message);
+	return false;
+}
+
+static indigo_result capture_define_property(indigo_client *client, indigo_device *device, indigo_property *property, const char *message) {
+	if (!strcmp(property->device, temma_mount.device_name)) {
+		atomic_store(&mount_device, device);
+	}
+	return simulator_client_define_property(client, device, property, message);
+}
+
+static indigo_result capture_update_property(indigo_client *client, indigo_device *device, indigo_property *property, const char *message) {
+	if (!strcmp(property->device, temma_mount.device_name)) {
+		if (property->state == INDIGO_OK_STATE && !strcmp(property->name, MOUNT_TRACKING_PROPERTY_NAME)) {
+			atomic_fetch_add(&tracking_ok_publications, 1);
+		}
+		remember_message(message);
+		if (atomic_load(&watch_armed) && !strcmp(property->name, watched_name) && (int)property->state == atomic_load(&watched_state)) {
+			for (int i = 0; i < property->count; i++) {
+				if (!strcmp(property->items[i].name, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME)) {
+					watched_ra = property->items[i].number.value;
+				} else if (!strcmp(property->items[i].name, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME)) {
+					watched_dec = property->items[i].number.value;
+				}
+			}
+			atomic_store(&watch_armed, false);
+			atomic_store(&watch_seen, true);
+		}
+	}
+	return simulator_client_update_property(client, device, property, message);
+}
+
+static indigo_result capture_send_message(indigo_client *client, indigo_device *device, indigo_property *property, const char *message) {
+	// the shared harness counts BUSY refusal messages
+	simulator_client_send_message(client, device, property, message);
+	if (device != NULL && !strcmp(device->name, temma_mount.device_name)) {
+		remember_message(message);
+	}
+	return INDIGO_OK;
+}
+
+static void install_capture(void) {
+	atomic_store(&mount_device, NULL);
+	atomic_store(&watch_armed, false);
+	atomic_store(&watch_seen, false);
+	last_message[0] = 0;
+	simulator_test_client.define_property = capture_define_property;
+	simulator_test_client.update_property = capture_update_property;
+	simulator_test_client.send_message = capture_send_message;
+}
+
+static void remove_capture(void) {
+	atomic_store(&watch_armed, false);
+	simulator_test_client.define_property = simulator_client_define_property;
+	simulator_test_client.update_property = simulator_client_update_property;
+	simulator_test_client.send_message = simulator_client_send_message;
+}
+
+static void watch_publication(const char *property_name, indigo_property_state state) {
+	snprintf(watched_name, sizeof(watched_name), "%s", property_name);
+	atomic_store(&watched_state, (int)state);
+	atomic_store(&watch_seen, false);
+	atomic_store(&watch_armed, true);
+}
+
+static bool wait_for_watched_publication(void) {
+	for (int i = 0; i < 100 && !atomic_load(&watch_seen); i++) {
+		indigo_usleep(50000);
+	}
+	if (!atomic_load(&watch_seen)) {
+		fprintf(stderr, "    %s was not published in state %d\n", watched_name, atomic_load(&watched_state));
+		return false;
+	}
+	return true;
+}
+
+// The coordinates the watched ALERT publication carried are the position the mount reported before.
+static bool watched_position_is(double ra, double dec) {
+	if (fabs(watched_ra - ra) > 0.01 || fabs(watched_dec - dec) > 0.01) {
+		fprintf(stderr, "    the refusal published %.4f %.4f instead of the position %.4f %.4f\n", watched_ra, watched_dec, ra, dec);
+		return false;
+	}
+	return true;
+}
+
+// A gate handler holds the device queue, so a request sent meanwhile waits behind it for its handler.
+static atomic_bool gate_entered, gate_release;
+
+static void gate_handler(indigo_device *device) {
+	(void)device;
+	atomic_store(&gate_entered, true);
+	for (int i = 0; i < 1000 && !atomic_load(&gate_release); i++) {
+		indigo_usleep(10000);
+	}
+}
+
+static bool hold_queue(void) {
+	indigo_device *device = atomic_load(&mount_device);
+	if (device == NULL) {
+		fprintf(stderr, "    no device seen, the queue cannot be held\n");
+		return false;
+	}
+	atomic_store(&gate_entered, false);
+	atomic_store(&gate_release, false);
+	indigo_execute_handler(device, gate_handler);
+	for (int i = 0; i < 500 && !atomic_load(&gate_entered); i++) {
+		indigo_usleep(10000);
+	}
+	return atomic_load(&gate_entered);
+}
+
+static void release_queue(void) {
+	atomic_store(&gate_release, true);
+}
+
+// Every handler queued before it has run once a fence passes the device queue.
+static atomic_int fence_passes;
+
+static void fence_handler(indigo_device *device) {
+	(void)device;
+	atomic_fetch_add(&fence_passes, 1);
+}
+
+static bool fence_queue(void) {
+	indigo_device *device = atomic_load(&mount_device);
+	if (device == NULL) {
+		fprintf(stderr, "    no device seen, the queue cannot be fenced\n");
+		return false;
+	}
+	int before = atomic_load(&fence_passes);
+	indigo_execute_handler(device, fence_handler);
+	for (int i = 0; i < 1500 && atomic_load(&fence_passes) == before; i++) {
+		indigo_usleep(10000);
+	}
+	return atomic_load(&fence_passes) > before;
+}
+
+static bool cached_coordinates_near(double ra, double dec) {
+	return fabs(cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME) - ra) < 0.01 && fabs(cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME) - dec) < 0.01;
+}
+
+// Two fresh E polls after the mark: the cached coordinates are what the mount reports now.
+static bool fresh_position_is(const char *trace_path, double ra, double dec) {
+	int mark = trace_count(trace_path);
+	if (!trace_wait_count(trace_path, "E", mark, 2)) {
+		fprintf(stderr, "    the position was not polled\n");
+		return false;
+	}
+	indigo_usleep(100000);
+	if (!cached_coordinates_near(ra, dec)) {
+		fprintf(stderr, "    the position is %.4f %.4f instead of %.4f %.4f\n", cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME), cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME), ra, dec);
+		return false;
+	}
+	return true;
+}
+
+static bool motion_axis_idle(const char *property_name, const char *first_item, const char *second_item) {
+	indigo_property *property = find_cached_property(property_name);
+	return property != NULL && property->state != INDIGO_BUSY_STATE && !cached_switch_value(property_name, first_item) && !cached_switch_value(property_name, second_item);
 }
 
 // Several 0.5 s polls read the same side: none of them may publish MOUNT_SIDE_OF_PIER, while the
@@ -804,16 +1088,38 @@ cleanup:
 static void temma_malformed_position_reply_recovers(void) {
 	external_serial_simulator simulator = { 0 };
 	bool driver_started = false;
+	install_capture();
+	// The first E is the one the connection reads: a malformed initial readback does not fail the connection.
 	const char *args[] = { "--fault-reply", "E", "malformed", NULL };
 	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
 	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
 	driver_started = true;
 	SERIAL_CHECK_TRUE(wait_for_number_item_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME, 6, 0.01));
 	SERIAL_CHECK_TRUE(wait_for_number_item_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME, 45, 0.01));
+	SERIAL_CHECK_TRUE(wait_for_property_state(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE));
+	double ra = cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME);
+	double dec = cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME);
+	// A malformed poll reply publishes ALERT with the last valid position, and the next good poll restores OK.
+	unsigned int revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	watch_publication(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "fault E malformed"));
+	SERIAL_CHECK_TRUE(wait_for_watched_publication());
+	SERIAL_CHECK_TRUE(watched_position_is(ra, dec));
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	// A status reply lost while a GOTO runs does not leave it BUSY.
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(8, 22, INDIGO_BUSY_STATE));
+	revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "drop s"));
+	SERIAL_CHECK_TRUE(wait_for_property_not_busy_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, revision));
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(9, 23, INDIGO_BUSY_STATE));
+	revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
 cleanup:
 	if (driver_started) {
 		stop_serial_driver(&temma_mount);
 	}
+	remove_capture();
 	stop_external_serial_simulator(&simulator);
 }
 
@@ -831,7 +1137,15 @@ static void temma_guider_directions_replacement_axes_and_zero(void) {
 	assert_property_has_item(GUIDER_GUIDE_DEC_PROPERTY_NAME, GUIDER_GUIDE_SOUTH_ITEM_NAME);
 	assert_property_has_item(GUIDER_GUIDE_RA_PROPERTY_NAME, GUIDER_GUIDE_EAST_ITEM_NAME);
 	assert_property_has_item(GUIDER_GUIDE_RA_PROPERTY_NAME, GUIDER_GUIDE_WEST_ITEM_NAME);
+	// A guider-only session does not poll the mount.
 	int mark = trace_count(trace_path);
+	indigo_usleep(1200000);
+	SERIAL_CHECK_EQ_INT(0, trace_count_matching(trace_path, "E", mark));
+	SERIAL_CHECK_EQ_INT(0, trace_count_matching(trace_path, "s", mark));
+	// SHUTDOWN is refused while the guider is connected, and the connection survives it.
+	SERIAL_CHECK_EQ_INT(INDIGO_BUSY, indigo_mount_temma(INDIGO_DRIVER_SHUTDOWN, NULL));
+	SERIAL_CHECK_TRUE(context.connected);
+	mark = trace_count(trace_path);
 	SERIAL_CHECK_TRUE(pulse_and_wait(GUIDER_GUIDE_RA_PROPERTY_NAME, GUIDER_GUIDE_EAST_ITEM_NAME, 100));
 	SERIAL_CHECK_TRUE(trace_motion_after(trace_path, 0x40 | TEMMA_MOTION_RA_EAST, mark));
 	mark = trace_count(trace_path);
@@ -1259,12 +1573,895 @@ cleanup:
 	stop_external_serial_simulator(&simulator);
 }
 
+// Connection: a device whose version reply is not a version line is refused before anything else is
+// sent and leaves no mount property defined; AUTO recovers in the same session. The handshake order is
+// pinned, MOUNT_INFO carries what v reported, and the state the controller holds - standby, correction
+// speeds - is published instead of driver defaults. v sets a TemmaPC to 24 V, so the connection sends v1
+// and the high-speed switch says so even when the previous session selected HIGH. A one-item change of
+// the correction speeds resends the other one, and an lg reply without information keeps the value.
+static void temma_connect_identity_and_controller_state(void) {
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	char trace_path[PATH_MAX] = "";
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, "--fault-reply", "v", "x1", "--standby", "--correction", "30", "70", NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(bring_up_serial_driver(&temma_mount));
+	driver_started = true;
+	enumerate_simulator_device();
+	SERIAL_CHECK_TRUE(!connect_serial_device(&temma_mount, simulator.port));
+	SERIAL_CHECK_TRUE(context.last_connection_state == INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(trace_contains_after(trace_path, "v", 0));
+	SERIAL_CHECK_EQ_INT(1, trace_count(trace_path));
+	static const char *connected_only[] = { MOUNT_INFO_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_TRACKING_PROPERTY_NAME, X_TEMMA_CORRECTION_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_ZENITH_PROPERTY_NAME };
+	for (int i = 0; i < ARRAY_SIZE(connected_only); i++) {
+		SERIAL_CHECK_TRUE(find_cached_property(connected_only[i]) == NULL);
+	}
+	int mark = trace_count(trace_path);
+	SERIAL_CHECK_TRUE(connect_serial_device(&temma_mount, simulator.port));
+	static const char *connect_commands[] = { "v", "v1", "T*", "I*", "E", "lg", "STN-COD" };
+	SERIAL_CHECK_TRUE(trace_sequence_after(trace_path, mark, connect_commands, ARRAY_SIZE(connect_commands), NULL, 0));
+	SERIAL_CHECK_TRUE(!strcmp(cached_text_value(MOUNT_INFO_PROPERTY_NAME, MOUNT_INFO_VENDOR_ITEM_NAME), "Takahashi"));
+	SERIAL_CHECK_TRUE(!strcmp(cached_text_value(MOUNT_INFO_PROPERTY_NAME, MOUNT_INFO_MODEL_ITEM_NAME), "Temma-Sim"));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_OFF_ITEM_NAME));
+	SERIAL_CHECK_TRUE(!cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME));
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(X_TEMMA_CORRECTION_SPEED_PROPERTY_NAME, X_TEMMA_CORRECTION_SPEED_RA_ITEM_NAME) - 30) < 0.5);
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(X_TEMMA_CORRECTION_SPEED_PROPERTY_NAME, X_TEMMA_CORRECTION_SPEED_DEC_ITEM_NAME) - 70) < 0.5);
+	SERIAL_CHECK_TRUE(cached_switch_value(X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_LOW_ITEM_NAME));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_HIGH_ITEM_NAME, true, INDIGO_OK_STATE));
+	mark = trace_count(trace_path);
+	SERIAL_CHECK_TRUE(change_number_and_wait(&temma_mount, X_TEMMA_CORRECTION_SPEED_PROPERTY_NAME, X_TEMMA_CORRECTION_SPEED_RA_ITEM_NAME, 45, INDIGO_OK_STATE));
+	static const char *correction_commands[] = { "LA45", "LB70" };
+	SERIAL_CHECK_TRUE(trace_sequence_after(trace_path, mark, correction_commands, ARRAY_SIZE(correction_commands), NULL, 0));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME, true, INDIGO_OK_STATE));
+	disconnect_serial_device(&temma_mount);
+	mark = trace_count(trace_path);
+	SERIAL_CHECK_TRUE(connect_serial_device(&temma_mount, simulator.port));
+	SERIAL_CHECK_TRUE(trace_sequence_after(trace_path, mark, connect_commands, ARRAY_SIZE(connect_commands), NULL, 0));
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(X_TEMMA_CORRECTION_SPEED_PROPERTY_NAME, X_TEMMA_CORRECTION_SPEED_RA_ITEM_NAME) - 45) < 0.5);
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(X_TEMMA_CORRECTION_SPEED_PROPERTY_NAME, X_TEMMA_CORRECTION_SPEED_DEC_ITEM_NAME) - 70) < 0.5);
+	SERIAL_CHECK_TRUE(cached_switch_value(X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_LOW_ITEM_NAME));
+	SERIAL_CHECK_TRUE(!cached_switch_value(X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_HIGH_ITEM_NAME));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME));
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "fault lg lg"));
+	disconnect_serial_device(&temma_mount);
+	SERIAL_CHECK_TRUE(connect_serial_device(&temma_mount, simulator.port));
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(X_TEMMA_CORRECTION_SPEED_PROPERTY_NAME, X_TEMMA_CORRECTION_SPEED_RA_ITEM_NAME) - 45) < 0.5);
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(X_TEMMA_CORRECTION_SPEED_PROPERTY_NAME, X_TEMMA_CORRECTION_SPEED_DEC_ITEM_NAME) - 70) < 0.5);
+	SERIAL_CHECK_EQ_INT(0, updates_without_define());
+cleanup:
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+// A refused or unanswered step of the GOTO sequence ends the request ALERT, sends nothing after it,
+// publishes the position the mount really holds and passes the controller's reason to the client; the
+// next GOTO is accepted. A GOTO that is BUSY ignores a second request, SYNC is not retried, and a park
+// the mount refuses ends ALERT without parking or stopping the tracking.
+static void temma_goto_refusals_keep_position_and_report_reason(void) {
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	char trace_path[PATH_MAX] = "";
+	install_capture();
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
+	driver_started = true;
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_property_state(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE));
+	double ra = cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME);
+	double dec = cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME);
+	// P refused with R2, the declination error.
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "fault P* R2"));
+	watch_publication(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, change_mount_coordinates(10, 20));
+	SERIAL_CHECK_TRUE(wait_for_watched_publication());
+	SERIAL_CHECK_TRUE(watched_position_is(ra, dec));
+	SERIAL_CHECK_TRUE(last_message_contains("Dec error"));
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(10, 20, INDIGO_BUSY_STATE));
+	unsigned int revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	SERIAL_CHECK_TRUE(wait_for_number_item_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME, 20, 0.01));
+	ra = cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME);
+	dec = cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME);
+	// STN-OFF unanswered: neither T nor P follows.
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "drop STN-OFF"));
+	int mark = trace_count(trace_path);
+	watch_publication(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, change_mount_coordinates(11, 25));
+	SERIAL_CHECK_TRUE(wait_for_watched_publication());
+	SERIAL_CHECK_TRUE(watched_position_is(ra, dec));
+	SERIAL_CHECK_TRUE(trace_contains_after(trace_path, "STN-OFF", mark));
+	SERIAL_CHECK_EQ_INT(0, trace_count_matching(trace_path, "T*", mark));
+	SERIAL_CHECK_EQ_INT(0, trace_count_matching(trace_path, "P*", mark));
+	// P unanswered.
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "drop P*"));
+	watch_publication(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, change_mount_coordinates(11, 25));
+	SERIAL_CHECK_TRUE(wait_for_watched_publication());
+	SERIAL_CHECK_TRUE(watched_position_is(ra, dec));
+	SERIAL_CHECK_TRUE(fresh_position_is(trace_path, ra, dec));
+	// A second request while the GOTO is BUSY is ignored: one P, and the GOTO ends at the first target.
+	mark = trace_count(trace_path);
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(12, 30, INDIGO_BUSY_STATE));
+	revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, change_mount_coordinates(13, 31));
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	SERIAL_CHECK_EQ_INT(1, trace_count_matching(trace_path, "P*", mark));
+	SERIAL_CHECK_TRUE(fresh_position_is(trace_path, 12, 30));
+	// An unanswered SYNC is not retried and never turns into a slew.
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_SYNC_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "drop D*"));
+	mark = trace_count(trace_path);
+	revision = property_state_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, change_mount_coordinates(14, 32));
+	SERIAL_CHECK_TRUE(wait_for_property_state_seen_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE, revision));
+	indigo_usleep(600000);
+	SERIAL_CHECK_EQ_INT(1, trace_count_matching(trace_path, "D*", mark));
+	SERIAL_CHECK_EQ_INT(0, trace_count_matching(trace_path, "P*", mark));
+	SERIAL_CHECK_TRUE(fresh_position_is(trace_path, 12, 30));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME, true, INDIGO_OK_STATE));
+	// A park the mount refuses: ALERT, not parked, the motors keep tracking.
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME));
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "fault P* R2"));
+	mark = trace_count(trace_path);
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_PARK_PROPERTY_NAME, MOUNT_PARK_PARKED_ITEM_NAME, true, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(!cached_switch_value(MOUNT_PARK_PROPERTY_NAME, MOUNT_PARK_PARKED_ITEM_NAME));
+	SERIAL_CHECK_EQ_INT(1, trace_count_matching(trace_path, "P*", mark));
+	SERIAL_CHECK_EQ_INT(0, trace_count_matching(trace_path, "STN-ON", mark));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME));
+	SERIAL_CHECK_TRUE(fresh_position_is(trace_path, 12, 30));
+cleanup:
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	remove_capture();
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+// The simulated slew jumps to its target 0.75 s after P, so an abort before then has to keep the mount
+// at the start: PS is sent once, the GOTO ends ALERT, and two fresh polls after the would-be arrival
+// still read the start. An abort while idle leaves the position and the tracking alone.
+static void temma_abort_mid_slew_stops_short_and_idle_abort_keeps_state(void) {
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	char trace_path[PATH_MAX] = "";
+	install_capture();
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
+	driver_started = true;
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_SYNC_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(3, 10, INDIGO_BUSY_STATE));
+	unsigned int revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME, true, INDIGO_OK_STATE));
+	int mark = trace_count(trace_path);
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(20, 60, INDIGO_BUSY_STATE));
+	static const char *goto_command[] = { "P*" };
+	SERIAL_CHECK_TRUE(trace_sequence_after(trace_path, mark, goto_command, 1, NULL, 0));
+	revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	// The abort ends the GoTo ALERT and the polls keep that ALERT (indigo_update_coordinates() keeps an ALERT that ended
+	// BUSY until the next request). The publication of the abort itself carries the start, the request is only the target.
+	watch_publication(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ABORT_MOTION_PROPERTY_NAME, MOUNT_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(!cached_switch_value(MOUNT_ABORT_MOTION_PROPERTY_NAME, MOUNT_ABORT_MOTION_ITEM_NAME));
+	SERIAL_CHECK_TRUE(wait_for_property_state_seen_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE, revision));
+	SERIAL_CHECK_TRUE(wait_for_watched_publication());
+	SERIAL_CHECK_TRUE(watched_position_is(3, 10));
+	indigo_usleep(1000000);
+	SERIAL_CHECK_EQ_INT(1, trace_count_matching(trace_path, "PS", mark));
+	SERIAL_CHECK_TRUE(fresh_position_is(trace_path, 3, 10));
+	// The first publication of the polls after the abort carries the start, never the target, even when it repeats the
+	// previous values.
+	simulator_test_client.force_property_updates = true;
+	watch_publication(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(fresh_position_is(trace_path, 3, 10));
+	SERIAL_CHECK_TRUE(wait_for_watched_publication());
+	SERIAL_CHECK_TRUE(watched_position_is(3, 10));
+	simulator_test_client.force_property_updates = false;
+	SERIAL_CHECK_EQ_INT(INDIGO_ALERT_STATE, find_cached_property(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME)->state);
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME) - 3) < 0.01);
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME) - 10) < 0.01);
+	// Abort while idle.
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME));
+	mark = trace_count(trace_path);
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ABORT_MOTION_PROPERTY_NAME, MOUNT_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(fresh_position_is(trace_path, 3, 10));
+	SERIAL_CHECK_EQ_INT(0, trace_count_matching(trace_path, "STN-ON", mark));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME));
+	SERIAL_CHECK_TRUE(motion_axis_idle(MOUNT_MOTION_RA_PROPERTY_NAME, MOUNT_MOTION_EAST_ITEM_NAME, MOUNT_MOTION_WEST_ITEM_NAME));
+	SERIAL_CHECK_TRUE(motion_axis_idle(MOUNT_MOTION_DEC_PROPERTY_NAME, MOUNT_MOTION_NORTH_ITEM_NAME, MOUNT_MOTION_SOUTH_ITEM_NAME));
+cleanup:
+	simulator_test_client.force_property_updates = false;
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	remove_capture();
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+// Waits for `count` more position polls.
+static bool wait_for_position_polls(const char *trace_path, int count) {
+	return trace_wait_count(trace_path, "E", trace_count(trace_path), count);
+}
+
+// The coordinate values are the position the mount reports and the request lives in the targets: a GOTO publishes BUSY
+// with the position before it and the horizontal coordinates of that position, keeps publishing the start while the
+// held slew has not moved the mount (the simulated slew jumps to its target, so there is no position on the way), and
+// the target with OK; a SYNC publishes BUSY with the old position, then the synced one; an abort publishes the position
+// the mount holds, never the target; a GOTO the mount refuses keeps the real position.
+static void temma_coordinates_publish_the_mount_position(void) {
+	static coordinates_publication events[COORDINATES_PUBLICATIONS_SIZE];
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	char trace_path[PATH_MAX] = "";
+	double ra0 = 0, dec0 = 0, alt0 = 0, az0 = 0;
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
+	driver_started = true;
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_SYNC_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(3, 10, INDIGO_BUSY_STATE));
+	unsigned int revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(fresh_position_is(trace_path, 3, 10));
+	// GOTO, held at the start for a few polls
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "stall"));
+	cached_coordinates(&ra0, &dec0, &alt0, &az0);
+	start_coordinates_publications(temma_mount.device_name);
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(20, 60, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(wait_for_position_polls(trace_path, 3));
+	int count = copy_coordinates_publications(events);
+	int busy = check_request_publication("GOTO", events, count, 0, ra0, dec0, alt0, az0, 20, 60, 0.01);
+	SERIAL_CHECK_TRUE(busy >= 0);
+	SERIAL_CHECK_TRUE(check_position_kept("held GOTO", events, count, busy, ra0, dec0, 0.01));
+	revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "resume"));
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	SERIAL_CHECK_TRUE(wait_for_position_polls(trace_path, 2));
+	count = stop_coordinates_publications(events);
+	int result = find_coordinates_publication(events, count, busy + 1, 'E', INDIGO_OK_STATE);
+	SERIAL_CHECK_TRUE(result > busy);
+	SERIAL_CHECK_TRUE(coordinates_near(events[result].value[0], events[result].value[1], 20, 60, 0.01));
+	SERIAL_CHECK_TRUE(coordinates_near(events[count - 1].value[0], events[count - 1].value[1], 20, 60, 0.01));
+	// SYNC
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_SYNC_ITEM_NAME, true, INDIGO_OK_STATE));
+	cached_coordinates(&ra0, &dec0, &alt0, &az0);
+	start_coordinates_publications(temma_mount.device_name);
+	revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, change_mount_coordinates(20.2, 61));
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	SERIAL_CHECK_TRUE(wait_for_position_polls(trace_path, 2));
+	count = stop_coordinates_publications(events);
+	busy = check_request_publication("SYNC", events, count, 0, ra0, dec0, alt0, az0, 20.2, 61, 0.01);
+	SERIAL_CHECK_TRUE(busy >= 0);
+	SERIAL_CHECK_TRUE(check_sync_result("SYNC", events, count, busy, find_coordinates_publication(events, count, busy + 1, 'E', INDIGO_OK_STATE), 20.2, 61, 0.01));
+	SERIAL_CHECK_EQ_INT(INDIGO_OK_STATE, events[count - 1].state);
+	SERIAL_CHECK_TRUE(coordinates_near(events[count - 1].value[0], events[count - 1].value[1], 20.2, 61, 0.01));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME, true, INDIGO_OK_STATE));
+	// abort of a held GOTO
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "stall"));
+	cached_coordinates(&ra0, &dec0, &alt0, &az0);
+	start_coordinates_publications(temma_mount.device_name);
+	int mark = trace_count(trace_path);
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(3, 10, INDIGO_BUSY_STATE));
+	static const char *goto_command[] = { "P*" };
+	SERIAL_CHECK_TRUE(trace_sequence_after(trace_path, mark, goto_command, 1, NULL, 0));
+	revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ABORT_MOTION_PROPERTY_NAME, MOUNT_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_property_state_seen_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE, revision));
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "resume"));
+	SERIAL_CHECK_TRUE(wait_for_position_polls(trace_path, 2));
+	count = stop_coordinates_publications(events);
+	busy = check_request_publication("aborted GOTO", events, count, 0, ra0, dec0, alt0, az0, 3, 10, 0.01);
+	SERIAL_CHECK_TRUE(busy >= 0);
+	int aborted = find_coordinates_publication(events, count, busy + 1, 'E', INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(aborted > busy);
+	SERIAL_CHECK_TRUE(check_reported_position("abort", events, count, busy, aborted, 3, 10, 0.01));
+	SERIAL_CHECK_TRUE(check_position_kept("aborted GOTO", events, count, busy, ra0, dec0, 0.01));
+	// a GOTO the mount refuses with R2, the declination error
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "fault P* R2"));
+	cached_coordinates(&ra0, &dec0, &alt0, &az0);
+	start_coordinates_publications(temma_mount.device_name);
+	revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, change_mount_coordinates(10, 20));
+	SERIAL_CHECK_TRUE(wait_for_property_state_seen_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE, revision));
+	SERIAL_CHECK_TRUE(wait_for_position_polls(trace_path, 2));
+	count = stop_coordinates_publications(events);
+	busy = check_request_publication("refused GOTO", events, count, 0, ra0, dec0, alt0, az0, 10, 20, 0.01);
+	SERIAL_CHECK_TRUE(busy >= 0);
+	SERIAL_CHECK_TRUE(check_position_kept("refused GOTO", events, count, busy, ra0, dec0, 0.01));
+cleanup:
+	stop_coordinates_publications(NULL);
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+// Every coordinates publication from the first ALERT after the BUSY on is ALERT, the polls included.
+static bool check_alert_kept(const char *label, const coordinates_publication *events, int count, int busy) {
+	int alert = find_coordinates_publication(events, count, busy + 1, 'E', INDIGO_ALERT_STATE);
+	int polls = 0;
+	bool ok = alert > busy;
+	for (int i = alert + 1; ok && i < count; i++) {
+		if (events[i].kind == 'E') {
+			ok = events[i].state == INDIGO_ALERT_STATE;
+			polls++;
+		}
+	}
+	if (!ok || polls < 2) {
+		fprintf(stderr, "    %s: expected an ALERT after the BUSY publication %d kept by at least two later publications (%d)\n", label, busy, polls);
+		print_coordinates_publications(label, events, count);
+		return false;
+	}
+	return true;
+}
+
+// The Mount Agent compares the values of the OK publication of a sync with its request, so that publication carries
+// the position the mount reports after D: the request finer than the mount's units is published as the mount rounded
+// it, the same values the polls read afterwards, and the request stays the target. A sync the mount refuses or leaves
+// unanswered ends ALERT with the position before it and the polls keep that ALERT until the next request, which
+// starts BUSY again and ends OK.
+static void temma_sync_result_and_refusals(void) {
+	static coordinates_publication events[COORDINATES_PUBLICATIONS_SIZE];
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	char trace_path[PATH_MAX] = "";
+	double ra0 = 0, dec0 = 0, alt0 = 0, az0 = 0;
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
+	driver_started = true;
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_SYNC_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_property_state(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE));
+	// accepted: D carries 20h 12.01m and +61 00.0', a hundredth of a minute and a tenth of an arc minute being the units
+	double ra = 20.20013, dec = 61.00042;
+	cached_coordinates(&ra0, &dec0, &alt0, &az0);
+	start_coordinates_publications(temma_mount.device_name);
+	unsigned int revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	int mark = trace_count(trace_path);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, change_mount_coordinates(ra, dec));
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	SERIAL_CHECK_TRUE(wait_for_position_polls(trace_path, 2));
+	int count = stop_coordinates_publications(events);
+	SERIAL_CHECK_TRUE(trace_contains_after(trace_path, "D201201+61000", mark));
+	int busy = check_request_publication("SYNC", events, count, 0, ra0, dec0, alt0, az0, ra, dec, 0.01);
+	SERIAL_CHECK_TRUE(busy >= 0);
+	int result = find_coordinates_publication(events, count, busy + 1, 'E', INDIGO_OK_STATE);
+	SERIAL_CHECK_TRUE(check_sync_result("SYNC", events, count, busy, result, ra, dec, 0.01));
+	if (!coordinates_near(events[result].value[0], events[result].value[1], events[count - 1].value[0], events[count - 1].value[1], 1e-6) || fabs(events[result].value[0] - ra) < 1e-5 || fabs(events[result].value[1] - dec) < 1e-4) {
+		fprintf(stderr, "    SYNC: the OK publication %d is not the position the polls read but the request\n", result);
+		print_coordinates_publications("SYNC", events, count);
+		SERIAL_CHECK_TRUE(false);
+	}
+	SERIAL_CHECK_TRUE(fabs(events[result].target[0] - ra) < 1e-9 && fabs(events[result].target[1] - dec) < 1e-9);
+	for (int i = busy + 1; i < count; i++) {
+		SERIAL_CHECK_TRUE(events[i].kind != 'E' || i >= result || events[i].state == INDIGO_BUSY_STATE);
+		SERIAL_CHECK_TRUE(events[i].kind != 'E' || i < result || events[i].state == INDIGO_OK_STATE);
+	}
+	// refused with R1, the RA error, and unanswered
+	static const char *refusals[] = { "fault D* R1", "drop D*" };
+	for (int r = 0; r < ARRAY_SIZE(refusals); r++) {
+		SERIAL_CHECK_TRUE(simulator_control(&simulator, refusals[r]));
+		cached_coordinates(&ra0, &dec0, &alt0, &az0);
+		start_coordinates_publications(temma_mount.device_name);
+		revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+		mark = trace_count(trace_path);
+		SERIAL_CHECK_EQ_INT(INDIGO_OK, change_mount_coordinates(5, 15));
+		SERIAL_CHECK_TRUE(wait_for_property_state_seen_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_ALERT_STATE, revision));
+		SERIAL_CHECK_TRUE(wait_for_position_polls(trace_path, 3));
+		count = stop_coordinates_publications(events);
+		SERIAL_CHECK_EQ_INT(1, trace_count_matching(trace_path, "D*", mark));
+		busy = check_request_publication(refusals[r], events, count, 0, ra0, dec0, alt0, az0, 5, 15, 0.01);
+		SERIAL_CHECK_TRUE(busy >= 0);
+		SERIAL_CHECK_TRUE(check_alert_kept(refusals[r], events, count, busy));
+		SERIAL_CHECK_TRUE(check_position_kept(refusals[r], events, count, busy, ra0, dec0, 0.01));
+		SERIAL_CHECK_EQ_INT(INDIGO_ALERT_STATE, find_cached_property(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME)->state);
+	}
+	// the next sync starts BUSY again and ends OK at the synced position
+	revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(5, 15, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME) - 5) < 0.01);
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME) - 15) < 0.01);
+cleanup:
+	stop_coordinates_publications(NULL);
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+// Disconnecting during manual motion clears the relay mask with MA before the port closes, and
+// disconnecting during a park stops it with PS; the next session reads both motion axes OFF and not
+// BUSY, the park released, and a fresh GOTO completes.
+static void temma_disconnect_during_motion_and_park_sends_stop(void) {
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	char trace_path[PATH_MAX] = "";
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
+	driver_started = true;
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_SLEW_RATE_PROPERTY_NAME, MOUNT_SLEW_RATE_GUIDE_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_MOTION_RA_PROPERTY_NAME, MOUNT_MOTION_EAST_ITEM_NAME, true, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_MOTION_DEC_PROPERTY_NAME, MOUNT_MOTION_NORTH_ITEM_NAME, true, INDIGO_BUSY_STATE));
+	int mark = trace_count(trace_path);
+	disconnect_serial_device(&temma_mount);
+	SERIAL_CHECK_TRUE(trace_motion_after(trace_path, 'A', mark));
+	SERIAL_CHECK_TRUE(connect_serial_device(&temma_mount, simulator.port));
+	SERIAL_CHECK_TRUE(motion_axis_idle(MOUNT_MOTION_RA_PROPERTY_NAME, MOUNT_MOTION_EAST_ITEM_NAME, MOUNT_MOTION_WEST_ITEM_NAME));
+	SERIAL_CHECK_TRUE(motion_axis_idle(MOUNT_MOTION_DEC_PROPERTY_NAME, MOUNT_MOTION_NORTH_ITEM_NAME, MOUNT_MOTION_SOUTH_ITEM_NAME));
+	// No relay mask other than A reaches the mount in the new session.
+	mark = trace_count(trace_path);
+	indigo_usleep(600000);
+	temma_trace_event events[MAX_TRACE_EVENTS];
+	int count = load_trace(trace_path, events, ARRAY_SIZE(events));
+	for (int i = mark; i < count; i++) {
+		SERIAL_CHECK_TRUE(!(events[i].length == 2 && events[i].bytes[0] == 'M' && events[i].bytes[1] != 'A'));
+	}
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_PARK_PROPERTY_NAME, MOUNT_PARK_PARKED_ITEM_NAME, true, INDIGO_BUSY_STATE));
+	mark = trace_count(trace_path);
+	disconnect_serial_device(&temma_mount);
+	SERIAL_CHECK_TRUE(trace_contains_after(trace_path, "PS", mark));
+	SERIAL_CHECK_TRUE(connect_serial_device(&temma_mount, simulator.port));
+	SERIAL_CHECK_TRUE(!cached_switch_value(MOUNT_PARK_PROPERTY_NAME, MOUNT_PARK_PARKED_ITEM_NAME));
+	SERIAL_CHECK_TRUE(find_cached_property(MOUNT_PARK_PROPERTY_NAME)->state != INDIGO_BUSY_STATE);
+	SERIAL_CHECK_TRUE(wait_for_property_not_busy(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(8, 30, INDIGO_BUSY_STATE));
+	unsigned int revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+cleanup:
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+// The Temma park never latches parked, the parked-mount guard holds only while a park request waits in the queue. A
+// GOTO and a sync sent then are refused before BUSY, without a command; the park the mount refuses (P answered R2) moves
+// nothing, and the refusal stays ALERT over the polls of the idle mount, until an accepted GOTO.
+static void temma_request_behind_park_is_refused_and_kept(void) {
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	char trace_path[PATH_MAX] = "";
+	static coordinates_publication events[COORDINATES_PUBLICATIONS_SIZE];
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
+	driver_started = true;
+	SERIAL_CHECK_TRUE(wait_for_property_state(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE));
+	double ra0 = cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME);
+	double dec0 = cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME);
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "fault P* R2"));
+	start_coordinates_publications(temma_mount.device_name);
+	SERIAL_CHECK_TRUE(hold_coordinates_queue());
+	int mark = trace_count(trace_path);
+	unsigned int park_revision = property_revision(MOUNT_PARK_PROPERTY_NAME);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&simulator_test_client, temma_mount.device_name, MOUNT_PARK_PROPERTY_NAME, MOUNT_PARK_PARKED_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_PARK_PROPERTY_NAME, INDIGO_BUSY_STATE, park_revision));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(fmod(ra0 + 1, 24), 20, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_SYNC_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(fmod(ra0 + 1, 24), 20, INDIGO_ALERT_STATE));
+	release_coordinates_queue();
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_PARK_PROPERTY_NAME, INDIGO_ALERT_STATE, park_revision));
+	// two polls of the idle mount
+	unsigned int revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	for (int i = 0; i < 100 && property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME) < revision + 2; i++) {
+		indigo_usleep(100000);
+	}
+	int count = stop_coordinates_publications(events);
+	SERIAL_CHECK_TRUE(check_refusal_kept("GOTO and sync behind a park", events, count, 0, 3, ra0, dec0, 0.1));
+	SERIAL_CHECK_EQ_INT(0, trace_count_matching(trace_path, "D*", mark));
+	SERIAL_CHECK_EQ_INT(1, trace_count_matching(trace_path, "P*", mark));
+	// an accepted GOTO ends the kept refusal
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(ra0, dec0 > 0 ? dec0 - 1 : dec0 + 1, INDIGO_BUSY_STATE));
+	revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+cleanup:
+	release_coordinates_queue();
+	stop_coordinates_publications(NULL);
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+// Park slews to MOUNT_PARK_POSITION: P carries RA = LST - HA, here an east hour angle, and the
+// declination with its sign, and ends with tracking OFF. A tracking request cannot be pending while the
+// park runs (it is refused while PARKED is on), but one can wait in the queue behind a GOTO, whose
+// handler leaves standby and publishes tracking ON: a gate holds the queue while both are requested, so
+// the GOTO runs between the copy of the request and its handler. The request's STN-ON is the last
+// standby command, also after the GOTO's own end, which must not restart the tracking the client
+// stopped, and exactly one OK publication of MOUNT_TRACKING follows, carrying OFF.
+static void temma_park_position_and_pending_tracking_request(void) {
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	char trace_path[PATH_MAX] = "";
+	char command[64] = "";
+	install_capture();
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
+	driver_started = true;
+	static const char *location_items[] = { GEOGRAPHIC_COORDINATES_LATITUDE_ITEM_NAME, GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM_NAME };
+	static const double location_values[] = { 48, 17 };
+	unsigned int revision = property_revision(GEOGRAPHIC_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property(&simulator_test_client, temma_mount.device_name, GEOGRAPHIC_COORDINATES_PROPERTY_NAME, ARRAY_SIZE(location_items), location_items, location_values));
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(GEOGRAPHIC_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	SERIAL_CHECK_TRUE(change_number_and_wait(&temma_mount, MOUNT_PARK_POSITION_PROPERTY_NAME, MOUNT_PARK_POSITION_HA_ITEM_NAME, -2, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(change_number_and_wait(&temma_mount, MOUNT_PARK_POSITION_PROPERTY_NAME, MOUNT_PARK_POSITION_DEC_ITEM_NAME, 30, INDIGO_OK_STATE));
+	int mark = trace_count(trace_path);
+	revision = property_revision(MOUNT_PARK_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_PARK_PROPERTY_NAME, MOUNT_PARK_PARKED_ITEM_NAME, true, INDIGO_BUSY_STATE));
+	static const char *park_commands[] = { "STN-OFF", "T*", "P*" };
+	SERIAL_CHECK_TRUE(trace_sequence_after(trace_path, mark, park_commands, ARRAY_SIZE(park_commands), command, sizeof(command)));
+	double expected_ra = indigo_lst(NULL, 17) + 2;
+	printf("    park at HA -2 h sent %s, LST + 2 h is %.4f h\n", command, fmod(expected_ra, 24));
+	SERIAL_CHECK_TRUE(hours_apart(command_ra(command), expected_ra) < 0.01);
+	SERIAL_CHECK_TRUE(!strcmp(command + 7, "+30000"));
+	SERIAL_CHECK_TRUE(wait_for_property_state_seen_after(MOUNT_PARK_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_OFF_ITEM_NAME));
+	SERIAL_CHECK_TRUE(wait_for_number_item_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME, 30, 0.01));
+	// A tracking request copied while a GOTO waits in the queue: the GOTO leaves standby, but it must
+	// not overwrite the pending request, whose handler then sends its own STN-ON.
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_OFF_ITEM_NAME));
+	SERIAL_CHECK_TRUE(hold_queue());
+	mark = trace_count(trace_path);
+	int ok_publications = atomic_load(&tracking_ok_publications);
+	unsigned int tracking_revision = property_revision(MOUNT_TRACKING_PROPERTY_NAME);
+	bool requested = change_mount_coordinates(8, 30) == INDIGO_OK && indigo_change_switch_property_1(&simulator_test_client, temma_mount.device_name, MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_OFF_ITEM_NAME, true) == INDIGO_OK && wait_for_property_state_after(MOUNT_TRACKING_PROPERTY_NAME, INDIGO_BUSY_STATE, tracking_revision);
+	release_queue();
+	SERIAL_CHECK_TRUE(requested);
+	SERIAL_CHECK_TRUE(fence_queue());
+	SERIAL_CHECK_TRUE(wait_for_property_state(MOUNT_TRACKING_PROPERTY_NAME, INDIGO_OK_STATE));
+	// Standby stops the motors, so the GOTO ends where they stopped; its end does not restart the
+	// tracking the client stopped meanwhile.
+	SERIAL_CHECK_TRUE(wait_for_property_not_busy(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME));
+	SERIAL_CHECK_TRUE(trace_wait_count(trace_path, "s", trace_count(trace_path), 2));
+	static const char *goto_commands[] = { "STN-OFF", "T*", "P080000+30000" };
+	SERIAL_CHECK_TRUE(trace_sequence_after(trace_path, mark, goto_commands, ARRAY_SIZE(goto_commands), NULL, 0));
+	printf("    tracking OFF requested behind a GOTO: last standby command %s\n", trace_last_standby(trace_path, mark));
+	SERIAL_CHECK_TRUE(!strcmp(trace_last_standby(trace_path, mark), "STN-ON"));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_OFF_ITEM_NAME));
+	SERIAL_CHECK_EQ_INT(1, atomic_load(&tracking_ok_publications) - ok_publications);
+cleanup:
+	release_queue();
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	remove_capture();
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+// A switch request the mount refuses ends ALERT and shows the state the mount really holds - the
+// standby state its STN reply reports, or the last one it confirmed when there is no reply - and an
+// immediate retry succeeds.
+static void temma_refused_switch_requests_show_device_state(void) {
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	SERIAL_CHECK_TRUE(start_external_serial_simulator(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE));
+	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
+	driver_started = true;
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_OFF_ITEM_NAME, true, INDIGO_OK_STATE));
+	// The mount answers STN-OFF with the standby it still holds.
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "fault STN-OFF stn-on"));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME, true, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_OFF_ITEM_NAME));
+	SERIAL_CHECK_TRUE(!cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME));
+	// STN-ON unanswered: the motors still track as last confirmed.
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "drop STN-ON"));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_OFF_ITEM_NAME, true, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_ON_ITEM_NAME));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_OFF_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_TRACKING_PROPERTY_NAME, MOUNT_TRACKING_OFF_ITEM_NAME));
+	// v2 answered without a version line keeps the speed the mount last confirmed.
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "fault v2 x"));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_HIGH_ITEM_NAME, true, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(cached_switch_value(X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_LOW_ITEM_NAME));
+	SERIAL_CHECK_TRUE(!cached_switch_value(X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_HIGH_ITEM_NAME));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_HIGH_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(cached_switch_value(X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_HIGH_ITEM_NAME));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, X_TEMMA_HIGH_SPEED_PROPERTY_NAME, X_TEMMA_HIGH_SPEED_LOW_ITEM_NAME, true, INDIGO_OK_STATE));
+cleanup:
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	stop_external_serial_simulator(&simulator);
+}
+
+// Temma has no longitude command: the driver keeps the site and sends the sidereal time at it. A
+// change of one item of GEOGRAPHIC_COORDINATES resends the latitude it keeps and the sidereal time at
+// the longitude it keeps, including the prime-meridian side of 360 and a southern latitude.
+static void temma_site_changes_resend_latitude_and_sidereal_time(void) {
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	char trace_path[PATH_MAX] = "";
+	char command[64] = "";
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
+	driver_started = true;
+	static const char *location_items[] = { GEOGRAPHIC_COORDINATES_LATITUDE_ITEM_NAME, GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM_NAME };
+	static const double location_values[] = { 48.5, 17 };
+	int mark = trace_count(trace_path);
+	unsigned int revision = property_revision(GEOGRAPHIC_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property(&simulator_test_client, temma_mount.device_name, GEOGRAPHIC_COORDINATES_PROPERTY_NAME, ARRAY_SIZE(location_items), location_items, location_values));
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(GEOGRAPHIC_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	static const char *both_commands[] = { "I+48300", "T*" };
+	SERIAL_CHECK_TRUE(trace_sequence_after(trace_path, mark, both_commands, ARRAY_SIZE(both_commands), command, sizeof(command)));
+	SERIAL_CHECK_TRUE(lst_command_matches(command, 17));
+	// Only the longitude, just west of the prime meridian.
+	mark = trace_count(trace_path);
+	SERIAL_CHECK_TRUE(change_number_and_wait(&temma_mount, GEOGRAPHIC_COORDINATES_PROPERTY_NAME, GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM_NAME, -0.5, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(trace_sequence_after(trace_path, mark, both_commands, ARRAY_SIZE(both_commands), command, sizeof(command)));
+	SERIAL_CHECK_TRUE(lst_command_matches(command, 359.5));
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(GEOGRAPHIC_COORDINATES_PROPERTY_NAME, GEOGRAPHIC_COORDINATES_LONGITUDE_ITEM_NAME) - 359.5) < 0.001);
+	// Only the latitude, southern.
+	mark = trace_count(trace_path);
+	SERIAL_CHECK_TRUE(change_number_and_wait(&temma_mount, GEOGRAPHIC_COORDINATES_PROPERTY_NAME, GEOGRAPHIC_COORDINATES_LATITUDE_ITEM_NAME, -10.25, INDIGO_OK_STATE));
+	static const char *latitude_commands[] = { "I-10150", "T*" };
+	SERIAL_CHECK_TRUE(trace_sequence_after(trace_path, mark, latitude_commands, ARRAY_SIZE(latitude_commands), command, sizeof(command)));
+	SERIAL_CHECK_TRUE(lst_command_matches(command, 359.5));
+cleanup:
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+// The relay mask of the guide pulse and the GOTO share one connection: a GOTO requested while an RA
+// pulse runs completes, and the pulse keeps its full length and ends with its own relay mask.
+static void temma_goto_during_guide_pulse(void) {
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	char trace_path[PATH_MAX] = "";
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(bring_up_serial_driver(&temma_mount));
+	driver_started = true;
+	enumerate_simulator_device();
+	SERIAL_CHECK_TRUE(set_master_port(simulator.port));
+	SERIAL_CHECK_TRUE(connect_serial_device(&temma_mount, simulator.port));
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_ON_COORDINATES_SET_PROPERTY_NAME, MOUNT_ON_COORDINATES_SET_TRACK_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(connect_serial_device(&temma_guider, NULL));
+	int mark = trace_count(trace_path);
+	unsigned int revision = property_revision(GUIDER_GUIDE_RA_PROPERTY_NAME);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, temma_guider.device_name, GUIDER_GUIDE_RA_PROPERTY_NAME, GUIDER_GUIDE_EAST_ITEM_NAME, 1500));
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(GUIDER_GUIDE_RA_PROPERTY_NAME, INDIGO_BUSY_STATE, revision));
+	select_context(&temma_mount);
+	SERIAL_CHECK_TRUE(change_coordinates_and_wait(8, 30, INDIGO_BUSY_STATE));
+	revision = property_revision(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	static const char *goto_commands[] = { "STN-OFF", "T*", "P080000+30000" };
+	SERIAL_CHECK_TRUE(trace_sequence_after(trace_path, mark, goto_commands, ARRAY_SIZE(goto_commands), NULL, 0));
+	select_context(&temma_guider);
+	SERIAL_CHECK_TRUE(wait_for_property_state(GUIDER_GUIDE_RA_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_number_item_value(GUIDER_GUIDE_RA_PROPERTY_NAME, GUIDER_GUIDE_EAST_ITEM_NAME, 0, 0.001));
+	temma_trace_event events[MAX_TRACE_EVENTS];
+	double on = -1, off = -1;
+	for (int attempt = 0; attempt < 50 && off < 0; attempt++) {
+		int count = load_trace(trace_path, events, ARRAY_SIZE(events));
+		on = off = -1;
+		for (int i = mark; i < count; i++) {
+			if (events[i].length == 2 && events[i].bytes[0] == 'M') {
+				if (on < 0 && (events[i].bytes[1] & TEMMA_MOTION_RA_EAST) && events[i].bytes[1] != 'A') {
+					on = events[i].timestamp;
+				} else if (on >= 0 && off < 0 && (!(events[i].bytes[1] & TEMMA_MOTION_RA_EAST) || events[i].bytes[1] == 'A')) {
+					off = events[i].timestamp;
+				}
+			}
+		}
+		if (off < 0) {
+			indigo_usleep(20000);
+		}
+	}
+	printf("    1500 ms east pulse with a GOTO in between lasted %.0f ms\n", (off - on) * 1000);
+	SERIAL_CHECK_TRUE(on >= 0 && off >= 0 && (off - on) > 1.4 && (off - on) < 2.0);
+cleanup:
+	if (driver_started) {
+		select_context(&temma_guider);
+		disconnect_serial_device(&temma_guider);
+		select_context(&temma_mount);
+		disconnect_serial_device(&temma_mount);
+		tear_down_serial_driver(&temma_mount);
+	}
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+// Manual motion started by a client is released when that client detaches: the bus logs the
+// Aborting marker, the driver clears the relay mask with MA and the axis ends OFF, not BUSY.
+static atomic_int aborting_markers;
+
+static void aborting_log_handler(indigo_log_levels level, const char *message) {
+	char needle[INDIGO_VALUE_SIZE];
+	snprintf(needle, sizeof(needle), "Aborting '%s'.%s", temma_mount.device_name, MOUNT_MOTION_RA_PROPERTY_NAME);
+	if (strstr(message, needle) != NULL) {
+		atomic_fetch_add(&aborting_markers, 1);
+	} else if (level == INDIGO_LOG_ERROR) {
+		fprintf(stderr, "%s\n", message);
+	}
+}
+
+static void temma_motion_released_when_owner_detaches(void) {
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	bool owner_attached = false;
+	char trace_path[PATH_MAX] = "";
+	static indigo_client owner = { "Temma Motion Owner", false, NULL, INDIGO_OK, INDIGO_VERSION_CURRENT, NULL, NULL, NULL, NULL, NULL, NULL, NULL, false, false };
+	indigo_log_levels log_level = indigo_get_log_level();
+	atomic_store(&aborting_markers, 0);
+	install_capture();
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
+	driver_started = true;
+	SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_SLEW_RATE_PROPERTY_NAME, MOUNT_SLEW_RATE_GUIDE_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_attach_client(&owner));
+	owner_attached = true;
+	indigo_log_message_handler = aborting_log_handler;
+	if (indigo_get_log_level() < INDIGO_LOG_INFO) {
+		indigo_set_log_level(INDIGO_LOG_INFO);
+	}
+	int mark = trace_count(trace_path);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&owner, temma_mount.device_name, MOUNT_MOTION_RA_PROPERTY_NAME, MOUNT_MOTION_EAST_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(fence_queue());
+	SERIAL_CHECK_TRUE(trace_motion_after(trace_path, 0x40 | TEMMA_MOTION_RA_EAST, mark));
+	SERIAL_CHECK_TRUE(wait_for_property_state(MOUNT_MOTION_RA_PROPERTY_NAME, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(cached_switch_value(MOUNT_MOTION_RA_PROPERTY_NAME, MOUNT_MOTION_EAST_ITEM_NAME));
+	mark = trace_count(trace_path);
+	indigo_detach_client(&owner);
+	owner_attached = false;
+	for (int i = 0; i < 100 && atomic_load(&aborting_markers) == 0; i++) {
+		indigo_usleep(20000);
+	}
+	SERIAL_CHECK_EQ_INT(1, atomic_load(&aborting_markers));
+	SERIAL_CHECK_TRUE(trace_motion_after(trace_path, 'A', mark));
+	SERIAL_CHECK_TRUE(fence_queue());
+	for (int i = 0; i < 50 && !motion_axis_idle(MOUNT_MOTION_RA_PROPERTY_NAME, MOUNT_MOTION_EAST_ITEM_NAME, MOUNT_MOTION_WEST_ITEM_NAME); i++) {
+		indigo_usleep(20000);
+	}
+	SERIAL_CHECK_TRUE(motion_axis_idle(MOUNT_MOTION_RA_PROPERTY_NAME, MOUNT_MOTION_EAST_ITEM_NAME, MOUNT_MOTION_WEST_ITEM_NAME));
+cleanup:
+	if (owner_attached) {
+		indigo_detach_client(&owner);
+	}
+	indigo_log_message_handler = NULL;
+	indigo_set_log_level(log_level);
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	remove_capture();
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+#ifdef INDIGO_TEST_MOTION_DEADLINE
+
+// A healthy status exchange that stays in progress must expire, stop once and leave the operation
+// ALERT. Releasing the stalled controller permits a fresh request in the same connection.
+static void temma_motion_deadline(bool park) {
+	external_serial_simulator simulator = { 0 };
+	bool driver_started = false;
+	char trace_path[PATH_MAX] = "";
+	install_capture();
+	const char *property = park ? MOUNT_PARK_PROPERTY_NAME : MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME;
+	SERIAL_CHECK_TRUE(create_trace_file(trace_path, sizeof(trace_path)));
+	const char *args[] = { "--trace-file", trace_path, NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, MOUNT_TEMMA_SIMULATOR_EXECUTABLE, args));
+	SERIAL_CHECK_TRUE(start_serial_driver(&temma_mount, simulator.port));
+	driver_started = true;
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "stall"));
+	int mark = trace_count(trace_path);
+	unsigned int revision = property_revision(property);
+	double requested = indigo_monotonic_time();
+	if (park) {
+		SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_PARK_PROPERTY_NAME, MOUNT_PARK_PARKED_ITEM_NAME, true, INDIGO_BUSY_STATE));
+	} else {
+		SERIAL_CHECK_TRUE(change_coordinates_and_wait(9, 20, INDIGO_BUSY_STATE));
+	}
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(property, INDIGO_ALERT_STATE, revision));
+	SERIAL_CHECK_TRUE(last_message_contains(park ? "Parking failed or timed out" : "Slew did not finish in time"));
+	SERIAL_CHECK_TRUE(indigo_monotonic_time() - requested >= 1);
+	SERIAL_CHECK_TRUE(indigo_monotonic_time() - requested < 8);
+	SERIAL_CHECK_EQ_INT(1, trace_count_matching(trace_path, "PS", mark));
+	SERIAL_CHECK_TRUE(trace_count_matching(trace_path, "s", mark) >= 2);
+	SERIAL_CHECK_TRUE(!cached_switch_value(MOUNT_PARK_PROPERTY_NAME, MOUNT_PARK_PARKED_ITEM_NAME));
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_RA_ITEM_NAME) - 6) < 0.01);
+	SERIAL_CHECK_TRUE(fabs(cached_number_value(MOUNT_EQUATORIAL_COORDINATES_PROPERTY_NAME, MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM_NAME) - 45) < 0.01);
+	SERIAL_CHECK_TRUE(simulator_control(&simulator, "resume"));
+	revision = property_revision(property);
+	if (park) {
+		SERIAL_CHECK_TRUE(change_switch_and_wait(&temma_mount, MOUNT_PARK_PROPERTY_NAME, MOUNT_PARK_PARKED_ITEM_NAME, true, INDIGO_BUSY_STATE));
+	} else {
+		SERIAL_CHECK_TRUE(change_coordinates_and_wait(9, 20, INDIGO_BUSY_STATE));
+	}
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(property, INDIGO_OK_STATE, revision));
+	SERIAL_CHECK_EQ_INT(1, trace_count_matching(trace_path, "PS", mark));
+cleanup:
+	if (driver_started) {
+		stop_serial_driver(&temma_mount);
+	}
+	remove_capture();
+	stop_external_serial_simulator(&simulator);
+	if (*trace_path) {
+		unlink(trace_path);
+	}
+}
+
+static void temma_goto_deadline_stops_and_recovers(void) {
+	temma_motion_deadline(false);
+}
+
+static void temma_park_deadline_stops_and_recovers(void) {
+	temma_motion_deadline(true);
+}
+
+#endif
+
 int main(void) {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	// A Linux PTY cannot carry the parity of Temma's 19200-8E1 port: the kernel drops PARENB and
 	// glibc's tcsetattr() then fails with EINVAL on every reopen of an already configured PTY.
 	// The cases that reconnect to the same simulator PTY are therefore not run on Linux.
 	const indigo_test_case tests[] = {
+#ifdef INDIGO_TEST_MOTION_DEADLINE
+		{ "temma_goto_deadline_stops_and_recovers", temma_goto_deadline_stops_and_recovers },
+		{ "temma_park_deadline_stops_and_recovers", temma_park_deadline_stops_and_recovers }
+#else
 #ifndef __linux__
 		{ "temma_park_abort_disconnect_and_read_failure", temma_park_abort_disconnect_and_read_failure },
 #endif
@@ -1289,7 +2486,22 @@ int main(void) {
 		{ "temma_shared_lifecycle_and_pending_disconnect", temma_shared_lifecycle_and_pending_disconnect },
 #endif
 		{ "temma_transport_loss_active_idle_and_recovery", temma_transport_loss_active_idle_and_recovery },
-		{ "temma_guider_timing_idle_and_mount_workload", temma_guider_timing_idle_and_mount_workload }
+		{ "temma_guider_timing_idle_and_mount_workload", temma_guider_timing_idle_and_mount_workload },
+#ifndef __linux__
+		{ "temma_connect_identity_and_controller_state", temma_connect_identity_and_controller_state },
+		{ "temma_disconnect_during_motion_and_park_sends_stop", temma_disconnect_during_motion_and_park_sends_stop },
+#endif
+		{ "temma_goto_refusals_keep_position_and_report_reason", temma_goto_refusals_keep_position_and_report_reason },
+		{ "temma_abort_mid_slew_stops_short_and_idle_abort_keeps_state", temma_abort_mid_slew_stops_short_and_idle_abort_keeps_state },
+		{ "temma_coordinates_publish_the_mount_position", temma_coordinates_publish_the_mount_position },
+		{ "temma_sync_result_and_refusals", temma_sync_result_and_refusals },
+		{ "temma_park_position_and_pending_tracking_request", temma_park_position_and_pending_tracking_request },
+		{ "temma_request_behind_park_is_refused_and_kept", temma_request_behind_park_is_refused_and_kept },
+		{ "temma_refused_switch_requests_show_device_state", temma_refused_switch_requests_show_device_state },
+		{ "temma_site_changes_resend_latitude_and_sidereal_time", temma_site_changes_resend_latitude_and_sidereal_time },
+		{ "temma_goto_during_guide_pulse", temma_goto_during_guide_pulse },
+		{ "temma_motion_released_when_owner_detaches", temma_motion_released_when_owner_detaches }
+#endif
 	};
 	const char *filter = getenv("INDIGO_TEST_CASE");
 	if (filter != NULL) {

@@ -34,7 +34,7 @@ import unittest
 from unittest.mock import patch
 
 from driver_editor import Server
-from driver_format import FormatError, attributes, code_schema, edit, parse, schema, structure, walk
+from driver_format import DEVICES, FormatError, attributes, code_schema, edit, parse, schema, structure, walk
 from editor import Conflict, Editor, GenerationError, ROOT, generate, output_names
 from source_map import build_mapping
 
@@ -68,9 +68,33 @@ def selected_text(mapping, identity, text):
 	lines = text.splitlines()
 	return '\n'.join(lines[number - 1] for block in mapping['ranges'][identity] for number in range(block['startLine'], block['endLine'] + 1))
 
+def maintained_driver_paths():
+	excluded = {'ccd_apogee', 'ccd_sbig', 'mount_asi', 'mount_mxhd', 'system_ascol', 'externals', 'bin_externals'}
+	base = ROOT / 'indigo_drivers'
+	return [path for path in sorted(base.rglob('*.driver')) if not excluded.intersection(path.relative_to(base).parts)]
+
 class ParserTests(unittest.TestCase):
+	def test_polaralign_is_in_backend_and_frontend_device_catalogs(self):
+		self.assertIn('polaralign', DEVICES)
+		javascript = (ROOT / 'indigo_tools/driver_editor/static/app.js').read_text()
+		declaration = re.search(r'const devices = new Set\(\[(.*?)\]\);', javascript)
+		self.assertIsNotNone(declaration)
+		self.assertEqual(DEVICES, set(re.findall(r"'([^']+)'", declaration.group(1))))
+
+	def test_polaralign_structural_editing(self):
+		source = 'driver sample { version = 1; }'
+		root = parse(source)
+		source, root, device = structure(source, root, root['id'], 'add', 'polaralign')
+		source, root, prop = structure(source, root, device, 'add', 'number', 'X_RESULT')
+		source, root, item = structure(source, root, prop, 'add', 'item', 'VALUE')
+		self.assertEqual(named(root, 'polaralign')['id'], device)
+		self.assertEqual(named(root, 'VALUE')['id'], item)
+		source, root, selected = structure(source, root, device, 'remove')
+		self.assertEqual(root['id'], selected)
+		self.assertNotIn('polaralign', source)
+
 	def test_repository_corpus_and_template(self):
-		paths = list((ROOT / 'indigo_drivers').rglob('*.driver')) + [ROOT / 'indigo_tools/template.driver']
+		paths = maintained_driver_paths() + [ROOT / 'indigo_tools/template.driver']
 		self.assertGreaterEqual(len(paths), 61)
 		for path in paths:
 			with self.subTest(file=path.name):
@@ -206,6 +230,50 @@ class ParserTests(unittest.TestCase):
 		self.assertIn('attach_if', catalog['device'])
 		self.assertIn('format', catalog['item:number'])
 
+	def test_catalog_accept_while_busy_in_all_property_contexts(self):
+		catalog = schema((ROOT / 'indigo_tools/template.driver').read_text())
+		for context in ('inherited', 'switch', 'text', 'number', 'light'):
+			self.assertEqual(catalog[context]['accept_while_busy']['type'], 'boolean', context)
+		source = 'driver sample {\n\tmount {\n\t\tswitch X_SW {\n\t\t\tlabel = "Switch";\n\t\t\tname = "X_SW";\n\t\t}\n\t}\n}'
+		root = parse(source)
+		prop = named(root, 'X_SW')
+		updated, root = edit(source, root, prop['id'], [dict(field='attribute', name='accept_while_busy', value='true')])
+		self.assertEqual(attributes(named(root, 'X_SW'))['accept_while_busy'], 'true')
+		self.assertIn('accept_while_busy = true;', updated)
+
+	def test_catalog_device_id_can_be_added_without_changing_device_code(self):
+		catalog = schema((ROOT / 'indigo_tools/template.driver').read_text())
+		self.assertEqual(catalog['device']['id']['type'], 'identifier')
+		for eol in ('\n', '\r\n'):
+			source = eol.join(['driver sample {', '\tccd {', '\t\tname = "Guide camera"; // preserve name', '\t\ton_attach { /* preserve code */ }', '\t}', '}'])
+			root = parse(source)
+			updated, root = edit(source, root, named(root, 'ccd')['id'], [dict(field='attribute', name='id', value='ccd_guide')])
+			self.assertEqual(attributes(named(root, 'ccd'))['id'], 'ccd_guide')
+			self.assertEqual(updated.replace('\n\t\tid = ccd_guide;', ''), source)
+			self.assertLess(updated.index('id = ccd_guide;'), updated.index('on_attach'))
+
+	def test_catalog_sdk_discover_can_be_added_edited_and_removed(self):
+		catalog = code_schema((ROOT / 'indigo_tools/template.driver').read_text())
+		for eol in ('\n', '\r\n'):
+			source = eol.join(['// preserve header', 'driver sample {', '\tsdk { hotplug = false; usb = false; }', '\taux;', '}'])
+			root = parse(source)
+			updated, root, selected = structure(source, root, named(root, 'sdk')['id'], 'add', 'discover', code_catalog=catalog)
+			discover = named(root, 'discover')
+			self.assertTrue(discover['code'])
+			self.assertEqual(discover['id'], selected)
+			body = eol + '\t\tif (ready) { process_plug_event_handler(NULL, handle); }' + eol + '\t'
+			updated, root = edit(updated, root, selected, [dict(field='code', value=body)])
+			self.assertIn('if (ready) { process_plug_event_handler(NULL, handle); }', updated)
+			with self.assertRaises(ValueError):
+				structure(updated, root, named(root, 'aux')['id'], 'add', 'discover', code_catalog=catalog)
+			with self.assertRaises(ValueError):
+				structure(updated, root, named(root, 'sdk')['id'], 'add', 'discover', code_catalog=catalog)
+			updated, root, parent = structure(updated, root, selected, 'remove', code_catalog=catalog)
+			self.assertEqual(named(root, 'sdk')['id'], parent)
+			self.assertNotIn('discover', updated)
+			self.assertIn('sdk { hotplug = false; usb = false;', updated)
+			self.assertTrue(updated.startswith('// preserve header' + eol))
+
 	def test_template_matches_generator_attribute_contexts(self):
 		generator = (ROOT / 'indigo_tools/indigo_generator.c').read_text()
 		catalog = schema((ROOT / 'indigo_tools/template.driver').read_text())
@@ -311,6 +379,22 @@ class EditorTests(unittest.TestCase):
 		with self.assertRaises(ValueError):
 			self.editor.change_structure(self.editor.revision, named(self.editor.root, 'X_VALUE')['id'], 'add', 'code')
 		self.assertEqual(self.path.read_text(), FIXTURE)
+
+	@unittest.skipUnless(GENERATOR.is_file(), 'Build indigo_generator first')
+	def test_sdk_discover_and_device_id_generate_in_isolated_preview(self):
+		source = FIXTURE.replace('\taux {', '\tsdk { hotplug = false; usb = false; }\n\taux {', 1)
+		self.path.write_text(source, encoding='utf-8')
+		editor = Editor(self.path, GENERATOR)
+		self.assertEqual(editor.catalog['device']['id']['type'], 'identifier')
+		self.assertEqual(editor.catalog['sdk']['usb']['type'], 'boolean')
+		editor.apply(editor.revision, named(editor.root, 'aux')['id'], [dict(field='attribute', name='id', value='custom_aux')])
+		state = editor.change_structure(editor.revision, named(editor.root, 'sdk')['id'], 'add', 'discover')
+		editor.apply(editor.revision, state['selected'], [dict(field='code', value='\nprocess_plug_event_handler(NULL, (void *)1);\n')])
+		preview = editor.refresh(editor.revision)['preview']['source']
+		self.assertIn('CUSTOM_AUX_DEVICE_NAME', preview)
+		self.assertIn('//+ sdk.discover', preview)
+		self.assertIn('process_plug_event_handler(NULL, (void *)1);', preview)
+		self.assertEqual(self.path.read_text(), source)
 
 	def test_disk_conflict_and_failed_atomic_save(self):
 		self.change_label()
@@ -453,6 +537,24 @@ class EditorTests(unittest.TestCase):
 
 @unittest.skipUnless(GENERATOR.is_file(), 'Build indigo_generator first')
 class MappingTests(unittest.TestCase):
+	def test_polaralign_repository_previews_and_mapping(self):
+		for driver in ('polaralign_mlastro', 'polaralign_simulator'):
+			with self.subTest(driver=driver):
+				path = ROOT / 'indigo_drivers' / driver / ('indigo_' + driver + '.driver')
+				source = path.read_bytes()
+				outputs_before = {name: (path.parent / name).read_bytes() for name in ('indigo_' + driver + extension for extension in ('.c', '.h', '_main.c'))}
+				root = parse(source.decode())
+				outputs, _ = generate(source.decode(), path.name, root, GENERATOR, ROOT, 10)
+				self.assertEqual({'indigo_' + driver + extension for extension in ('.c', '.h', '_main.c')}, set(outputs))
+				text = outputs['indigo_' + driver + '.c'].decode()
+				mapping = build_mapping(root, text)
+				device = named(root, 'polaralign')
+				self.assertTrue(mapping['ranges'][device['id']])
+				self.assertIn('indigo_polaralign_attach', text)
+				self.assertEqual(source, path.read_bytes())
+				for name, content in outputs_before.items():
+					self.assertEqual(content, (path.parent / name).read_bytes())
+
 	def test_serial_patterns_parent_union_and_no_output(self):
 		source = FIXTURE.replace('version = 1;', 'version = 1; serial { pattern { vendor = "One"; } pattern { product = "Two"; } pattern; }')
 		root = parse(source)
@@ -519,9 +621,55 @@ class MappingTests(unittest.TestCase):
 		self.assertIn('WHEEL owner', second)
 		self.assertNotIn('USE(X_SAME_PROPERTY)', first)
 
+	def test_explicit_ccd_identities_scope_lifecycle_properties_and_markers(self):
+		source = '''driver multi { label = "Multi"; author = "Test"; copyright = "Test"; version = 1;
+		ccd { id = ccd; on_attach { /* IMAGER attach */ } inherited CCD_EXPOSURE { on_change { /* IMAGER exposure */ } } }
+		ccd { id = ccd_guide; on_attach { /* GUIDE attach */ } inherited CCD_EXPOSURE { on_change { /* GUIDE exposure */ } } }
+		}'''
+		root = parse(source)
+		outputs, _ = generate(source, 'multi.driver', root, GENERATOR, ROOT, 10)
+		text = outputs['indigo_ccd_multi.c'].decode()
+		mapping = build_mapping(root, text)
+		for device, identity, label, other in zip(root['children'], ('ccd', 'ccd_guide'), ('IMAGER', 'GUIDE'), ('GUIDE', 'IMAGER')):
+			with self.subTest(device=identity):
+				selected = selected_text(mapping, device['id'], text)
+				self.assertIn('static indigo_result ' + identity + '_attach(', selected)
+				self.assertIn('static indigo_device ' + identity + '_template', selected)
+				self.assertIn(identity.upper() + '_DEVICE_NAME', selected)
+				self.assertNotIn('static indigo_result ' + ('ccd_guide' if identity == 'ccd' else 'ccd') + '_attach(', selected)
+				attach = named(device, 'on_attach')
+				self.assertIn(label + ' attach', selected_text(mapping, attach['id'], text))
+				prop = named(device, 'CCD_EXPOSURE')
+				selected = selected_text(mapping, prop['id'], text)
+				handler = ('ccd_exposure_handler' if identity == 'ccd' else identity + '_ccd_exposure_handler')
+				self.assertIn(handler, selected)
+				self.assertIn(label + ' exposure', selected)
+				self.assertNotIn(other + ' exposure', selected)
+				other_handler = ('ccd_guide_ccd_exposure_handler' if identity == 'ccd' else 'ccd_exposure_handler')
+				self.assertNotIn('static void ' + other_handler + '(', selected)
+				self.assertNotIn('INDIGO_COPY_VALUES_PROCESS_CHANGE(CCD_EXPOSURE_PROPERTY, ' + other_handler + ')', selected)
+				self.assertIn('INDIGO_COPY_VALUES_PROCESS_CHANGE(CCD_EXPOSURE_PROPERTY, ' + handler + ')', selected)
+
+	def test_all_ccd_simulator_logical_devices_map_exposure(self):
+		path = ROOT / 'indigo_drivers/ccd_simulator/indigo_ccd_simulator.driver'
+		source = path.read_text()
+		root = parse(source)
+		outputs, _ = generate(source, path.name, root, GENERATOR, ROOT, 10)
+		text = outputs['indigo_ccd_simulator.c'].decode()
+		mapping = build_mapping(root, text)
+		devices = [node for node in root['children'] if node['kind'] == 'ccd']
+		self.assertEqual(len(devices), 5)
+		for device in devices:
+			identity = attributes(device)['id']
+			with self.subTest(device=identity):
+				prop = named(device, 'CCD_EXPOSURE')
+				selected = selected_text(mapping, prop['id'], text)
+				self.assertIn(identity + '_ccd_exposure_handler', selected)
+				self.assertIn('CCD_EXPOSURE_PROPERTY', selected)
+
 	def test_all_real_drivers_generate_without_modification(self):
 		generator_hash = hashlib.sha256(GENERATOR.read_bytes()).hexdigest()
-		for path in sorted((ROOT / 'indigo_drivers').rglob('*.driver')):
+		for path in maintained_driver_paths():
 			with self.subTest(file=path.name):
 				before = path.read_bytes()
 				source = before.decode('utf-8')

@@ -41,7 +41,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x0300000D
+#define DRIVER_VERSION       0x03000011
 #define DRIVER_NAME          "indigo_focuser_moonlite"
 #define DRIVER_LABEL         "MoonLite Focuser"
 #define FOCUSER_DEVICE_NAME  "MoonLite"
@@ -74,7 +74,7 @@ typedef struct {
 	char response[64];
 	int position, expected_position, last_position;
 	int stalled;
-	bool active, uncertain, temperature_pending;
+	bool active, uncertain, temperature_pending, failed, reversed, automatic, half_step;
 	//- data
 } moonlite_private_data;
 
@@ -99,20 +99,19 @@ static bool moonlite_command(indigo_device *device, int expected, const char *co
 	if (expected < 0) {
 		return true;
 	}
+	// A reply has at most the documented number of digits; compatible controllers send fewer ("1#" for "01#",
+	// which INDI accepts as well), and the 2.0 driver read whatever came before '#'.
 	long count = indigo_uni_read_section2(PRIVATE_DATA->handle, RESPONSE, sizeof(PRIVATE_DATA->response) - 1, "#", "", INDIGO_DELAY(1), INDIGO_DELAY(0.1));
-	if (count != expected + 1 || RESPONSE[count - 1] != '#' || (long)strlen(RESPONSE) != count) {
+	if (count < 2 || count > expected + 1 || RESPONSE[count - 1] != '#' || (long)strlen(RESPONSE) != count) {
 		return false;
 	}
 	RESPONSE[count - 1] = 0;
-	if (indigo_uni_wait_for_data(PRIVATE_DATA->handle, INDIGO_DELAY(0.01)) > 0) {
-		indigo_uni_discard(PRIVATE_DATA->handle);
-		return false;
-	}
 	return true;
 }
 
 static bool moonlite_hex(indigo_device *device, int digits, unsigned *value) {
 	unsigned result = 0;
+	digits = (int)strlen(RESPONSE);
 	for (int index = 0; index < digits; index++) {
 		unsigned char c = (unsigned char)RESPONSE[index];
 		if (!isxdigit(c)) {
@@ -138,9 +137,6 @@ static bool moonlite_position(indigo_device *device, int *position) {
 	}
 	PRIVATE_DATA->position = (int)value;
 	FOCUSER_POSITION_ITEM->number.value = value;
-	if (!PRIVATE_DATA->active && !PRIVATE_DATA->uncertain) {
-		FOCUSER_POSITION_ITEM->number.target = value;
-	}
 	if (position) {
 		*position = (int)value;
 	}
@@ -162,12 +158,13 @@ static bool moonlite_stop(indigo_device *device) {
 	if (!moonlite_command(device, -1, ":FQ#") || !moonlite_moving(device, &moving) || moving || !moonlite_position(device, &position)) {
 		return false;
 	}
-	FOCUSER_POSITION_ITEM->number.value = FOCUSER_POSITION_ITEM->number.target = position;
+	// the stopped position is the value only, the target keeps the request
+	FOCUSER_POSITION_ITEM->number.value = position;
 	return true;
 }
 
-static bool moonlite_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 9600, INDIGO_LOG_DEBUG);
+static bool moonlite_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 9600, INDIGO_LOG_DEBUG, error_message);
 	unsigned version = 0;
 	if (PRIVATE_DATA->handle && moonlite_query(device, ":GV#", 2, &version) && RESPONSE[0] >= '0' && RESPONSE[0] <= '9' && RESPONSE[1] >= '0' && RESPONSE[1] <= '9') {
 		snprintf(INFO_DEVICE_FW_REVISION_ITEM->text.value, INDIGO_VALUE_SIZE, "%c.%c", RESPONSE[0], RESPONSE[1]);
@@ -181,7 +178,23 @@ static void moonlite_close(indigo_device *device) {
 	indigo_uni_close(&PRIVATE_DATA->handle);
 }
 
+static void moonlite_ranges(indigo_device *device) {
+	FOCUSER_POSITION_ITEM->number.min = FOCUSER_LIMITS_MIN_POSITION_ITEM->number.value;
+	FOCUSER_POSITION_ITEM->number.max = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value;
+	FOCUSER_STEPS_ITEM->number.max = FOCUSER_POSITION_ITEM->number.max - FOCUSER_POSITION_ITEM->number.min;
+	if (IS_CONNECTED) {
+		indigo_delete_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+		indigo_define_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+		indigo_delete_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+		indigo_define_property(device, FOCUSER_STEPS_PROPERTY, NULL);
+	}
+}
+
 static void moonlite_motion_state(indigo_device *device, indigo_property_state state) {
+	// A move that ends ALERT stays ALERT for the idle polls that follow, until the next move starts.
+	if (state != INDIGO_BUSY_STATE) {
+		PRIVATE_DATA->failed = state == INDIGO_ALERT_STATE;
+	}
 	FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = state;
 	indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
 	indigo_update_property(device, FOCUSER_STEPS_PROPERTY, NULL);
@@ -207,8 +220,8 @@ static void motion_finalizer(indigo_device *device) {
 			return;
 		}
 		PRIVATE_DATA->active = false;
+		// a stop short of the target publishes the reached position as the value only
 		PRIVATE_DATA->uncertain = position != PRIVATE_DATA->expected_position;
-		FOCUSER_POSITION_ITEM->number.target = position;
 		moonlite_motion_state(device, PRIVATE_DATA->uncertain ? INDIGO_ALERT_STATE : INDIGO_OK_STATE);
 		return;
 	}
@@ -262,8 +275,17 @@ static void focuser_timer_callback(indigo_device *device) {
 	}
 	//+ focuser.on_timer
 	if (!PRIVATE_DATA->active && FOCUSER_POSITION_PROPERTY->state != INDIGO_BUSY_STATE && FOCUSER_STEPS_PROPERTY->state != INDIGO_BUSY_STATE) {
-		FOCUSER_POSITION_PROPERTY->state = moonlite_position(device, NULL) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
-		indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+		int previous = PRIVATE_DATA->position, position = 0;
+		bool read = moonlite_position(device, &position);
+		// A move request accepted while the reply was outstanding owns the motion properties until its handler runs.
+		if (FOCUSER_POSITION_PROPERTY->state != INDIGO_BUSY_STATE && FOCUSER_STEPS_PROPERTY->state != INDIGO_BUSY_STATE) {
+			// Only motion the driver did not command (hand control, automatic mode) moves the target; the rest of an unconfirmed stop does not.
+			if (read && position != previous && !PRIVATE_DATA->uncertain) {
+				FOCUSER_POSITION_ITEM->number.target = position;
+			}
+			FOCUSER_POSITION_PROPERTY->state = read && !PRIVATE_DATA->failed ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+			indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+		}
 	}
 	unsigned temperature = 0;
 	if (PRIVATE_DATA->temperature_pending) {
@@ -290,7 +312,8 @@ static void focuser_timer_callback(indigo_device *device) {
 static void focuser_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = moonlite_open(device);
+		const char *error_message = NULL;
+		connection_result = moonlite_open(device, &error_message);
 		if (connection_result) {
 			//+ focuser.on_connect
 			unsigned temperature = 0, position = 0, coefficient = 0, speed = 0, stepping = 0;
@@ -307,6 +330,8 @@ static void focuser_connection_handler(indigo_device *device) {
 				FOCUSER_SPEED_ITEM->number.value = FOCUSER_SPEED_ITEM->number.target = speed == 2 ? 1 : speed == 4 ? 2 : speed == 8 ? 3 : speed == 16 ? 4 : 5;
 				FOCUSER_COMPENSATION_ITEM->number.value = FOCUSER_COMPENSATION_ITEM->number.target = (int8_t)coefficient;
 				FOCUSER_TEMPERATURE_ITEM->number.value = (int16_t)temperature / 2.0;
+				PRIVATE_DATA->failed = PRIVATE_DATA->automatic = false;
+				PRIVATE_DATA->half_step = stepping == 255;
 				indigo_set_switch(X_FOCUSER_STEPPING_MODE_PROPERTY, stepping == 255 ? X_FOCUSER_STEPPING_MODE_HALF_ITEM : X_FOCUSER_STEPPING_MODE_FULL_ITEM, true);
 				indigo_set_switch(FOCUSER_MODE_PROPERTY, FOCUSER_MODE_MANUAL_ITEM, true);
 				indigo_update_property(device, INFO_PROPERTY, NULL);
@@ -321,7 +346,11 @@ static void focuser_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -407,14 +436,16 @@ static void focuser_position_handler(indigo_device *device) {
 static void focuser_abort_motion_handler(indigo_device *device) {
 	//+ focuser.FOCUSER_ABORT_MOTION.on_change
 	FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
-	if (FOCUSER_ABORT_MOTION_ITEM->sw.value) {
+	// While idle nothing is stopped: the position stays as it is and no stop is sent.
+	if (FOCUSER_ABORT_MOTION_ITEM->sw.value && (PRIVATE_DATA->active || PRIVATE_DATA->uncertain || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE)) {
 		indigo_cancel_pending_handler(device, focuser_position_handler);
 		indigo_cancel_pending_handler(device, focuser_steps_handler);
 		indigo_cancel_pending_handler(device, motion_finalizer);
 		PRIVATE_DATA->active = false;
 		if (IS_CONNECTED && moonlite_stop(device)) {
 			PRIVATE_DATA->uncertain = false;
-			moonlite_motion_state(device, INDIGO_OK_STATE);
+			// An aborted move ends ALERT with the stopped position as the value and the requested target.
+			moonlite_motion_state(device, INDIGO_ALERT_STATE);
 		} else {
 			PRIVATE_DATA->uncertain = true;
 			FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
@@ -443,16 +474,28 @@ static void focuser_compensation_handler(indigo_device *device) {
 static void focuser_mode_handler(indigo_device *device) {
 	FOCUSER_MODE_PROPERTY->state = INDIGO_OK_STATE;
 	//+ focuser.FOCUSER_MODE.on_change
-	if (!IS_CONNECTED || PRIVATE_DATA->active || PRIVATE_DATA->uncertain || !moonlite_command(device, -1, FOCUSER_MODE_AUTOMATIC_ITEM->sw.value ? ":+#" : ":-#")) {
+	bool automatic = FOCUSER_MODE_AUTOMATIC_ITEM->sw.value;
+	if (!IS_CONNECTED || PRIVATE_DATA->active || PRIVATE_DATA->uncertain || !moonlite_command(device, -1, automatic ? ":+#" : ":-#")) {
+		indigo_set_switch(FOCUSER_MODE_PROPERTY, PRIVATE_DATA->automatic ? FOCUSER_MODE_AUTOMATIC_ITEM : FOCUSER_MODE_MANUAL_ITEM, true);
 		FOCUSER_MODE_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else {
+		PRIVATE_DATA->automatic = automatic;
 	}
 	//- focuser.FOCUSER_MODE.on_change
 	indigo_update_property(device, FOCUSER_MODE_PROPERTY, NULL);
 }
 
 static void focuser_reverse_motion_handler(indigo_device *device) {
-	//+ focuser.FOCUSER_REVERSE_MOTION.on_change
 	FOCUSER_REVERSE_MOTION_PROPERTY->state = INDIGO_OK_STATE;
+	//+ focuser.FOCUSER_REVERSE_MOTION.on_change
+	// The driver owns the reversal; it is refused during a move and keeps the previous item.
+	if (PRIVATE_DATA->active || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE) {
+		indigo_set_switch(FOCUSER_REVERSE_MOTION_PROPERTY, PRIVATE_DATA->reversed ? FOCUSER_REVERSE_MOTION_ENABLED_ITEM : FOCUSER_REVERSE_MOTION_DISABLED_ITEM, true);
+		FOCUSER_REVERSE_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else {
+		PRIVATE_DATA->reversed = FOCUSER_REVERSE_MOTION_ENABLED_ITEM->sw.value;
+		FOCUSER_REVERSE_MOTION_PROPERTY->state = INDIGO_OK_STATE;
+	}
 	//- focuser.FOCUSER_REVERSE_MOTION.on_change
 	indigo_update_property(device, FOCUSER_REVERSE_MOTION_PROPERTY, NULL);
 }
@@ -460,11 +503,16 @@ static void focuser_reverse_motion_handler(indigo_device *device) {
 static void focuser_limits_handler(indigo_device *device) {
 	FOCUSER_LIMITS_PROPERTY->state = INDIGO_OK_STATE;
 	//+ focuser.FOCUSER_LIMITS.on_change
-	if (FOCUSER_LIMITS_MIN_POSITION_ITEM->number.target > FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target) {
+	// An empty interval, one that excludes the current position, or a change during a move keeps the old limits.
+	double minimum = FOCUSER_LIMITS_MIN_POSITION_ITEM->number.target, maximum = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target;
+	if (minimum > maximum || PRIVATE_DATA->position < minimum || PRIVATE_DATA->position > maximum || PRIVATE_DATA->active || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE) {
+		FOCUSER_LIMITS_MIN_POSITION_ITEM->number.target = FOCUSER_LIMITS_MIN_POSITION_ITEM->number.value;
+		FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value;
 		FOCUSER_LIMITS_PROPERTY->state = INDIGO_ALERT_STATE;
 	} else {
-		FOCUSER_LIMITS_MIN_POSITION_ITEM->number.value = FOCUSER_LIMITS_MIN_POSITION_ITEM->number.target;
-		FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value = FOCUSER_LIMITS_MAX_POSITION_ITEM->number.target;
+		FOCUSER_LIMITS_MIN_POSITION_ITEM->number.value = minimum;
+		FOCUSER_LIMITS_MAX_POSITION_ITEM->number.value = maximum;
+		moonlite_ranges(device);
 	}
 	//- focuser.FOCUSER_LIMITS.on_change
 	indigo_update_property(device, FOCUSER_LIMITS_PROPERTY, NULL);
@@ -476,7 +524,11 @@ static void focuser_x_focuser_stepping_mode_handler(indigo_device *device) {
 	unsigned actual = 0;
 	bool half = X_FOCUSER_STEPPING_MODE_HALF_ITEM->sw.value;
 	if (!IS_CONNECTED || PRIVATE_DATA->active || PRIVATE_DATA->uncertain || !moonlite_command(device, -1, half ? ":SH#" : ":SF#") || !moonlite_query(device, ":GH#", 2, &actual) || actual != (half ? 255 : 0)) {
+		// The switch shows the stepping mode the controller last confirmed.
+		indigo_set_switch(X_FOCUSER_STEPPING_MODE_PROPERTY, PRIVATE_DATA->half_step ? X_FOCUSER_STEPPING_MODE_HALF_ITEM : X_FOCUSER_STEPPING_MODE_FULL_ITEM, true);
 		X_FOCUSER_STEPPING_MODE_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else {
+		PRIVATE_DATA->half_step = half;
 	}
 	//- focuser.X_FOCUSER_STEPPING_MODE.on_change
 	indigo_update_property(device, X_FOCUSER_STEPPING_MODE_PROPERTY, NULL);

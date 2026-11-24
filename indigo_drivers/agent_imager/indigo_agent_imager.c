@@ -25,7 +25,7 @@
  \file indigo_agent_imager.c
  */
 
-#define DRIVER_VERSION 0x0300003F
+#define DRIVER_VERSION 0x03000047
 #define DRIVER_NAME	"indigo_agent_imager"
 
 #include <stdio.h>
@@ -48,6 +48,7 @@
 #include <indigo/indigo_filter.h>
 #include <indigo/indigo_ccd_driver.h>
 #include <indigo/indigo_raw_utils.h>
+#include <indigo/indigo_bahtinov.h>
 #include <indigo/indigo_align.h>
 #include <indigo/indigo_polynomial_fit.h>
 
@@ -70,7 +71,7 @@
 #define AGENT_IMAGER_FOCUS_ITERATIVE_FINAL_ITEM  		(AGENT_IMAGER_FOCUS_PROPERTY->items+3)
 #define AGENT_IMAGER_FOCUS_UCURVE_SAMPLES_ITEM  		(AGENT_IMAGER_FOCUS_PROPERTY->items+4)
 #define AGENT_IMAGER_FOCUS_UCURVE_STEP_ITEM  				(AGENT_IMAGER_FOCUS_PROPERTY->items+5)
-#define AGENT_IMAGER_FOCUS_BAHTINOV_SIGMA_ITEM  		(AGENT_IMAGER_FOCUS_PROPERTY->items+6)
+#define AGENT_IMAGER_FOCUS_BAHTINOV_ANGLE_ITEM  		(AGENT_IMAGER_FOCUS_PROPERTY->items+6)
 #define AGENT_IMAGER_FOCUS_BRACKETING_STEP_ITEM  		(AGENT_IMAGER_FOCUS_PROPERTY->items+7)
 #define AGENT_IMAGER_FOCUS_BACKLASH_ITEM     				(AGENT_IMAGER_FOCUS_PROPERTY->items+8)
 #define AGENT_IMAGER_FOCUS_BACKLASH_OVERSHOOT_ITEM  (AGENT_IMAGER_FOCUS_PROPERTY->items+9)
@@ -220,6 +221,7 @@
 #define GRID	32
 
 #define MAX_BAHTINOV_FRAME_SIZE 500
+#define BAHTINOV_LEARN_CONFIDENCE 1.5
 
 #define TO_MB(x) ((x) / (1024.0 * 1024.0))
 
@@ -294,6 +296,7 @@ typedef struct {
 	bool use_hfd_estimator;
 	bool use_rms_estimator;
 	bool use_bahtinov_estimator;
+	double bahtinov_mask_angle[2];
 	bool use_ucurve_focusing;
 	bool use_iterative_focusing;
 	bool use_aux_1;
@@ -342,7 +345,7 @@ static bool get_disk_usage(const char* path, double* total_mb, double* free_mb, 
 	DWORD error = GetLastError();
 	switch (error) {
 	case ERROR_PATH_NOT_FOUND:
-		INDIGO_DRIVER_ERROR(DRIVER_NAME, "GetDiskFreeSpaceExA() failed for '%s': Path not found (error %d)", path, error);
+		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "GetDiskFreeSpaceExA() failed for '%s': Path not found (error %d)", path, error);
 		break;
 	case ERROR_INVALID_NAME:
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "GetDiskFreeSpaceExA() failed for '%s': Invalid name (error %d)", path, error);
@@ -508,6 +511,13 @@ static bool validate_related_agent(indigo_device *device, indigo_property *info_
 	if (!strncmp(info_property->device, "ASTAP Agent", 11)) {
 		return true;
 	}
+	if (!strncmp(info_property->device, "Platesolver Agent", sizeof("Platesolver Agent") - 1)) {
+		return true;
+	}
+	if (!strncmp(info_property->device, "INDIGO Solver Agent", 19)) {
+		return true;
+	}
+	// the Solver Agent of older INDIGO servers
 	if (!strncmp(info_property->device, "Solver Agent", 12)) {
 		return true;
 	}
@@ -651,11 +661,11 @@ static bool capture_frame(indigo_device *device) {
 			}
 		}
 		pthread_mutex_unlock(&DEVICE_PRIVATE_DATA->last_image_mutex);
-		indigo_raw_header *header = (indigo_raw_header *)(DEVICE_PRIVATE_DATA->last_image);
-		if (header == NULL || (header->signature != INDIGO_RAW_MONO8 && header->signature != INDIGO_RAW_MONO16 && header->signature != INDIGO_RAW_RGB24 && header->signature != INDIGO_RAW_RGB48)) {
-			indigo_send_message(device, ALERT_PROPERTY, "RAW image not received");
+		if (!indigo_validate_raw_image(DEVICE_PRIVATE_DATA->last_image, DEVICE_PRIVATE_DATA->last_image_size)) {
+			indigo_send_message(device, ALERT_PROPERTY, "Invalid or incomplete RAW image");
 			return false;
 		}
+		indigo_raw_header *header = (indigo_raw_header *)(DEVICE_PRIVATE_DATA->last_image);
 		DEVICE_PRIVATE_DATA->last_width = header->width;
 		DEVICE_PRIVATE_DATA->last_height = header->height;
 		/* This is potentially bayered image, if so we need to equalize the channels */
@@ -922,6 +932,40 @@ static void restore_subframe(indigo_device *device) {
 	}
 }
 
+// Bahtinov focus error with the configured mask angle, the learned mask angle or a free angle search. A confident free search
+// result (re)defines the learned angle, so a changed mask is picked up when the learned angle stops matching.
+static double bahtinov_focus_error(indigo_device *device, indigo_raw_header *header) {
+	void *data = (char *)header + sizeof(indigo_raw_header);
+	double configured[2] = { -AGENT_IMAGER_FOCUS_BAHTINOV_ANGLE_ITEM->number.value, AGENT_IMAGER_FOCUS_BAHTINOV_ANGLE_ITEM->number.value };
+	double *learned = DEVICE_PRIVATE_DATA->bahtinov_mask_angle;
+	double *mask_angle = configured[1] > 0 ? configured : (learned[1] > 0 ? learned : NULL);
+	indigo_bahtinov_result result;
+	bool found = mask_angle != NULL && indigo_bahtinov_analyze(header->signature, data, header->width, header->height, mask_angle, &result);
+	if (!found && configured[1] <= 0) {
+		found = indigo_bahtinov_analyze(header->signature, data, header->width, header->height, NULL, &result);
+		if (found && mask_angle != NULL && result.confidence < BAHTINOV_LEARN_CONFIDENCE) {
+			found = false;
+		}
+		if (found && result.confidence >= BAHTINOV_LEARN_CONFIDENCE && (fabs(result.angle[0] - learned[0]) > 0.5 || fabs(result.angle[1] - learned[1]) > 0.5)) {
+			learned[0] = result.angle[0];
+			learned[1] = result.angle[1];
+			indigo_send_message(device, BUSY_PROPERTY, "Bahtinov mask angle detected: %.2f° / %.2f°", learned[0], learned[1]);
+		}
+	}
+	AGENT_IMAGER_SPIKE_1_RHO_ITEM->number.value = found ? result.rho[0] : 0;
+	AGENT_IMAGER_SPIKE_1_THETA_ITEM->number.value = found ? result.theta[0] : 0;
+	AGENT_IMAGER_SPIKE_2_RHO_ITEM->number.value = found ? result.rho[1] : 0;
+	AGENT_IMAGER_SPIKE_2_THETA_ITEM->number.value = found ? result.theta[1] : 0;
+	AGENT_IMAGER_SPIKE_3_RHO_ITEM->number.value = found ? result.rho[2] : 0;
+	AGENT_IMAGER_SPIKE_3_THETA_ITEM->number.value = found ? result.theta[2] : 0;
+	if (found) {
+		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Bahtinov focus error %+.3fpx, outer spikes %.2f° / %.2f°, SNR %.1f / %.1f / %.1f, confidence %.2f", result.error, result.angle[0], result.angle[1], result.snr[0], result.snr[1], result.snr[2], result.confidence);
+	} else {
+		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Bahtinov pattern not found");
+	}
+	return found ? fabs(result.error) : -1;
+}
+
 static bool capture_and_process_frame(indigo_device *device, uint8_t **saturation_mask) {
 	if (!capture_frame(device)) {
 		return false;
@@ -999,7 +1043,7 @@ static bool capture_and_process_frame(indigo_device *device, uint8_t **saturatio
 		} else if (DEVICE_PRIVATE_DATA->use_bahtinov_estimator) {
 			if (header->width <= MAX_BAHTINOV_FRAME_SIZE && header->height <= MAX_BAHTINOV_FRAME_SIZE) {
 				AGENT_IMAGER_STATS_FOCUS_POSITION_ITEM->number.value = DEVICE_PRIVATE_DATA->focuser_position;
-				AGENT_IMAGER_STATS_BAHTINOV_ITEM->number.value = indigo_bahtinov_error(header->signature, (char *)header + sizeof(indigo_raw_header), header->width, header->height, AGENT_IMAGER_FOCUS_BAHTINOV_SIGMA_ITEM->number.value, &AGENT_IMAGER_SPIKE_1_RHO_ITEM->number.value, &AGENT_IMAGER_SPIKE_1_THETA_ITEM->number.value, &AGENT_IMAGER_SPIKE_2_RHO_ITEM->number.value, &AGENT_IMAGER_SPIKE_2_THETA_ITEM->number.value, &AGENT_IMAGER_SPIKE_3_RHO_ITEM->number.value, &AGENT_IMAGER_SPIKE_3_THETA_ITEM->number.value);
+				AGENT_IMAGER_STATS_BAHTINOV_ITEM->number.value = bahtinov_focus_error(device, header);
 			} else {
 				AGENT_IMAGER_STATS_BAHTINOV_ITEM->number.value = -1;
 			}
@@ -1011,8 +1055,19 @@ static bool capture_and_process_frame(indigo_device *device, uint8_t **saturatio
 	return true;
 }
 
+static char *first_related_solver_agent(indigo_device *device) {
+	static char *solver_agents[] = { "Astrometry Agent", "ASTAP Agent", "Platesolver Agent", "INDIGO Solver Agent", "Solver Agent" };
+	for (int i = 0; i < (int)(sizeof(solver_agents) / sizeof(solver_agents[0])); i++) {
+		char *related_agent_name = indigo_filter_first_related_agent(device, solver_agents[i]);
+		if (related_agent_name) {
+			return related_agent_name;
+		}
+	}
+	return NULL;
+}
+
 static void disable_solver(indigo_device *device) {
-	char *related_agent_name = indigo_filter_first_related_agent_2(device, "Astrometry Agent", "ASTAP Agent");
+	char *related_agent_name = first_related_solver_agent(device);
 	if (related_agent_name) {
 		indigo_change_switch_property_1(FILTER_DEVICE_CONTEXT->client, related_agent_name, AGENT_PLATESOLVER_SOLVE_IMAGES_PROPERTY_NAME, AGENT_PLATESOLVER_SOLVE_IMAGES_DISABLED_ITEM_NAME, true);
 	}
@@ -1692,7 +1747,7 @@ static void streaming_batch_process(indigo_device *device) {
 static double estimator(indigo_device *device) {
 	if (DEVICE_PRIVATE_DATA->use_rms_estimator) {
 		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "RMS contrast = %g", AGENT_IMAGER_STATS_RMS_CONTRAST_ITEM->number.value);
-		if (AGENT_IMAGER_STATS_RMS_CONTRAST_ITEM->number.value == 0) {
+		if (!isfinite(AGENT_IMAGER_STATS_RMS_CONTRAST_ITEM->number.value) || AGENT_IMAGER_STATS_RMS_CONTRAST_ITEM->number.value <= 0) {
 			return NAN;
 		}
 		return AGENT_IMAGER_STATS_RMS_CONTRAST_ITEM->number.value;
@@ -1930,18 +1985,33 @@ static int calculate_mode(int arr[], int n) {
 }
 
 static double reduce_ucurve_best_focus(double *best_focuses, int count) {
+	if (count <= 0) {
+		return NAN;
+	}
 	double avg_best_focus = 0;
 	for(int i = 0; i < count; i++) {
+		if (!isfinite(best_focuses[i])) {
+			return NAN;
+		}
 		avg_best_focus += best_focuses[i];
 		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "UC: Best focus for star #%d is at position %.3f", i, best_focuses[i]);
 	}
 	avg_best_focus /= count;
 	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "UC: Average best focus = %f", avg_best_focus);
+	if (!isfinite(avg_best_focus)) {
+		return NAN;
+	}
 	if (count < 4) {
 		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "UC: Not enough stars to calculate standard deviation using average best focus");
 		return avg_best_focus;
 	}
 	double best_focus_stddev = indigo_stddev(best_focuses, count);
+	if (!isfinite(best_focus_stddev)) {
+		return NAN;
+	}
+	if (best_focus_stddev == 0) {
+		return avg_best_focus;
+	}
 	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "UC: Best focus standard deviation = %f", best_focus_stddev);
 	double best_focus = 0;
 	int used_values = 0;
@@ -1954,6 +2024,9 @@ static double reduce_ucurve_best_focus(double *best_focuses, int count) {
 		} else {
 			INDIGO_DRIVER_DEBUG(DRIVER_NAME, "UC (-): Ignoring outlier best focus for star #%d at position %.3f", i, best_focuses[i]);
 		}
+	}
+	if (used_values == 0) {
+		return NAN;
 	}
 	best_focus /= used_values;
 	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "UC: Best focus after outlier removal = %f", best_focus);
@@ -2203,6 +2276,11 @@ static bool autofocus_ucurve(indigo_device *device) {
 	double best_focus = reduce_ucurve_best_focus(best_focuses, stars_used);
 	/* Calculate the steps to best focus */
 	double steps_to_focus = fabs(DEVICE_PRIVATE_DATA->focuser_position - best_focus);
+	if (!isfinite(best_focus) || !isfinite(steps_to_focus)) {
+		indigo_send_message(device, ALERT_PROPERTY, "U-Curve failed to calculate a finite best focus position");
+		focus_failed = true;
+		goto ucurve_finish;
+	}
 	indigo_send_message(device, IDLE_PROPERTY, "U-Curve found best focus at position %.3f", best_focus);
 	INDIGO_DRIVER_DEBUG(DRIVER_NAME, "UC: U-Curve found best focus at position %.3f, steps_to_focus = %g", best_focus, steps_to_focus);
 	if (!move_focuser_with_overshoot_if_needed(device, !moving_out, steps_to_focus, DEVICE_PRIVATE_DATA->saved_backlash, true)) {
@@ -2596,7 +2674,7 @@ static indigo_result agent_device_attach(indigo_device *device) {
 		indigo_init_number_item(AGENT_IMAGER_FOCUS_ITERATIVE_FINAL_ITEM, AGENT_IMAGER_FOCUS_ITERATIVE_FINAL_ITEM_NAME, "Iterative final step", 1, 0xFFFF, 1, 5);
 		indigo_init_number_item(AGENT_IMAGER_FOCUS_UCURVE_SAMPLES_ITEM, AGENT_IMAGER_FOCUS_UCURVE_SAMPLES_ITEM_NAME, "U-Curve fitting samples", 6, MAX_UCURVE_SAMPLES, 1, 10);
 		indigo_init_number_item(AGENT_IMAGER_FOCUS_UCURVE_STEP_ITEM, AGENT_IMAGER_FOCUS_UCURVE_STEP_ITEM_NAME, "U-Curve sample step", 1, 0xFFFF, 1, 20);
-		indigo_init_number_item(AGENT_IMAGER_FOCUS_BAHTINOV_SIGMA_ITEM, AGENT_IMAGER_FOCUS_BAHTINOV_SIGMA_ITEM_NAME, "Bahtinov sigma", 0, 3, 0, 0.15);
+		indigo_init_number_item(AGENT_IMAGER_FOCUS_BAHTINOV_ANGLE_ITEM, AGENT_IMAGER_FOCUS_BAHTINOV_ANGLE_ITEM_NAME, "Bahtinov mask angle (0 = learn)", 0, 45, 0.1, 0);
 		indigo_init_number_item(AGENT_IMAGER_FOCUS_BRACKETING_STEP_ITEM, AGENT_IMAGER_FOCUS_BRACKETING_STEP_ITEM_NAME, "Bracketing step", -0xFFFF, 0xFFFF, 1, 1);
 		indigo_init_number_item(AGENT_IMAGER_FOCUS_BACKLASH_ITEM, AGENT_IMAGER_FOCUS_BACKLASH_ITEM_NAME, "Backlash", 0, 0xFFFF, 1, 0);
 		indigo_init_number_item(AGENT_IMAGER_FOCUS_BACKLASH_OVERSHOOT_ITEM, AGENT_IMAGER_FOCUS_BACKLASH_OVERSHOOT_ITEM_NAME, "Backlash overshoot factor (1 disabled)", 1, 3, 0.5, 1);

@@ -34,8 +34,8 @@
 # type is the model of the device (from its 'device' record, the device name
 # without one; --type replaces it), the counts are the device's own cases (tagged
 # cases planned, their pass records passed), and the line is OK only when all of
-# them passed. Devices of the same model share one line. A run without tags is
-# recorded exactly as before.
+# them passed and every test process exited successfully. Devices of the same
+# model share one line. A run without tags is recorded exactly as before.
 #
 # Every test writes its results into the file named by INDIGO_TEST_RESULTS (see
 # indigo_test/AGENTS.md), so the recorded counts do not depend on the text a
@@ -50,6 +50,7 @@ import datetime
 import os
 import platform
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -91,7 +92,7 @@ FILTER_VARIABLES = re.compile(r"^(INDIGO_TEST_CASE_FILTER|[A-Z0-9_]*_TEST_FILTER
 
 EXAMPLES = """
 The driver is built first, then its tests run, and the result is written as one
-line into the '## Testing' section of the driver's README.md, replacing the
+list item into the '## Testing' section of the driver's README.md, replacing the
 previous run of the same operating system, architecture and type, after which
 TEST_SUMMARY.md is regenerated. Nothing is committed. Build the INDIGO library
 with 'make all' in the project root before the first run.
@@ -102,11 +103,15 @@ run executes 'make test-<driver>-hw' and is recorded under the model of the
 device the suite connected to. A hot-plug run adds the unplug and replug case
 and is recorded under the model followed by ' (hot-plug)'.
 
+--dry-run previews only the final README.md and TEST_SUMMARY.md records.
+Builds and tests still execute, create temporary/build files and, with --hw,
+communicate with hardware.
+
 examples:
   run the simulator tests of a driver and record them
     tools/run_driver_test.py focuser_dsd
 
-  see what would be recorded, without touching any file
+  preview the final records; builds and tests still run and may create files
     tools/run_driver_test.py mount_lx200 --dry-run
 
   run the hardware suite, telling it which port or camera to use; anything
@@ -324,21 +329,21 @@ def update_readme(readme, record):
 	if start is None:
 		while lines and not lines[-1].strip():
 			lines.pop()
-		lines += ["", "## Testing", "", record]
+		lines += ["", "## Testing", "", make_test_summary.format_record(record)]
 	else:
 		end = next((i for i in range(start + 1, len(lines)) if make_test_summary.NEXT_HEADING.match(lines[i])), len(lines))
 		records = []
 		for line in lines[start + 1:end]:
-			match = make_test_summary.RECORD.match(line.strip())
+			match = make_test_summary.parse_record(line)
 			if match is None:
 				if line.strip():
 					print("%s: dropping malformed record '%s'" % (readme, line), file=sys.stderr)
 				continue
 			if (match.group("os"), match.group("architecture"), match.group("type")) != key:
-				records.append(line.strip())
+				records.append(match.group(0))
 		records.append(record)
 		records.sort(key=lambda line: make_test_summary.RECORD.match(line).group("timestamp"))
-		section = ["## Testing", ""] + records
+		section = ["## Testing", ""] + [make_test_summary.format_record(line) for line in records]
 		if end < len(lines):
 			section.append("")
 		lines[start:end] = section
@@ -384,6 +389,26 @@ def main():
 	if record and filters:
 		print("run_driver_test: %s set, the run will not be recorded" % ", ".join(filters), file=sys.stderr)
 		record = False
+
+	# Partial hardware profiles must never replace a full camera acceptance record.
+	pentax_hw_args = os.environ.get("PENTAX_HW_ARGS", "--run")
+	for argument in make_arguments:
+		if argument.startswith("PENTAX_HW_ARGS="):
+			pentax_hw_args = argument.split("=", 1)[1]
+	if driver == "ccd_pentax" and hardware and record:
+		for argument in make_arguments:
+			if re.match(r"^PENTAX_HW_ARGS\s*[:+?!]*=", argument) and not argument.startswith("PENTAX_HW_ARGS="):
+				fail("Use the PENTAX_HW_ARGS= assignment form for a recorded Pentax profile")
+		try:
+			profile = shlex.split(pentax_hw_args)
+		except ValueError:
+			fail("Invalid Pentax hardware profile quoting")
+		if profile not in (["--run"], ["--baseline"], ["--single-frame"], ["--bulb-only"]):
+			fail("A recorded Pentax profile must be the literal --run, --baseline, --single-frame or --bulb-only")
+		profile_labels = {"--baseline": "(connection baseline)", "--single-frame": "(single frame)", "--bulb-only": "(bulb)"}
+		label = profile_labels.get(profile[0])
+		if label is not None and (args.type is None or label not in args.type):
+			fail("Pentax %s recording requires --type 'PENTAX K-m %s' or --no-record" % (profile[0], label))
 
 	if not args.no_build:
 		build_driver(driver_dir)
@@ -452,7 +477,7 @@ def main():
 			device_type = args.type or model
 			if hot_plug and not device_type.endswith(HOT_PLUG_SUFFIX):
 				device_type += HOT_PLUG_SUFFIX
-			device_ok = device_planned > 0 and device_passed == device_planned
+			device_ok = not failures and device_planned > 0 and device_passed == device_planned
 			print("%s: %s %d/%d %s" % (driver, device_type, device_planned, device_passed, "OK" if device_ok else "Failed"))
 			lines.append("%s %s %s %s %s %d/%d %s" % (timestamp, driver_version(driver_dir, driver), host_os(), host_architecture(), device_type, device_planned, device_passed, "OK" if device_ok else "Failed"))
 		for line in lines:

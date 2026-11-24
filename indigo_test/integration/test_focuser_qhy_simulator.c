@@ -64,6 +64,20 @@ static bool control(const char *command, int value) {
 	return atomic_file(control_path, "%s %d", command, value);
 }
 
+// A control the simulator has applied (it removes the file), so the next one can follow.
+static bool control_applied(const char *command, int value) {
+	if (!control(command, value)) {
+		return false;
+	}
+	for (int i = 0; i < 100; i++) {
+		if (access(control_path, F_OK) != 0) {
+			return true;
+		}
+		indigo_usleep(20000);
+	}
+	return false;
+}
+
 static int commands(const char *request) {
 	FILE *file = fopen(event_path, "r");
 	if (!file) {
@@ -100,6 +114,83 @@ static int command_line(const char *request, int occurrence) {
 	return result;
 }
 
+// The n-th (from 1) received request, an empty string if there is none.
+static void nth_command(int occurrence, char *request, size_t size) {
+	FILE *file = fopen(event_path, "r");
+	request[0] = 0;
+	if (!file) {
+		return;
+	}
+	char line[512], kind[16], value[300];
+	double timestamp;
+	while (fgets(line, sizeof(line), file)) {
+		if (sscanf(line, "%lf %15s %299[^\r\n]", &timestamp, kind, value) == 3 && !strcmp(kind, "RX") && --occurrence == 0) {
+			snprintf(request, size, "%s", value);
+			break;
+		}
+	}
+	fclose(file);
+}
+
+// Received requests starting with the prefix ("" counts all of them).
+static int received_prefix(const char *prefix) {
+	FILE *file = fopen(event_path, "r");
+	int count = 0;
+	if (!file) {
+		return -1;
+	}
+	char line[512], kind[16], value[300];
+	double timestamp;
+	while (fgets(line, sizeof(line), file)) {
+		if (sscanf(line, "%lf %15s %299[^\r\n]", &timestamp, kind, value) == 3 && !strcmp(kind, "RX") && !strncmp(value, prefix, strlen(prefix))) {
+			count++;
+		}
+	}
+	fclose(file);
+	return count;
+}
+
+static int received(void) {
+	return received_prefix("");
+}
+
+// Position replies the controller sent after the last abort request, i.e. the readbacks of the stopped focuser.
+static int positions_after_abort(int *positions, int size) {
+	FILE *file = fopen(event_path, "r");
+	int count = 0;
+	if (!file) {
+		return 0;
+	}
+	char line[512], kind[16], value[300];
+	double timestamp;
+	int position;
+	while (fgets(line, sizeof(line), file)) {
+		if (sscanf(line, "%lf %15s %299[^\r\n]", &timestamp, kind, value) != 3) {
+			continue;
+		}
+		if (!strcmp(kind, "RX") && !strcmp(value, "{\"cmd_id\":3}")) {
+			count = 0;
+		} else if (!strcmp(kind, "TX") && sscanf(value, "{\"idx\":5,\"pos\":%d}", &position) == 1 && count < size) {
+			positions[count++] = position;
+		}
+	}
+	fclose(file);
+	return count;
+}
+
+static bool target_is(double target) {
+	return find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.target == target;
+}
+
+// Waits until the abort's readback and two idle polls after it were answered.
+static bool polled_after_abort(void) {
+	int positions[8], count = 0;
+	for (int i = 0; i < 60 && (count = positions_after_abort(positions, 8)) < 3; i++) {
+		indigo_usleep(100000);
+	}
+	return count >= 3;
+}
+
 static bool wait_commands(const char *request, int expected) {
 	for (int i = 0; i < 100; i++) {
 		if (commands(request) >= expected) {
@@ -127,6 +218,7 @@ static void driver_stop(void) {
 	indigo_result result = indigo_focuser_qhy(INDIGO_DRIVER_SHUTDOWN, NULL);
 	indigo_detach_client(&simulator_test_client);
 	indigo_stop();
+	ASSERT_EQ_INT(0, updates_without_define());
 	release_cached_properties();
 	ASSERT_EQ_INT(INDIGO_OK, result);
 }
@@ -139,7 +231,7 @@ static const char *observed_names[] = {
 	CONNECTION_PROPERTY_NAME, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_ABORT_MOTION_PROPERTY_NAME,
 	FOCUSER_SPEED_PROPERTY_NAME, FOCUSER_REVERSE_MOTION_PROPERTY_NAME, FOCUSER_TEMPERATURE_PROPERTY_NAME, FOCUSER_MODE_PROPERTY_NAME
 };
-static atomic_uint revisions[ARRAY_SIZE(observed_names)], position_busy;
+static atomic_uint revisions[ARRAY_SIZE(observed_names)], position_busy, steps_busy;
 static _Atomic(indigo_device *) focuser_device;
 static atomic_bool watch_position;
 static atomic_int watch_results, watch_first_state;
@@ -170,6 +262,9 @@ static indigo_result observe_update(indigo_client *client, indigo_device *device
 	}
 	if (index == 1 && property->state == INDIGO_BUSY_STATE) {
 		atomic_fetch_add(&position_busy, 1);
+	}
+	if (index == 2 && property->state == INDIGO_BUSY_STATE) {
+		atomic_fetch_add(&steps_busy, 1);
 	}
 	return result;
 }
@@ -221,6 +316,16 @@ static bool at_position_long(double position) {
 	return false;
 }
 
+static bool position_above(double minimum) {
+	for (int i = 0; i < 100; i++) {
+		if (find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.value > minimum) {
+			return true;
+		}
+		indigo_usleep(50000);
+	}
+	return false;
+}
+
 static bool property_presence(const char *name, bool present) {
 	for (int i = 0; i < 100; i++) {
 		if ((find_cached_property(name) != NULL) == present) {
@@ -243,7 +348,8 @@ static bool exchange(indigo_uni_handle *handle, const char *request, const char 
 static void simulator_protocol(void) {
 	indigo_uni_handle *handle = indigo_uni_open_serial_with_speed(fixture.port, 9600, INDIGO_LOG_DEBUG);
 	SERIAL_CHECK_TRUE(handle != NULL);
-	SERIAL_CHECK_TRUE(exchange(handle, "{\"cmd_id\":1}", "{\"idx\":1,\"version\":\"1.2.3\",\"bv\":\"QFOCUSER-1.0\"}"));
+	// The reply of firmware 20231207: "id" with JSON escapes, numeric "version" and "bv".
+	SERIAL_CHECK_TRUE(exchange(handle, "{\"cmd_id\":1}", "{\"idx\":1,\"id\":\"@\\u0019SC8HP\\u0006TH2A\",\"version\":20231207,\"bv\":108}"));
 	SERIAL_CHECK_TRUE(exchange(handle, "{\"cmd_id\":4}", "{\"idx\":4,\"o_t\":18500,\"c_t\":30200,\"c_r\":120}"));
 	SERIAL_CHECK_TRUE(exchange(handle, "{\"cmd_id\":5}", "{\"idx\":5,\"pos\":50000}"));
 	SERIAL_CHECK_TRUE(exchange(handle, "{\"cmd_id\":13,\"speed\":8}", "{\"idx\":13}"));
@@ -281,12 +387,31 @@ static void capabilities(void) {
 	SERIAL_CHECK_TRUE(at_position(50000));
 	SERIAL_CHECK_TRUE(wait_for_number_item_value(FOCUSER_TEMPERATURE_PROPERTY_NAME, FOCUSER_TEMPERATURE_ITEM_NAME, 18.5, .01));
 	SERIAL_CHECK_TRUE(commands("{\"cmd_id\":1}") == 1 && commands("{\"cmd_id\":13,\"speed\":1}") == 1 && commands("{\"cmd_id\":7,\"rev\":0}") == 1);
+	// INFO holds what the controller reported.
+	SERIAL_CHECK_TRUE(!strcmp(find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_FW_REVISION_ITEM_NAME)->text.value, "20231207"));
+	SERIAL_CHECK_TRUE(!strcmp(find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_HW_REVISION_ITEM_NAME)->text.value, "108"));
+	// Connect sequence: version, position, speed, reverse, temperature/voltage.
+	const char *sequence[] = { "{\"cmd_id\":1}", "{\"cmd_id\":5}", "{\"cmd_id\":13,\"speed\":1}", "{\"cmd_id\":7,\"rev\":0}", "{\"cmd_id\":4}" };
+	for (int i = 0; i < 5; i++) {
+		char request[300];
+		nth_command(i + 1, request, sizeof(request));
+		SERIAL_CHECK_TRUE(!strcmp(request, sequence[i]));
+	}
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_TEMPERATURE_PROPERTY_NAME)->perm == INDIGO_RO_PERM);
 cleanup:
 	driver_stop();
 }
 
 static void movement_and_sync(void) {
 	SERIAL_CHECK_TRUE(driver_start());
+	// A GOTO right after connect is judged against the position read at connect: OK, no command.
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 50000, INDIGO_OK_STATE));
+	SERIAL_CHECK_EQ_INT(0, commands("{\"cmd_id\":6,\"tar\":50000}"));
+	// SYNC right after connect, to the published value, still reaches the controller.
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ON_POSITION_SET_PROPERTY_NAME, FOCUSER_ON_POSITION_SET_SYNC_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 50000, INDIGO_OK_STATE));
+	SERIAL_CHECK_EQ_INT(1, commands("{\"cmd_id\":11,\"init_val\":50000}"));
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ON_POSITION_SET_PROPERTY_NAME, FOCUSER_ON_POSITION_SET_GOTO_ITEM_NAME, true, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 52000, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(at_position(52000) && atomic_load(&position_busy) > 0);
 	SERIAL_CHECK_TRUE(commands("{\"cmd_id\":6,\"tar\":52000}") == 1);
@@ -313,8 +438,17 @@ cleanup:
 static void limits_and_controls(void) {
 	SERIAL_CHECK_TRUE(driver_start());
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_LIMITS_PROPERTY_NAME, FOCUSER_LIMITS_MAX_POSITION_ITEM_NAME, 50500, INDIGO_OK_STATE));
+	// The motion ranges follow the limits.
+	SERIAL_CHECK_TRUE(property_presence(FOCUSER_POSITION_PROPERTY_NAME, true));
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.max == 50500);
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME)->number.max == 50500);
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 60000, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(at_position(50500));
+	SERIAL_CHECK_EQ_INT(1, commands("{\"cmd_id\":6,\"tar\":50500}"));
+	// A limit that excludes the current position is refused and the old one kept.
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_LIMITS_PROPERTY_NAME, FOCUSER_LIMITS_MAX_POSITION_ITEM_NAME, 2000, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_LIMITS_PROPERTY_NAME, FOCUSER_LIMITS_MAX_POSITION_ITEM_NAME)->number.value == 50500);
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.max == 50500);
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_DIRECTION_PROPERTY_NAME, FOCUSER_DIRECTION_MOVE_INWARD_ITEM_NAME, true, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, 60000, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(at_position(0));
@@ -327,17 +461,249 @@ cleanup:
 
 static void abort_and_overlap(void) {
 	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_SPEED_PROPERTY_NAME, FOCUSER_SPEED_ITEM_NAME, 8, INDIGO_OK_STATE));
+	unsigned steps = atomic_load(&steps_busy);
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 150000, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(wait_commands("{\"cmd_id\":6,\"tar\":150000}", 1));
 	indigo_change_number_property_1(&simulator_test_client, qhy_focuser.device_name, FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, 5000);
 	indigo_change_number_property_1(&simulator_test_client, qhy_focuser.device_name, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 160000);
+	// The abort lands mid-move with both motion properties BUSY.
+	SERIAL_CHECK_TRUE(position_above(50000) && atomic_load(&steps_busy) > steps);
+	unsigned before = atomic_load(&revisions[1]);
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
-	SERIAL_CHECK_TRUE(commands("{\"cmd_id\":6,\"tar\":150000}") == 1 && commands("{\"cmd_id\":6,\"tar\":160000}") == 0 && commands("{\"cmd_id\":3}") >= 1);
+	SERIAL_CHECK_TRUE(commands("{\"cmd_id\":6,\"tar\":150000}") == 1 && commands("{\"cmd_id\":6,\"tar\":160000}") == 0 && commands("{\"cmd_id\":3}") == 1);
+	// An aborted move ends ALERT on both motion properties at the stopped position, keeping the requested target.
+	SERIAL_CHECK_TRUE(new_state(FOCUSER_POSITION_PROPERTY_NAME, before, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_STEPS_PROPERTY_NAME)->state == INDIGO_ALERT_STATE);
 	indigo_item *position = find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME);
-	SERIAL_CHECK_TRUE(position && position->number.value == position->number.target && position->number.value < 150000);
+	double stopped = position->number.value;
+	SERIAL_CHECK_TRUE(position->number.target == 150000 && stopped > 50000 && stopped < 150000);
+	// The stop is real: the abort's readback and two later polls report the same position, the polls keep ALERT and the target.
+	int positions[8], count = 0;
+	for (int i = 0; i < 60 && (count = positions_after_abort(positions, 8)) < 3; i++) {
+		indigo_usleep(100000);
+	}
+	SERIAL_CHECK_TRUE(count >= 3);
+	for (int i = 0; i < count; i++) {
+		SERIAL_CHECK_EQ_INT((int)stopped, positions[i]);
+	}
+	indigo_usleep(300000);
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_POSITION_PROPERTY_NAME)->state == INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(target_is(150000));
+	// Abort while idle and a request with the item OFF are answered without a command.
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, false, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(commands("{\"cmd_id\":3}") == 1);
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.value == stopped);
+	// A reconnect after the aborted move starts with an OK position, and a fresh move works.
+	disconnect_serial_device(&qhy_focuser);
+	SERIAL_CHECK_TRUE(connect_serial_device(&qhy_focuser, fixture.port));
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_POSITION_PROPERTY_NAME)->state == INDIGO_OK_STATE);
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 51000, INDIGO_OK_STATE));
+cleanup:
+	driver_stop();
+}
+
+static void stop_refused(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_SPEED_PROPERTY_NAME, FOCUSER_SPEED_ITEM_NAME, 8, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 150000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_above(50000));
+	// A refused stop ends ABORT ALERT; the move is never reported completed.
+	SERIAL_CHECK_TRUE(inject("ABORT", "wrong"));
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_POSITION_PROPERTY_NAME)->state == INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.value < 150000);
+	SERIAL_CHECK_TRUE(target_is(150000));
+	// An immediate retry stops the focuser and a fresh move works.
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_EQ_INT(2, commands("{\"cmd_id\":3}"));
+	SERIAL_CHECK_TRUE(target_is(150000));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 60000, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(at_position(60000));
+cleanup:
+	driver_stop();
+}
+
+static void disconnect_motion(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_SPEED_PROPERTY_NAME, FOCUSER_SPEED_ITEM_NAME, 8, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 150000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_above(50000));
+	disconnect_serial_device(&qhy_focuser);
+	SERIAL_CHECK_TRUE(!context.connected);
+	// The stop is sent once before the port closes; no command or poll follows.
+	SERIAL_CHECK_EQ_INT(1, commands("{\"cmd_id\":3}"));
+	int before = received();
+	indigo_usleep(2500000);
+	SERIAL_CHECK_EQ_INT(before, received());
+	SERIAL_CHECK_TRUE(connect_serial_device(&qhy_focuser, fixture.port));
+	// After reconnect the position is OK at the real, stopped position, and a fresh move works.
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_POSITION_PROPERTY_NAME)->state == INDIGO_OK_STATE);
+	double stopped = find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.value;
+	SERIAL_CHECK_TRUE(stopped > 50000 && stopped < 150000);
+	int positions[8];
+	int count = positions_after_abort(positions, 8);
+	SERIAL_CHECK_TRUE(count > 0 && positions[count - 1] == (int)stopped);
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 51000, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(at_position(51000));
+cleanup:
+	driver_stop();
+}
+
+// The port disappears while idle or during a move: the device disconnects with ALERT, and connects again to the port
+// of a replugged focuser, here the second simulator, without a restart of the driver, with nothing left BUSY. Garbled
+// replies only fail their command, see idle_poll_failure.
+static void transport_loss(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	if (!strcmp(current_profile, "idle")) {
+		SERIAL_CHECK_TRUE(inject("TRANSPORT", "close"));
+	} else {
+		SERIAL_CHECK_TRUE(inject("MOVE", "close"));
+		SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, qhy_focuser.device_name, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 60000));
+	}
+	// the shared wait expects a disconnection to end OK, a lost connection ends ALERT
+	bool lost = false;
+	for (int i = 0; i < 100 && !lost; i++) {
+		lost = !context.connected && context.disconnected && context.last_connection_state == INDIGO_ALERT_STATE;
+		indigo_usleep(100000);
+	}
+	SERIAL_CHECK_TRUE(lost);
+	SERIAL_CHECK_TRUE(connect_serial_device(&qhy_focuser, second_fixture.port));
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_POSITION_PROPERTY_NAME) != NULL);
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_POSITION_PROPERTY_NAME)->state != INDIGO_BUSY_STATE);
+cleanup:
+	driver_stop();
+}
+
+static void settings_during_motion(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_SPEED_PROPERTY_NAME, FOCUSER_SPEED_ITEM_NAME, 8, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 150000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(wait_commands("{\"cmd_id\":6,\"tar\":150000}", 1));
+	// Speed, reverse, limits, compensation and mode requested during a move end ALERT without a command or a change.
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_SPEED_PROPERTY_NAME, FOCUSER_SPEED_ITEM_NAME, 5, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_REVERSE_MOTION_PROPERTY_NAME, FOCUSER_REVERSE_MOTION_ENABLED_ITEM_NAME, true, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(commands("{\"cmd_id\":13,\"speed\":5}") == 0 && commands("{\"cmd_id\":7,\"rev\":1}") == 0);
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_LIMITS_PROPERTY_NAME, FOCUSER_LIMITS_MAX_POSITION_ITEM_NAME, 1000000, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_LIMITS_PROPERTY_NAME, FOCUSER_LIMITS_MAX_POSITION_ITEM_NAME)->number.value == 2000000);
+	double coefficient = find_cached_item(FOCUSER_COMPENSATION_PROPERTY_NAME, FOCUSER_COMPENSATION_ITEM_NAME)->number.value;
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, qhy_focuser.device_name, FOCUSER_COMPENSATION_PROPERTY_NAME, FOCUSER_COMPENSATION_ITEM_NAME, coefficient + 7));
+	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_COMPENSATION_PROPERTY_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_COMPENSATION_PROPERTY_NAME, FOCUSER_COMPENSATION_ITEM_NAME)->number.value == coefficient);
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_MODE_PROPERTY_NAME, FOCUSER_MODE_AUTOMATIC_ITEM_NAME, true, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_MODE_PROPERTY_NAME, FOCUSER_MODE_MANUAL_ITEM_NAME)->sw.value);
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_STEPS_PROPERTY_NAME) != NULL);
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
+cleanup:
+	driver_stop();
+}
+
+static void idle_poll_failure(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(at_position(50000));
+	unsigned before = atomic_load(&revisions[1]);
+	SERIAL_CHECK_TRUE(inject("POSITION", "malformed"));
+	SERIAL_CHECK_TRUE(new_state(FOCUSER_POSITION_PROPERTY_NAME, before, INDIGO_ALERT_STATE));
+	// ALERT keeps the last valid value; the next good poll restores OK and a move works.
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.value == 50000);
+	before = atomic_load(&revisions[1]);
+	SERIAL_CHECK_TRUE(new_state(FOCUSER_POSITION_PROPERTY_NAME, before, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 51000, INDIGO_OK_STATE));
+cleanup:
+	driver_stop();
+}
+
+static void external_motion(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(at_position(50000));
+	unsigned busy = atomic_load(&position_busy);
+	// Motion the driver did not command is BUSY while it runs (a relative move is refused meanwhile), then OK with
+	// the target equal to the measured value, and no command is sent.
+	SERIAL_CHECK_TRUE(control("external", 70000));
+	for (int i = 0; i < 100 && atomic_load(&position_busy) == busy; i++) {
+		indigo_usleep(50000);
+	}
+	SERIAL_CHECK_TRUE(atomic_load(&position_busy) > busy);
+	SERIAL_CHECK_TRUE(assert_rejected_number_change(FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, 300));
+	SERIAL_CHECK_TRUE(at_position_long(70000));
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.target == 70000);
+	SERIAL_CHECK_EQ_INT(0, commands("{\"cmd_id\":6,\"tar\":70000}"));
+	// A later relative move starts from the measured position.
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_DIRECTION_PROPERTY_NAME, FOCUSER_DIRECTION_MOVE_OUTWARD_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, 1000, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(at_position(71000));
+	SERIAL_CHECK_EQ_INT(1, commands("{\"cmd_id\":6,\"tar\":71000}"));
+cleanup:
+	driver_stop();
+}
+
+static void moving_at_connect(void) {
+	// The focuser is already moving when the driver connects.
+	SERIAL_CHECK_TRUE(control_applied("external", 90000));
+	unsigned busy = atomic_load(&position_busy);
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(at_position_long(90000));
+	SERIAL_CHECK_TRUE(atomic_load(&position_busy) > busy);
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.target == 90000);
+	SERIAL_CHECK_EQ_INT(0, commands("{\"cmd_id\":6,\"tar\":90000}"));
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_DIRECTION_PROPERTY_NAME, FOCUSER_DIRECTION_MOVE_OUTWARD_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, 1000, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(at_position(91000));
+	SERIAL_CHECK_EQ_INT(1, commands("{\"cmd_id\":6,\"tar\":91000}"));
+cleanup:
+	driver_stop();
+}
+
+static void start_state(void) {
+	// Connect publishes the controller's position and temperature, not driver defaults.
+	SERIAL_CHECK_TRUE(control_applied("position", 123450));
+	SERIAL_CHECK_TRUE(control_applied("outside", -3500));
+	SERIAL_CHECK_TRUE(driver_start());
+	indigo_item *position = find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME);
+	SERIAL_CHECK_TRUE(position->number.value == 123450 && position->number.target == 123450);
+	SERIAL_CHECK_TRUE(wait_for_number_item_value(FOCUSER_TEMPERATURE_PROPERTY_NAME, FOCUSER_TEMPERATURE_ITEM_NAME, -3.5, .01));
+cleanup:
+	driver_stop();
+}
+
+static void sync_failure(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ON_POSITION_SET_PROPERTY_NAME, FOCUSER_ON_POSITION_SET_SYNC_ITEM_NAME, true, INDIGO_OK_STATE));
+	// A failed SYNC ends ALERT with the real position kept; the next SYNC is accepted.
+	SERIAL_CHECK_TRUE(inject("SYNC", "wrong"));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 40000, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.value == 50000);
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 40000, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(at_position(40000));
+	SERIAL_CHECK_EQ_INT(2, commands("{\"cmd_id\":11,\"init_val\":40000}"));
+cleanup:
+	driver_stop();
+}
+
+static void compensation_manual_and_invalid(void) {
+	SERIAL_CHECK_TRUE(control("outside", 20000));
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(wait_for_number_item_value(FOCUSER_TEMPERATURE_PROPERTY_NAME, FOCUSER_TEMPERATURE_ITEM_NAME, 20, .01));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_COMPENSATION_PROPERTY_NAME, FOCUSER_COMPENSATION_ITEM_NAME, 100, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_COMPENSATION_PROPERTY_NAME, FOCUSER_COMPENSATION_THRESHOLD_ITEM_NAME, 0.1, INDIGO_OK_STATE));
+	// Compensation never moves the focuser in manual mode.
+	SERIAL_CHECK_TRUE(control("outside", 25000));
+	indigo_usleep(4500000);
+	SERIAL_CHECK_EQ_INT(0, received_prefix("{\"cmd_id\":6,"));
+	SERIAL_CHECK_TRUE(at_position(50000));
+	// In automatic mode an invalid temperature moves nothing.
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_MODE_PROPERTY_NAME, FOCUSER_MODE_AUTOMATIC_ITEM_NAME, true, INDIGO_OK_STATE));
+	indigo_usleep(2200000);
+	SERIAL_CHECK_TRUE(control_applied("outside", -50000));
+	SERIAL_CHECK_TRUE(control_applied("chip", -50000));
+	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_TEMPERATURE_PROPERTY_NAME, INDIGO_IDLE_STATE));
+	int requests = received();
+	indigo_usleep(4500000);
+	SERIAL_CHECK_TRUE(received() > requests);
+	SERIAL_CHECK_EQ_INT(0, received_prefix("{\"cmd_id\":6,"));
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.value == 50000);
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_MODE_PROPERTY_NAME, FOCUSER_MODE_MANUAL_ITEM_NAME, true, INDIGO_OK_STATE));
 cleanup:
 	driver_stop();
 }
@@ -400,6 +766,31 @@ cleanup:
 	driver_stop();
 }
 
+static void abort_queued(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(at_position(50000));
+	// The GOTO waits in the held queue; the urgent abort overtakes it.
+	SERIAL_CHECK_TRUE(hold_queue(atomic_load(&focuser_device)));
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, qhy_focuser.device_name, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 52000));
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&simulator_test_client, qhy_focuser.device_name, FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true));
+	atomic_store(&gate_release, true);
+	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_ABORT_MOTION_PROPERTY_NAME, INDIGO_OK_STATE));
+	indigo_usleep(500000);
+	SERIAL_CHECK_EQ_INT(0, commands("{\"cmd_id\":6,\"tar\":52000}"));
+	SERIAL_CHECK_EQ_INT(1, commands("{\"cmd_id\":3}"));
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME)->number.value == 50000);
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_STEPS_PROPERTY_NAME)->state != INDIGO_BUSY_STATE);
+	// The target stays the never-sent request, also after idle polls.
+	SERIAL_CHECK_TRUE(target_is(52000));
+	SERIAL_CHECK_TRUE(polled_after_abort());
+	SERIAL_CHECK_TRUE(target_is(52000));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 52000, INDIGO_OK_STATE));
+cleanup:
+	atomic_store(&gate_release, true);
+	driver_stop();
+}
+
 static void rejected_change_alerts_and_keeps_values(void) {
 	SERIAL_CHECK_TRUE(driver_start());
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 150000, INDIGO_BUSY_STATE));
@@ -407,16 +798,36 @@ static void rejected_change_alerts_and_keeps_values(void) {
 	SERIAL_CHECK_TRUE(assert_rejected_number_change(FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, 5000));
 	SERIAL_CHECK_TRUE(commands("{\"cmd_id\":6,\"tar\":150000}") == 1);
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
-	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_OK_STATE));
+	// The aborted move ends ALERT.
+	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, 100, INDIGO_BUSY_STATE));
 cleanup:
 	driver_stop();
 }
 
-static void rejected_connection(void) {
+// Quoted "version" and "bv" (the form the driver accepted before firmware 20231207 was seen) connect as well.
+static void quoted_version(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(commands("{\"cmd_id\":1}") == 1);
+	SERIAL_CHECK_TRUE(!strcmp(find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_FW_REVISION_ITEM_NAME)->text.value, "1.2.3"));
+	SERIAL_CHECK_TRUE(!strcmp(find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_HW_REVISION_ITEM_NAME)->text.value, "108"));
+cleanup:
+	driver_stop();
+}
+
+// Escaped quotes and backslashes inside a well-formed "id" string neither end the string nor break the handshake.
+static void escaped_id(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(commands("{\"cmd_id\":1}") == 1);
+	SERIAL_CHECK_TRUE(!strcmp(find_cached_item(INFO_PROPERTY_NAME, INFO_DEVICE_FW_REVISION_ITEM_NAME)->text.value, "20231207"));
+cleanup:
+	driver_stop();
+}
+
+static void connection_refused(const char *command, const char *action) {
 	SERIAL_CHECK_TRUE(bring_up_serial_driver(&qhy_focuser));
 	int descriptors = open_descriptors();
-	SERIAL_CHECK_TRUE(inject(current_profile, !strcmp(current_profile, "VERSION") ? "missing" : "wrong"));
+	SERIAL_CHECK_TRUE(inject(command, action));
 	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_text_property_1_raw(&simulator_test_client, qhy_focuser.device_name, DEVICE_PORT_PROPERTY_NAME, DEVICE_PORT_ITEM_NAME, fixture.port));
 	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&simulator_test_client, qhy_focuser.device_name, CONNECTION_PROPERTY_NAME, CONNECTION_CONNECTED_ITEM_NAME, true));
 	SERIAL_CHECK_TRUE(wait_for_property_state(CONNECTION_PROPERTY_NAME, INDIGO_ALERT_STATE));
@@ -424,6 +835,15 @@ static void rejected_connection(void) {
 	SERIAL_CHECK_TRUE(connect_serial_device(&qhy_focuser, fixture.port));
 cleanup:
 	driver_stop();
+}
+
+static void rejected_connection(void) {
+	connection_refused(current_profile, !strcmp(current_profile, "VERSION") ? "missing" : "wrong");
+}
+
+// A handshake string whose closing quote is escaped never ends: the reply is malformed and refused.
+static void escaped_quote_connection(void) {
+	connection_refused("VERSION", "escaped-quote");
 }
 
 static void setting_failure(void) {
@@ -447,7 +867,10 @@ static void start_failure(void) {
 	SERIAL_CHECK_TRUE(driver_start());
 	SERIAL_CHECK_TRUE(inject("MOVE", current_profile));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 60000, INDIGO_ALERT_STATE));
+	// A failed start keeps the requested target, also through the recovering abort.
+	SERIAL_CHECK_TRUE(target_is(60000));
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(target_is(60000));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 51000, INDIGO_OK_STATE));
 cleanup:
 	driver_stop();
@@ -459,7 +882,14 @@ static void motion_read_failure(void) {
 	unsigned before = atomic_load(&revisions[1]);
 	SERIAL_CHECK_TRUE(inject("POSITION", current_profile));
 	SERIAL_CHECK_TRUE(new_state(FOCUSER_POSITION_PROPERTY_NAME, before, INDIGO_ALERT_STATE));
+	// A failed readback during motion stops the focuser, and later idle polls do not turn the failure OK.
+	SERIAL_CHECK_EQ_INT(1, commands("{\"cmd_id\":3}"));
+	indigo_usleep(4500000);
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_POSITION_PROPERTY_NAME)->state == INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_STEPS_PROPERTY_NAME)->state == INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(target_is(80000));
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(target_is(80000));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 51000, INDIGO_OK_STATE));
 cleanup:
 	driver_stop();
@@ -472,6 +902,10 @@ static void stalled_motion(void) {
 	unsigned before = atomic_load(&revisions[1]);
 	SERIAL_CHECK_TRUE(new_state(FOCUSER_POSITION_PROPERTY_NAME, before, INDIGO_ALERT_STATE));
 	SERIAL_CHECK_TRUE(commands("{\"cmd_id\":3}") >= 1);
+	// Later good idle polls do not turn the stalled move OK nor rewrite the requested target.
+	indigo_usleep(4500000);
+	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_POSITION_PROPERTY_NAME)->state == INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(target_is(80000));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 51000, INDIGO_OK_STATE));
 cleanup:
 	driver_stop();
@@ -484,8 +918,10 @@ static void polling_and_temperature(void) {
 	SERIAL_CHECK_TRUE(control("outside", 20000));
 	SERIAL_CHECK_TRUE(wait_for_number_item_value(FOCUSER_TEMPERATURE_PROPERTY_NAME, FOCUSER_TEMPERATURE_ITEM_NAME, 19.25, .01));
 	unsigned before = atomic_load(&revisions[6]);
+	double last = find_cached_item(FOCUSER_TEMPERATURE_PROPERTY_NAME, FOCUSER_TEMPERATURE_ITEM_NAME)->number.value;
 	SERIAL_CHECK_TRUE(inject("TEMPERATURE", current_profile));
 	SERIAL_CHECK_TRUE(new_state(FOCUSER_TEMPERATURE_PROPERTY_NAME, before, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(find_cached_item(FOCUSER_TEMPERATURE_PROPERTY_NAME, FOCUSER_TEMPERATURE_ITEM_NAME)->number.value == last);
 	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_TEMPERATURE_PROPERTY_NAME, INDIGO_OK_STATE));
 cleanup:
 	driver_stop();
@@ -510,8 +946,13 @@ static void compensation_limit_and_failure(void) {
 	indigo_usleep(2200000);
 	SERIAL_CHECK_TRUE(inject("MOVE", "wrong"));
 	unsigned before = atomic_load(&revisions[1]);
+	int moves = commands("{\"cmd_id\":6,\"tar\":50050}");
 	SERIAL_CHECK_TRUE(control("outside", 22000));
 	SERIAL_CHECK_TRUE(new_state(FOCUSER_POSITION_PROPERTY_NAME, before, INDIGO_ALERT_STATE));
+	// The failed correction is retried from the kept reference: the focuser is stopped, read and moved again.
+	SERIAL_CHECK_TRUE(at_position_long(50050));
+	SERIAL_CHECK_EQ_INT(moves + 2, commands("{\"cmd_id\":6,\"tar\":50050}"));
+	SERIAL_CHECK_TRUE(commands("{\"cmd_id\":3}") >= 1);
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_MODE_PROPERTY_NAME, FOCUSER_MODE_MANUAL_ITEM_NAME, true, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ON_POSITION_SET_PROPERTY_NAME, FOCUSER_ON_POSITION_SET_GOTO_ITEM_NAME, true, INDIGO_OK_STATE));
@@ -533,7 +974,10 @@ static void invalid_temperature_recovery(void) {
 	unsigned before = atomic_load(&revisions[6]);
 	SERIAL_CHECK_TRUE(control("chip", -50000));
 	SERIAL_CHECK_TRUE(new_state(FOCUSER_TEMPERATURE_PROPERTY_NAME, before, INDIGO_IDLE_STATE));
+	// No valid reading: IDLE is published once, not on every poll.
 	before = atomic_load(&revisions[6]);
+	indigo_usleep(4500000);
+	SERIAL_CHECK_EQ_INT((int)before, (int)atomic_load(&revisions[6]));
 	SERIAL_CHECK_TRUE(control("chip", 25000));
 	SERIAL_CHECK_TRUE(new_state(FOCUSER_TEMPERATURE_PROPERTY_NAME, before, INDIGO_OK_STATE));
 cleanup:
@@ -558,6 +1002,7 @@ static void modes_and_compensation(void) {
 	indigo_usleep(2300000);
 	SERIAL_CHECK_TRUE(control("outside", 20000));
 	SERIAL_CHECK_TRUE(at_position_long(50000));
+	SERIAL_CHECK_EQ_INT(0, updates_without_define());
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_MODE_PROPERTY_NAME, FOCUSER_MODE_MANUAL_ITEM_NAME, true, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(property_presence(FOCUSER_STEPS_PROPERTY_NAME, true));
 	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_POSITION_PROPERTY_NAME)->perm == INDIGO_RW_PERM);
@@ -595,13 +1040,12 @@ static void instances(void) {
 	SERIAL_CHECK_TRUE(at_position(50000));
 cleanup:
 	disconnect_serial_device(&second);
-	reset_simulator_context(&qhy_focuser);
 	disconnect_serial_device(&qhy_focuser);
 	indigo_change_number_property_1(&simulator_test_client, qhy_focuser.device_name, ADDITIONAL_INSTANCES_PROPERTY_NAME, ADDITIONAL_INSTANCES_COUNT_ITEM_NAME, 0);
 	driver_stop();
 }
 
-typedef struct { const char *name; void (*run)(void); const char *profile; bool no_out_temp; bool second; } qhy_test;
+typedef struct { const char *name; void (*run)(void); const char *profile; bool no_out_temp; bool second; const char *extra[3]; } qhy_test;
 
 static int run_cases(const qhy_test *cases, int count) {
 	int failures = 0;
@@ -623,10 +1067,15 @@ static int run_cases(const qhy_test *cases, int count) {
 		current_profile = cases[i].profile;
 		unlink(fault_path);
 		unlink(control_path);
-		const char *args[5] = { "--profile", !strcmp(current_profile, "split") ? "split" : "normal", NULL, NULL, NULL };
+		const char *args[7] = { "--profile", !strcmp(current_profile, "split") ? "split" : "normal" };
+		int argument_count = 2;
 		if (cases[i].no_out_temp) {
-			args[2] = "--no-out-temp";
+			args[argument_count++] = "--no-out-temp";
 		}
+		for (int j = 0; j < 3 && cases[i].extra[j]; j++) {
+			args[argument_count++] = cases[i].extra[j];
+		}
+		args[argument_count] = NULL;
 		if (!start_external_serial_simulator_with_args(&fixture, FOCUSER_QHY_SIMULATOR_EXECUTABLE, args)) {
 			failures++;
 			break;
@@ -685,9 +1134,24 @@ int main(void) {
 		{ "movement_sync_relative", movement_and_sync, "normal", false, false },
 		{ "limits_speed_reverse", limits_and_controls, "normal", false, false },
 		{ "abort_overlap", abort_and_overlap, "normal", false, false },
+		{ "abort_queued", abort_queued, "normal", false, false },
+		{ "stop_refused", stop_refused, "normal", false, false },
+		{ "disconnect_motion", disconnect_motion, "normal", false, false },
+		{ "transport_loss_idle", transport_loss, "idle", false, true },
+		{ "transport_loss_move", transport_loss, "move", false, true },
+		{ "settings_during_motion", settings_during_motion, "normal", false, false },
+		{ "idle_poll_failure", idle_poll_failure, "normal", false, false },
+		{ "external_motion", external_motion, "normal", false, false },
+		{ "moving_at_connect", moving_at_connect, "normal", false, false },
+		{ "start_state", start_state, "normal", false, false },
+		{ "sync_failure", sync_failure, "normal", false, false },
+		{ "compensation_manual_invalid", compensation_manual_and_invalid, "normal", false, false },
 		{ "rejected_change", rejected_change_alerts_and_keeps_values, "normal", false, false },
 		{ "position_request_survives_poll", position_request_survives_poll, "normal", false, false },
+		{ "quoted_version_handshake", quoted_version, "normal", false, false, { "--quoted-version", "--firmware", "1.2.3" } },
 		{ "init_version_failure", rejected_connection, "VERSION", false, false },
+		{ "init_version_escaped_quote", escaped_quote_connection, "normal", false, false },
+		{ "escaped_id_handshake", escaped_id, "normal", false, false, { "--id", "a\\\"b\\\\c" } },
 		{ "init_position_failure", rejected_connection, "POSITION", false, false },
 		{ "init_speed_failure", rejected_connection, "SPEED", false, false },
 		{ "init_reverse_failure", rejected_connection, "REVERSE", false, false },

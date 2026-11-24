@@ -32,7 +32,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000004
+#define DRIVER_VERSION       0x03000006
 #define DRIVER_NAME          "indigo_aux_svbpowerbox"
 #define DRIVER_LABEL         "SVBONY PowerBox"
 #define AUX_DEVICE_NAME      "SVBONY PowerBox"
@@ -230,17 +230,19 @@ static bool svbpb_set_port(indigo_device *device, uint8_t port, uint8_t value) {
 	return svbpb_command(device, cmd, 3, NULL, 2);
 }
 
-static bool svbpowerbox_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 115200, INDIGO_LOG_DEBUG | BINARY_LOG);
+static bool svbpowerbox_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 115200, INDIGO_LOG_DEBUG | BINARY_LOG, error_message);
 	if (PRIVATE_DATA->handle != NULL) {
 		// Reset the ESP32 by clearing DTR/RTS
 		indigo_uni_set_dtr(PRIVATE_DATA->handle, false);
 		indigo_uni_set_rts(PRIVATE_DATA->handle, false);
-		// Wait for boot messages to clear (up to 3 seconds, 300 ms silence)
+		// Wait for boot messages to clear (up to 3 seconds, 300 ms silence); a box that keeps sending
+		// is not waited for longer, the handshake below decides whether it answers.
 		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Waiting for device boot...");
 		char boot_buf[512];
 		long n;
-		while (indigo_uni_wait_for_data(PRIVATE_DATA->handle, 300000) > 0) {
+		double boot_deadline = indigo_monotonic_time() + 3;
+		while (indigo_monotonic_time() < boot_deadline && indigo_uni_wait_for_data(PRIVATE_DATA->handle, 300000) > 0) {
 			n = indigo_uni_read_available(PRIVATE_DATA->handle, boot_buf, sizeof(boot_buf));
 			if (n > 0) {
 				INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Boot data (%ld bytes)", n);
@@ -465,7 +467,8 @@ static void aux_timer_callback(indigo_device *device) {
 static void aux_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = svbpowerbox_open(device);
+		const char *error_message = NULL;
+		connection_result = svbpowerbox_open(device, &error_message);
 		if (connection_result) {
 			indigo_define_property(device, AUX_POWER_OUTLET_PROPERTY, NULL);
 			indigo_define_property(device, AUX_POWER_OUTLET_VOLTAGE_PROPERTY, NULL);
@@ -480,7 +483,11 @@ static void aux_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}

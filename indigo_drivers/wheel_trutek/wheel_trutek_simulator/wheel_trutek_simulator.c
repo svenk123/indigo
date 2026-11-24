@@ -35,6 +35,9 @@
 
 #include "../../../indigo_test/simulator_common/serial_simulator_common.h"
 
+#define TRUTEK_SIMULATOR_VERSION 3
+// Version 2 adds one-shot raw reply faults and ordered protocol capture.
+
 // ----------------------------------------------------------------- options
 
 typedef struct {
@@ -42,13 +45,23 @@ typedef struct {
 	bool trace;
 	const char *ready_file;
 	int slots;
+	int count_byte;
+	bool stuck;
+	int move_byte;
+	int query_byte;
+	int bad_checksum;
 } simulator_options;
 
 static simulator_options options = {
 	.headless = false,
 	.trace = true,
 	.ready_file = NULL,
-	.slots = 5
+	.slots = 5,
+	.count_byte = -1,
+	.stuck = false,
+	.move_byte = -1,
+	.query_byte = -1,
+	.bad_checksum = -1
 };
 
 static const char *simulator_name = "wheel_trutek";
@@ -56,11 +69,13 @@ static volatile sig_atomic_t running = 1;
 static int serial_fd = -1;
 static int current_filter = 1;
 static int target_filter = 1;
+static bool moved;
+static FILE *event_log;
 
 // ----------------------------------------------------------------- runtime
 
 static void usage(const char *name) {
-	fprintf(stderr, "Usage: %s [--headless] [--ready-file <path>] [--trace] [--no-trace] [--slots <count>]\n", name);
+	fprintf(stderr, "Usage: %s [--headless] [--ready-file <path>] [--trace] [--no-trace] [--slots <count>] [--count-byte <0-255>] [--stuck] [--move-byte <0-255>] [--query-byte <0-255>]\n", name);
 }
 
 static bool parse_int(const char *text, int min, int max, int *value) {
@@ -84,8 +99,27 @@ static bool parse_args(int argc, char *argv[]) {
 			options.trace = false;
 		} else if (!strcmp(argv[i], "--ready-file") && i + 1 < argc) {
 			options.ready_file = argv[++i];
+		} else if (!strcmp(argv[i], "--bad-checksum") && i + 1 < argc) {
+			if (!parse_int(argv[++i], 129, 131, &options.bad_checksum)) {
+				return false;
+			}
+		} else if (!strcmp(argv[i], "--stuck")) {
+			options.stuck = true;
+		} else if (!strcmp(argv[i], "--move-byte") && i + 1 < argc) {
+			if (!parse_int(argv[++i], 0, 255, &options.move_byte)) {
+				return false;
+			}
+		} else if (!strcmp(argv[i], "--query-byte") && i + 1 < argc) {
+			if (!parse_int(argv[++i], 0, 255, &options.query_byte)) {
+				return false;
+			}
 		} else if (!strcmp(argv[i], "--slots") && i + 1 < argc) {
 			if (!parse_int(argv[++i], 1, 9, &options.slots)) {
+				return false;
+			}
+		} else if (!strcmp(argv[i], "--count-byte") && i + 1 < argc) {
+			// A raw filter count byte for malformed-reply tests; the wheel keeps --slots slots.
+			if (!parse_int(argv[++i], 0, 255, &options.count_byte)) {
 				return false;
 			}
 		} else {
@@ -109,12 +143,20 @@ static uint8_t checksum(uint8_t header, uint8_t command, uint8_t value) {
 }
 
 static void trace_frame(const char *prefix, const uint8_t frame[4]) {
+	if (event_log != NULL) {
+		fprintf(event_log, "%s %02X %02X %02X %02X\n", prefix, frame[0], frame[1], frame[2], frame[3]);
+		fflush(event_log);
+	}
 	if (options.trace) {
 		fprintf(stderr, "%s %02X %02X %02X %02X\n", prefix, frame[0], frame[1], frame[2], frame[3]);
 	}
 }
 
 static void advance_filter(void) {
+	if (options.stuck) {
+		// A jammed wheel keeps reporting that it is moving and never reaches the target.
+		return;
+	}
 	if (current_filter < target_filter) {
 		current_filter++;
 	} else if (current_filter > target_filter) {
@@ -125,6 +167,10 @@ static void advance_filter(void) {
 static bool write_frame(int fd, uint8_t command, uint8_t value) {
 	uint8_t frame[4] = { 0xA5, command, value, 0 };
 	frame[3] = checksum(frame[0], frame[1], frame[2]);
+	if (command == options.bad_checksum) {
+		frame[3] ^= 1;
+		options.bad_checksum = -1;
+	}
 	trace_frame("<", frame);
 	return serial_simulator_write_all(fd, (const char *)frame, sizeof(frame));
 }
@@ -138,21 +184,27 @@ static bool dispatch_command(int fd, const uint8_t frame[4]) {
 
 	switch (frame[1]) {
 		case 0x01:
+			moved = true;
 			if (frame[2] >= 1 && frame[2] <= options.slots) {
 				target_filter = frame[2];
 			}
-			if (!write_frame(fd, 0x81, current_filter == target_filter ? (uint8_t)target_filter : 0)) {
+			if (!write_frame(fd, 0x81, options.move_byte >= 0 ? (uint8_t)options.move_byte : current_filter == target_filter ? (uint8_t)target_filter : 0)) {
 				return false;
 			}
+			options.move_byte = -1;
 			break;
 		case 0x02:
-			if (!write_frame(fd, 0x82, current_filter == target_filter ? (uint8_t)(0x30 + current_filter) : 0x30)) {
+			if (!write_frame(fd, 0x82, moved && options.query_byte >= 0 ? (uint8_t)options.query_byte : current_filter == target_filter ? (uint8_t)(0x30 + current_filter) : 0x30)) {
 				return false;
+			}
+			if (moved) {
+				options.query_byte = -1;
 			}
 			break;
 		case 0x03:
 			current_filter = target_filter = 1;
-			if (!write_frame(fd, 0x83, (uint8_t)(0x30 + options.slots))) {
+			moved = false;
+			if (!write_frame(fd, 0x83, options.count_byte >= 0 ? (uint8_t)options.count_byte : (uint8_t)(0x30 + options.slots))) {
 				return false;
 			}
 			break;
@@ -203,6 +255,14 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
+	if (options.ready_file != NULL) {
+		char path[PATH_MAX];
+		int length = snprintf(path, sizeof(path), "%s.events", options.ready_file);
+		if (length > 0 && (size_t)length < sizeof(path)) {
+			event_log = fopen(path, "w");
+		}
+	}
+
 	if (!options.headless) {
 		printf("Trutek wheel simulator is running on %s\n", port);
 		fflush(stdout);
@@ -227,6 +287,9 @@ int main(int argc, char *argv[]) {
 		}
 	}
 
+	if (event_log != NULL) {
+		fclose(event_log);
+	}
 	if (serial_fd >= 0) {
 		close(serial_fd);
 		serial_fd = -1;

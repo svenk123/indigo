@@ -110,6 +110,13 @@ static bool read_fault(uint8_t command, uint8_t index, char *action, size_t size
 		unlink(fault_file);
 		return false;
 	}
+	if (!strcmp(key, "manual")) {
+		// Rotary-switch motion: the controller moves at its speed without a command from the PC.
+		serial_motion_start(&motion, strtol(action, NULL, 10), 2000.0 / (speed + 1));
+		moving = stalled = false;
+		unlink(fault_file);
+		return false;
+	}
 	char expected[32];
 	if (command == CMD_SREG || command == CMD_GREG) {
 		snprintf(expected, sizeof(expected), "%c:%u", command, index);
@@ -126,6 +133,10 @@ static bool read_fault(uint8_t command, uint8_t index, char *action, size_t size
 }
 
 static bool write_reply(mjkzz_message *reply, const char *action) {
+	if (!strcmp(action, "slow")) {
+		// Delayed but valid reply: holds the driver's queue on this transaction.
+		usleep(800000);
+	}
 	if (!strcmp(action, "silent")) {
 		return true;
 	}
@@ -143,6 +154,9 @@ static bool write_reply(mjkzz_message *reply, const char *action) {
 		reply->ucIDX++;
 	} else if (!strcmp(action, "badvalue")) {
 		set_message_value(reply, 40000);
+	} else if (!strcmp(action, "othervalue")) {
+		// The manual does not say what a set command returns in ucMSG.
+		set_message_value(reply, 7);
 	}
 	reply->ucSUM = checksum(reply);
 	if (!strcmp(action, "badsum")) {
@@ -349,7 +363,7 @@ static bool parse_args(int argc, char **argv) {
 		} else if (i + 1 < argc && !strcmp(argv[i], "--profile")) {
 			profile = argv[++i];
 		} else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
-			printf("Usage: %s [--headless] [--trace] [--ready-file PATH] [--profile normal|split|alternate]\n", argv[0]);
+			printf("Usage: %s [--headless] [--trace] [--ready-file PATH] [--profile normal|split|alternate|moving]\n", argv[0]);
 			exit(0);
 		} else {
 			fprintf(stderr, "Unknown/incomplete option: %s\n", argv[i]);
@@ -366,6 +380,10 @@ int main(int argc, char **argv) {
 	}
 	serial_motion_sync(&motion, !strcmp(profile, "alternate") ? -1000 : 0);
 	speed = !strcmp(profile, "alternate") ? 2 : 0;
+	if (!strcmp(profile, "moving")) {
+		// Rotary-switch motion already running when the driver connects.
+		serial_motion_start(&motion, 6000, 2000.0 / (speed + 1));
+	}
 	registers[reg_HPWR - reg_STAT] = 8;
 	registers[reg_LPWR - reg_STAT] = 1;
 	registers[reg_MSTEP - reg_STAT] = 2;

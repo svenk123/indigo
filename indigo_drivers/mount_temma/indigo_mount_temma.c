@@ -42,7 +42,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000017
+#define DRIVER_VERSION       0x0300001D
 #define DRIVER_NAME          "indigo_mount_temma"
 #define DRIVER_LABEL         "Takahashi Temma Mount"
 #define MOUNT_DEVICE_NAME    "Takahashi Temma Mount"
@@ -56,6 +56,11 @@
 #define TEMMA_MOTION_RA_WEST 0x04
 #define TEMMA_MOTION_DEC_NORTH 0x08
 #define TEMMA_MOTION_DEC_SOUTH 0x10
+// A Temma slews half the sky in a few minutes; 600 s bounds any GOTO or park whose slew status
+// (s1) never clears.
+#ifndef TEMMA_SLEW_TIMEOUT
+#define TEMMA_SLEW_TIMEOUT   600
+#endif
 
 //- define
 
@@ -94,12 +99,12 @@ typedef struct {
 	indigo_property *high_speed_property;
 	indigo_property *zenith_property;
 	//+ data
-	double current_ra, current_dec;
-	double park_deadline;
+	double goto_deadline, park_deadline;
 	char telescope_side;
 	bool is_busy, start_tracking, stop_tracking;
 	unsigned char mount_motion_mask, guider_motion_mask;
 	bool mount_high_speed;
+	bool standby, high_voltage;
 	char response[128];
 	//- data
 } temma_private_data;
@@ -114,8 +119,8 @@ static void mount_motion_finalizer(indigo_device *device);
 static void guider_guide_ra_finalizer(indigo_device *device);
 static void guider_guide_dec_finalizer(indigo_device *device);
 
-static bool temma_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_config(DEVICE_PORT_ITEM->text.value, "19200-8E1", INDIGO_LOG_DEBUG);
+static bool temma_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_config2(DEVICE_PORT_ITEM->text.value, "19200-8E1", INDIGO_LOG_DEBUG, error_message);
 	return PRIVATE_DATA->handle != NULL;
 }
 
@@ -206,16 +211,24 @@ static bool temma_position_command(indigo_device *device, const char *format, ..
 
 // STN-ON and STN-OFF answer with the standby state the mount now holds, not with an
 // acknowledgement. Standby on means the motors are off, so tracking is STN-OFF.
+// The reply is remembered as the state the mount holds, so a refused request can show it.
 static bool temma_set_standby(indigo_device *device, bool standby) {
 	if (!temma_command(device, true, standby ? "STN-ON" : "STN-OFF")) {
 		return false;
+	}
+	if (!strcmp(PRIVATE_DATA->response, "stn-on") || !strcmp(PRIVATE_DATA->response, "stn-off")) {
+		PRIVATE_DATA->standby = !strcmp(PRIVATE_DATA->response, "stn-on");
 	}
 	return !strcmp(PRIVATE_DATA->response, standby ? "stn-on" : "stn-off");
 }
 
 // v1 and v2 answer with a version line of their own, for example "v1  Power 23.5v".
 static bool temma_set_high_speed(indigo_device *device, bool high) {
-	return temma_command(device, true, high ? "v2" : "v1") && PRIVATE_DATA->response[0] == 'v';
+	if (!temma_command(device, true, high ? "v2" : "v1") || PRIVATE_DATA->response[0] != 'v') {
+		return false;
+	}
+	PRIVATE_DATA->high_voltage = high;
+	return true;
 }
 
 static unsigned char temma_motion_byte(indigo_device *device) {
@@ -253,17 +266,18 @@ static bool temma_update_position(indigo_device *device) {
 	if (sscanf(PRIVATE_DATA->response + 1, "%02d%02d%02d", &degrees, &minutes, &fraction) != 3 || degrees > 23 || minutes > 59) {
 		return false;
 	}
-	PRIVATE_DATA->current_ra = degrees + minutes / 60.0 + fraction / 6000.0;
+	// The last valid position is kept until the whole reply has been validated.
+	double ra = degrees + minutes / 60.0 + fraction / 6000.0;
 	if (sscanf(PRIVATE_DATA->response + 8, "%02d%02d%01d", &degrees, &minutes, &fraction) != 3 || degrees > 90 || minutes > 59 || (degrees == 90 && (minutes != 0 || fraction != 0))) {
 		return false;
 	}
-	PRIVATE_DATA->current_dec = degrees + minutes / 60.0 + fraction / 600.0;
+	double dec = degrees + minutes / 60.0 + fraction / 600.0;
 	if (PRIVATE_DATA->response[7] == '-') {
-		PRIVATE_DATA->current_dec = -PRIVATE_DATA->current_dec;
+		dec = -dec;
 	}
-	indigo_eq_to_j2k(MOUNT_EPOCH_ITEM->number.value, &PRIVATE_DATA->current_ra, &PRIVATE_DATA->current_dec);
-	MOUNT_EQUATORIAL_COORDINATES_RA_ITEM->number.value = PRIVATE_DATA->current_ra;
-	MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM->number.value = PRIVATE_DATA->current_dec;
+	indigo_eq_to_j2k(MOUNT_EPOCH_ITEM->number.value, &ra, &dec);
+	MOUNT_EQUATORIAL_COORDINATES_RA_ITEM->number.value = ra;
+	MOUNT_EQUATORIAL_COORDINATES_DEC_ITEM->number.value = dec;
 	// F says the automatic introduction has just finished, not which side the mount is
 	// on, so the last known side is kept instead of being replaced by a value that is
 	// not a side at all. The GOTO state is followed through s. The mount changes side by
@@ -325,7 +339,8 @@ static bool temma_prepare_position(indigo_device *device) {
 	if (!temma_set_standby(device, false) || !temma_set_lst(device)) {
 		return false;
 	}
-	if (!MOUNT_TRACKING_ON_ITEM->sw.value) {
+	// A tracking request pending in the queue keeps its values, its handler decides the tracking.
+	if (!MOUNT_TRACKING_ON_ITEM->sw.value && MOUNT_TRACKING_PROPERTY->state != INDIGO_BUSY_STATE) {
 		indigo_set_switch(MOUNT_TRACKING_PROPERTY, MOUNT_TRACKING_ON_ITEM, true);
 		MOUNT_TRACKING_PROPERTY->state = INDIGO_OK_STATE;
 		indigo_update_property(device, MOUNT_TRACKING_PROPERTY, NULL);
@@ -336,9 +351,16 @@ static bool temma_prepare_position(indigo_device *device) {
 static void mount_goto_finalizer(indigo_device *device) {
 	if (!IS_CONNECTED || !temma_update_position(device) || !temma_command(device, true, "s") || (strcmp(PRIVATE_DATA->response, "s0") && strcmp(PRIVATE_DATA->response, "s1"))) {
 		MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = INDIGO_ALERT_STATE;
-	} else if (PRIVATE_DATA->response[1] == '1') {
+	} else if (PRIVATE_DATA->response[1] == '1' && indigo_monotonic_time() < PRIVATE_DATA->goto_deadline) {
 		indigo_update_coordinates(device, NULL);
 		indigo_execute_handler_in(device, 0.5, mount_goto_finalizer);
+		return;
+	} else if (PRIVATE_DATA->response[1] == '1') {
+		// The slew never ended: stop it and keep the position reached, the request stays the target.
+		temma_no_reply_command(device, "PS");
+		PRIVATE_DATA->start_tracking = PRIVATE_DATA->stop_tracking = false;
+		MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = INDIGO_ALERT_STATE;
+		indigo_update_coordinates(device, "Slew did not finish in time");
 		return;
 	} else {
 		MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = INDIGO_OK_STATE;
@@ -438,8 +460,9 @@ static void mount_timer_callback(indigo_device *device) {
 static void mount_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = temma_open(device);
+			connection_result = temma_open(device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -454,6 +477,8 @@ static void mount_connection_handler(indigo_device *device) {
 				// The mount keeps neither the sidereal time nor the latitude over a power cycle.
 				connection_result = temma_set_high_speed(device, false) && temma_set_lst(device) && temma_set_latitude(device);
 				if (connection_result) {
+					// v1 is what the mount runs with now, whatever the previous session selected.
+					indigo_set_switch(HIGH_SPEED_PROPERTY, HIGH_SPEED_LOW_ITEM, true);
 					PRIVATE_DATA->mount_motion_mask = PRIVATE_DATA->guider_motion_mask = 0;
 					PRIVATE_DATA->mount_high_speed = false;
 					temma_update_position(device);
@@ -464,6 +489,12 @@ static void mount_connection_handler(indigo_device *device) {
 							CORRECTION_SPEED_RA_ITEM->number.value = ra_correction;
 							CORRECTION_SPEED_DEC_ITEM->number.value = dec_correction;
 						}
+					}
+					// STN-COD reports the standby the mount holds, so tracking starts from the mount's state.
+					PRIVATE_DATA->standby = !MOUNT_TRACKING_ON_ITEM->sw.value;
+					if (temma_command(device, true, "STN-COD") && (!strcmp(PRIVATE_DATA->response, "stn-on") || !strcmp(PRIVATE_DATA->response, "stn-off"))) {
+						PRIVATE_DATA->standby = !strcmp(PRIVATE_DATA->response, "stn-on");
+						indigo_set_switch(MOUNT_TRACKING_PROPERTY, PRIVATE_DATA->standby ? MOUNT_TRACKING_OFF_ITEM : MOUNT_TRACKING_ON_ITEM, true);
 					}
 				}
 			}
@@ -476,7 +507,11 @@ static void mount_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", MOUNT_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", MOUNT_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", MOUNT_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", MOUNT_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				temma_close(device);
 			}
@@ -497,6 +532,9 @@ static void mount_connection_handler(indigo_device *device) {
 		}
 		MOUNT_PARK_PARKED_ITEM->sw.value = false;
 		MOUNT_PARK_PROPERTY->state = INDIGO_OK_STATE;
+		// the relay mask is cleared, so the next session starts with both axes released
+		MOUNT_MOTION_EAST_ITEM->sw.value = MOUNT_MOTION_WEST_ITEM->sw.value = false;
+		MOUNT_MOTION_NORTH_ITEM->sw.value = MOUNT_MOTION_SOUTH_ITEM->sw.value = false;
 		//- mount.on_disconnect
 		// Cancelled change handlers must not leave properties BUSY: a new session starts in a clean state.
 		indigo_property *cancelled_properties[] = {
@@ -511,6 +549,7 @@ static void mount_connection_handler(indigo_device *device) {
 			MOUNT_MOTION_RA_PROPERTY,
 			MOUNT_SET_HOST_TIME_PROPERTY,
 			MOUNT_UTC_TIME_PROPERTY,
+			MOUNT_GUIDE_RATE_PROPERTY,
 			MOUNT_PARK_POSITION_PROPERTY,
 			MOUNT_PARK_SET_PROPERTY,
 			MOUNT_SIDE_OF_PIER_PROPERTY,
@@ -548,7 +587,12 @@ static void mount_correction_speed_handler(indigo_device *device) {
 
 static void mount_high_speed_handler(indigo_device *device) {
 	//+ mount.HIGH_SPEED.on_change
-	HIGH_SPEED_PROPERTY->state = temma_set_high_speed(device, HIGH_SPEED_HIGH_ITEM->sw.value) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+	HIGH_SPEED_PROPERTY->state = INDIGO_OK_STATE;
+	if (!temma_set_high_speed(device, HIGH_SPEED_HIGH_ITEM->sw.value)) {
+		// the configuration the mount confirmed last
+		indigo_set_switch(HIGH_SPEED_PROPERTY, PRIVATE_DATA->high_voltage ? HIGH_SPEED_HIGH_ITEM : HIGH_SPEED_LOW_ITEM, true);
+		HIGH_SPEED_PROPERTY->state = INDIGO_ALERT_STATE;
+	}
 	//- mount.HIGH_SPEED.on_change
 	indigo_update_property(device, HIGH_SPEED_PROPERTY, NULL);
 }
@@ -580,8 +624,7 @@ static void mount_zenith_handler(indigo_device *device) {
 
 static void mount_equatorial_coordinates_handler(indigo_device *device) {
 	if (!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value) {
-		indigo_send_message(device, MOUNT_EQUATORIAL_COORDINATES_PROPERTY, "Mount is parked!");
-		INDIGO_UPDATE_PROPERTY_STATE(MOUNT_EQUATORIAL_COORDINATES_PROPERTY, INDIGO_ALERT_STATE, NULL);
+		indigo_reject_coordinates_change(device, "Mount is parked!");
 		return;
 	}
 	//+ mount.MOUNT_EQUATORIAL_COORDINATES.on_change
@@ -592,6 +635,7 @@ static void mount_equatorial_coordinates_handler(indigo_device *device) {
 	temma_format_position(command, sizeof(command), MOUNT_ON_COORDINATES_SET_SYNC_ITEM->sw.value ? 'D' : 'P', ra, dec);
 	if (temma_prepare_position(device) && temma_position_command(device, "%s", command)) {
 		MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = INDIGO_BUSY_STATE;
+		PRIVATE_DATA->goto_deadline = indigo_monotonic_time() + TEMMA_SLEW_TIMEOUT;
 		PRIVATE_DATA->start_tracking = MOUNT_ON_COORDINATES_SET_TRACK_ITEM->sw.value || MOUNT_ON_COORDINATES_SET_SYNC_ITEM->sw.value;
 		PRIVATE_DATA->stop_tracking = MOUNT_ON_COORDINATES_SET_SLEW_ITEM->sw.value;
 		indigo_update_coordinates(device, NULL);
@@ -648,8 +692,15 @@ static void mount_tracking_handler(indigo_device *device) {
 		INDIGO_UPDATE_PROPERTY_STATE(MOUNT_TRACKING_PROPERTY, INDIGO_ALERT_STATE, NULL);
 		return;
 	}
+	MOUNT_TRACKING_PROPERTY->state = INDIGO_OK_STATE;
 	//+ mount.MOUNT_TRACKING.on_change
-	MOUNT_TRACKING_PROPERTY->state = temma_set_standby(device, !MOUNT_TRACKING_ON_ITEM->sw.value) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+	// the client's request supersedes the tracking a running GOTO would set at its end
+	PRIVATE_DATA->start_tracking = PRIVATE_DATA->stop_tracking = false;
+	if (!temma_set_standby(device, !MOUNT_TRACKING_ON_ITEM->sw.value)) {
+		// the standby state the mount reported, or the last one it confirmed
+		indigo_set_switch(MOUNT_TRACKING_PROPERTY, PRIVATE_DATA->standby ? MOUNT_TRACKING_OFF_ITEM : MOUNT_TRACKING_ON_ITEM, true);
+		MOUNT_TRACKING_PROPERTY->state = INDIGO_ALERT_STATE;
+	}
 	//- mount.MOUNT_TRACKING.on_change
 	indigo_update_property(device, MOUNT_TRACKING_PROPERTY, NULL);
 }
@@ -718,7 +769,7 @@ static void mount_park_handler(indigo_device *device) {
 		char command[32];
 		temma_format_position(command, sizeof(command), 'P', ra, MOUNT_PARK_POSITION_DEC_ITEM->number.value);
 		if (temma_prepare_position(device) && temma_position_command(device, "%s", command)) {
-			PRIVATE_DATA->park_deadline = indigo_monotonic_time() + 600;
+			PRIVATE_DATA->park_deadline = indigo_monotonic_time() + TEMMA_SLEW_TIMEOUT;
 			MOUNT_PARK_PROPERTY->state = MOUNT_EQUATORIAL_COORDINATES_PROPERTY->state = INDIGO_BUSY_STATE;
 			indigo_update_coordinates(device, NULL);
 			indigo_update_property(device, MOUNT_PARK_PROPERTY, NULL);
@@ -760,6 +811,8 @@ static indigo_result mount_attach(indigo_device *device) {
 		MOUNT_PARK_SET_PROPERTY->hidden = false;
 		MOUNT_SIDE_OF_PIER_PROPERTY->hidden = false;
 		MOUNT_ON_COORDINATES_SET_PROPERTY->count = 2;
+		// LL and LK are the only tracking rates the mount has: sidereal and solar.
+		MOUNT_TRACK_RATE_PROPERTY->count = 2;
 		ADDITIONAL_INSTANCES_PROPERTY->hidden = device->base_device != NULL;
 		//- mount.on_attach
 		CORRECTION_SPEED_PROPERTY = indigo_init_number_property(NULL, device->name, CORRECTION_SPEED_PROPERTY_NAME, CCD_ADVANCED_GROUP, "Correction speed", INDIGO_OK_STATE, INDIGO_RW_PERM, 2);
@@ -788,6 +841,7 @@ static indigo_result mount_attach(indigo_device *device) {
 		MOUNT_MOTION_RA_PROPERTY->hidden = false;
 		MOUNT_SET_HOST_TIME_PROPERTY->hidden = true;
 		MOUNT_UTC_TIME_PROPERTY->hidden = true;
+		MOUNT_GUIDE_RATE_PROPERTY->hidden = true;
 		MOUNT_PARK_POSITION_PROPERTY->hidden = false;
 		MOUNT_PARK_SET_PROPERTY->hidden = false;
 		MOUNT_SIDE_OF_PIER_PROPERTY->hidden = false;
@@ -822,8 +876,8 @@ static indigo_result mount_change_property(indigo_device *device, indigo_client 
 		INDIGO_COPY_VALUES_PROCESS_CHANGE(ZENITH_PROPERTY, mount_zenith_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(MOUNT_EQUATORIAL_COORDINATES_PROPERTY, property)) {
-		INDIGO_REJECT_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, MOUNT_EQUATORIAL_COORDINATES_PROPERTY, "Mount is parked!");
-		INDIGO_COPY_VALUES_PROCESS_CHANGE(MOUNT_EQUATORIAL_COORDINATES_PROPERTY, mount_equatorial_coordinates_handler);
+		INDIGO_REJECT_COORDINATES_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, "Mount is parked!");
+		INDIGO_COPY_TARGETS_PROCESS_COORDINATES_CHANGE(mount_equatorial_coordinates_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(MOUNT_ABORT_MOTION_PROPERTY, property)) {
 		INDIGO_COPY_VALUES_PROCESS_URGENT_CHANGE(MOUNT_ABORT_MOTION_PROPERTY, mount_abort_motion_handler);
@@ -876,8 +930,9 @@ static indigo_result mount_detach(indigo_device *device) {
 static void guider_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
+		const char *error_message = NULL;
 		if (PRIVATE_DATA->count == 0) {
-			connection_result = temma_open(device->master_device);
+			connection_result = temma_open(device->master_device, &error_message);
 		}
 		if (connection_result) {
 			PRIVATE_DATA->count++;
@@ -886,7 +941,11 @@ static void guider_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", GUIDER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", GUIDER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", GUIDER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", GUIDER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			if (PRIVATE_DATA->count > 0 && --PRIVATE_DATA->count == 0) {
 				temma_close(device);
 			}

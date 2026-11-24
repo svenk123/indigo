@@ -320,9 +320,10 @@ static void copy_text(char *target, size_t size, const char *source) {
 
 // Copy text that becomes a part of a device name: characters that are not allowed in file names (the configuration of a device is
 // saved in a file named after it), control characters and "@" are replaced, white space at both ends is removed. "@" is the separator
-// of the remote service in the names of the bus: indigo_bus.c routes a request to a remote service "@ <service>" whose name is contained
-// in the device name, indigo_xml.c cuts a name at its last "@" before it is sent to a server and indigo_filter.c takes a related device
-// with "@" for a remote one, so a proxy name has none.
+// of the remote service in the names of the bus: indigo_bus.c routes a change request for a device name that ends with " @ <service>" and
+// an enumeration or BLOB mode request for a device name that contains "@ <service>" to the remote service "@ <service>", indigo_xml.c cuts
+// a name at its last "@" before it is sent to a server and indigo_filter.c takes a related device with "@" for a remote one, so a proxy
+// name has none.
 static void copy_name_part(char *target, size_t size, const char *source) {
 	while (*source == ' ') {
 		source++;
@@ -525,32 +526,42 @@ void system_alpaca_unlock(indigo_device *device) {
 }
 
 // Bus thread, with the lock of the device held: what indigo_reject_change() does to the property, without its write of the state outside
-// the lock. A property that is BUSY belongs to a request that waits for its handler (ALPACA_ACCEPT_ANYTIME): it keeps its state, the
-// refusal is only told.
-static void system_alpaca_refuse_locked(indigo_property *property) {
+// the lock. A property that is BUSY belongs to a request that waits for its handler (ALPACA_ACCEPT_ANYTIME): it is not changed and the
+// refusal is only told with a BUSY message. Returns true if the property was put into ALERT and has to be published.
+static bool system_alpaca_refuse_locked(indigo_property *property) {
+	if (property->state == INDIGO_BUSY_STATE) {
+		return false;
+	}
 	for (int i = 0; i < property->count; i++) {
 		property->items[i].do_update = true;
 	}
-	if (property->state != INDIGO_BUSY_STATE) {
-		property->state = INDIGO_ALERT_STATE;
+	property->state = INDIGO_ALERT_STATE;
+	return true;
+}
+
+static void system_alpaca_publish_refusal(indigo_device *device, indigo_property *property, bool publish, const char *message) {
+	if (publish) {
+		indigo_update_property(device, property, "%s", message);
+	} else {
+		indigo_send_message(device, BUSY_PROPERTY, "%s", message);
 	}
 }
 
 void system_alpaca_reject(indigo_device *device, indigo_property *property, const char *message) {
 	pthread_mutex_lock(&PRIVATE_DATA->mutex);
-	system_alpaca_refuse_locked(property);
+	bool publish = system_alpaca_refuse_locked(property);
 	pthread_mutex_unlock(&PRIVATE_DATA->mutex);
-	indigo_update_property(device, property, "%s", message);
+	system_alpaca_publish_refusal(device, property, publish, message);
 }
 
 bool system_alpaca_accept(indigo_device *device, indigo_property *property, indigo_property *request, int options, alpaca_refusal refusal, indigo_timer_callback handler) {
 	const char *refused = NULL;
-	bool accepted = false;
+	bool accepted = false, publish = false;
 	pthread_mutex_lock(&PRIVATE_DATA->mutex);
 	if ((options & ALPACA_ACCEPT_ANYTIME) || property->state != INDIGO_BUSY_STATE) {
 		refused = refusal != NULL ? refusal(device) : NULL;
 		if (refused != NULL) {
-			system_alpaca_refuse_locked(property);
+			publish = system_alpaca_refuse_locked(property);
 		} else {
 			if (options & ALPACA_ACCEPT_TARGETS) {
 				indigo_property_copy_targets(property, request, false);
@@ -568,7 +579,7 @@ bool system_alpaca_accept(indigo_device *device, indigo_property *property, indi
 			indigo_execute_priority_handler_in(device, (options & ALPACA_ACCEPT_URGENT) ? INDIGO_TASK_PRIORITY_URGENT : INDIGO_TASK_PRIORITY_NORMAL, 0, handler);
 		}
 	} else if (refused != NULL) {
-		indigo_update_property(device, property, "%s", refused);
+		system_alpaca_publish_refusal(device, property, publish, refused);
 	}
 	return accepted;
 }
@@ -805,7 +816,7 @@ static bool system_alpaca_open(indigo_device *device) {
 
 // Decision D5: an INDIGO disconnect disconnects the Alpaca device. Nothing is sent when the transport is known to be lost
 // or when the device reported that it is not connected any more. One failed request is no reason not to try.
-// A Platform 7 disconnect is asynchronous, its completion is Connecting false (REFACTOR.md 2.4, 2.7). With wait the device is asked
+// A Platform 7 disconnect is asynchronous, its completion is Connecting false (3dedba4cb:.factory/tasks/archive/20261027203747-a8d5-archive-refactor-notes/refactor/system_alpaca.md 2.4, 2.7). With wait the device is asked
 // once right away; if it is still disconnecting, true is returned and the channel stays open for proxy_disconnection_finalizer().
 static bool system_alpaca_close(indigo_device *device, bool wait) {
 	bool disconnecting = false;

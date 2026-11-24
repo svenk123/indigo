@@ -40,7 +40,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000009
+#define DRIVER_VERSION       0x0300000C
 #define DRIVER_NAME          "indigo_dome_beaver"
 #define DRIVER_LABEL         "Nexdome Beaver Dome"
 #define DOME_DEVICE_NAME     "Nexdome Beaver Dome"
@@ -151,7 +151,7 @@ typedef enum {
 
 static void dome_connection_handler(indigo_device *device);
 
-static void beaver_network_disconnection(indigo_device *device) {
+static void beaver_connection_lost(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		dome_connection_handler(device);
@@ -162,21 +162,39 @@ static void beaver_network_disconnection(indigo_device *device) {
 	}
 }
 
+// Checks the port before every command and after a failed one: a lost connection (indigo_uni_is_connection_lost():
+// a serial device that is gone, an error left on the port, a connection reset or closed by the controller)
+// disconnects a connected device once; during connect the failing command is enough. A missing or garbled
+// reply is not a loss, it only fails its command.
+static bool beaver_port_valid(indigo_device *device) {
+	if (PRIVATE_DATA->handle == NULL || PRIVATE_DATA->disconnection_queued) {
+		return false;
+	}
+	if (!indigo_uni_is_connection_lost(PRIVATE_DATA->handle)) {
+		return true;
+	}
+	if (IS_CONNECTED) {
+		PRIVATE_DATA->disconnection_queued = true;
+		INDIGO_DRIVER_ERROR(DRIVER_NAME, "Unexpected disconnection from %s", DEVICE_PORT_ITEM->text.value);
+		indigo_execute_handler(device, beaver_connection_lost);
+	}
+	return false;
+}
+
 // sends a request and validates the reply "!<request without #>:<result>#"; returns the result or NULL
 static char *beaver_vcommand(indigo_device *device, const char *format, va_list args) {
 	char *request = PRIVATE_DATA->request, *response = PRIVATE_DATA->response;
 	vsnprintf(request, sizeof(PRIVATE_DATA->request), format, args);
+	if (!beaver_port_valid(device)) {
+		return NULL;
+	}
 	long length = -1;
 	if (indigo_uni_discard(PRIVATE_DATA->handle) >= 0 && indigo_uni_write(PRIVATE_DATA->handle, request, (long)strlen(request)) > 0) {
 		length = indigo_uni_read_section2(PRIVATE_DATA->handle, response, sizeof(PRIVATE_DATA->response) - 1, "#", "", INDIGO_DELAY(BEAVER_FIRST_BYTE_TIMEOUT), INDIGO_DELAY(BEAVER_NEXT_BYTE_TIMEOUT));
 	}
 	if (length <= 0) {
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "No response to %s", request);
-		if (PRIVATE_DATA->handle != NULL && PRIVATE_DATA->handle->type == INDIGO_TCP_HANDLE && !PRIVATE_DATA->disconnection_queued) {
-			PRIVATE_DATA->disconnection_queued = true;
-			indigo_execute_handler(device, beaver_network_disconnection);
-			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Unexpected disconnection from %s", DEVICE_PORT_ITEM->text.value);
-		}
+		beaver_port_valid(device);
 		return NULL;
 	}
 	indigo_usleep(5000);
@@ -255,10 +273,10 @@ static bool beaver_goto_azimuth(indigo_device *device, double azimuth) {
 	return beaver_int(device, &result, "!dome gotoaz %f#", (float)azimuth) && result == 0;
 }
 
-static bool beaver_open(indigo_device *device) {
+static bool beaver_open(indigo_device *device, const char **error_message) {
 	char *name = DEVICE_PORT_ITEM->text.value;
 	if (!indigo_uni_is_url(name, "nexdome")) {
-		PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(name, atoi(DEVICE_BAUDRATE_ITEM->text.value), INDIGO_LOG_DEBUG);
+		PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(name, atoi(DEVICE_BAUDRATE_ITEM->text.value), INDIGO_LOG_DEBUG, error_message);
 	} else {
 		PRIVATE_DATA->handle = indigo_uni_open_url(name, BEAVER_NETWORK_PORT, INDIGO_TCP_HANDLE, INDIGO_LOG_DEBUG);
 	}
@@ -562,7 +580,8 @@ static void dome_status_poll(indigo_device *device) {
 static void dome_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = beaver_open(device);
+		const char *error_message = NULL;
+		connection_result = beaver_open(device, &error_message);
 		if (connection_result) {
 			//+ dome.on_connect
 			int shutter_is_up = 0;
@@ -604,7 +623,11 @@ static void dome_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -827,7 +850,8 @@ static void dome_abort_motion_handler(indigo_device *device) {
 	indigo_cancel_pending_handler(device, dome_x_rotator_calibrate_handler);
 	indigo_cancel_pending_handler(device, dome_x_shutter_calibrate_handler);
 	if (!PRIVATE_DATA->rotation_active && !PRIVATE_DATA->rotation_observed && (DOME_HORIZONTAL_COORDINATES_PROPERTY->state == INDIGO_BUSY_STATE || DOME_STEPS_PROPERTY->state == INDIGO_BUSY_STATE)) {
-		DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.value = DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.target = PRIVATE_DATA->current_position;
+		// the cancelled request was never sent: the dome stays where it is and the target keeps the request
+		DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.value = PRIVATE_DATA->current_position;
 		INDIGO_UPDATE_PROPERTY_STATE(DOME_HORIZONTAL_COORDINATES_PROPERTY, INDIGO_OK_STATE, NULL);
 		INDIGO_UPDATE_PROPERTY_STATE(DOME_STEPS_PROPERTY, INDIGO_OK_STATE, NULL);
 	}

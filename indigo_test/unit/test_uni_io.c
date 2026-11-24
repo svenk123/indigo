@@ -26,14 +26,158 @@
 #include <time.h>
 #include <limits.h>
 #include <pthread.h>
+#include <signal.h>
+#include <stdbool.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <zlib.h>
+#include <sys/stat.h>
+#if defined(INDIGO_LINUX) || defined(INDIGO_MACOS)
+#include <errno.h>
+#endif
 
 #include <indigo/indigo_bus.h>
 #include <indigo/indigo_uni_io.h>
+#include <indigo/indigo_io.h>
 
 #include "../test_runner.h"
+
+#if defined(INDIGO_LINUX) || defined(INDIGO_MACOS)
+// Occupying a loopback UDP port exercises discovery cleanup without receiving traffic.
+static void passive_discovery_bind_failure_closes_socket(void) {
+	int occupied = socket(AF_INET, SOCK_DGRAM, 0);
+	ASSERT_TRUE(occupied >= 0);
+	struct sockaddr_in address = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+	ASSERT_EQ_INT(0, bind(occupied, (struct sockaddr *)&address, sizeof(address)));
+	socklen_t length = sizeof(address);
+	ASSERT_EQ_INT(0, getsockname(occupied, (struct sockaddr *)&address, &length));
+	bool all_closed = true;
+	bool all_failed = true;
+	for (int i = 0; i < 16; i++) {
+		int next = dup(occupied);
+		ASSERT_TRUE(next >= 0);
+		close(next);
+		all_failed &= !indigo_perform_passive_discovery(ntohs(address.sin_port), 1, NULL, 0, NULL, 0);
+		errno = 0;
+		bool closed = fcntl(next, F_GETFD) == -1 && errno == EBADF;
+		all_closed &= closed;
+		if (!closed) {
+			close(next);
+		}
+	}
+	close(occupied);
+	ASSERT_TRUE(all_failed);
+	ASSERT_TRUE(all_closed);
+}
+
+static const char *serial_exclusive_test_port;
+
+static void serial_port_open_is_exclusive(void) {
+	const char *first_error = "unset";
+	indigo_uni_handle *first = indigo_uni_open_serial2(serial_exclusive_test_port, INDIGO_LOG_ERROR, &first_error);
+	ASSERT_TRUE(first != NULL);
+	ASSERT_TRUE(first_error == NULL);
+	const char *second_error = NULL;
+	indigo_uni_handle *second = indigo_uni_open_serial2(serial_exclusive_test_port, INDIGO_LOG_ERROR, &second_error);
+	bool second_open_rejected = second == NULL;
+	if (second != NULL) {
+		indigo_uni_close(&second);
+	}
+	indigo_uni_close(&first);
+	const char *reopen_error = "unset";
+	indigo_uni_handle *reopened = indigo_uni_open_serial2(serial_exclusive_test_port, INDIGO_LOG_ERROR, &reopen_error);
+	bool reopened_successfully = reopened != NULL;
+	indigo_uni_close(&reopened);
+	ASSERT_TRUE(second_open_rejected);
+	ASSERT_TRUE(second_error != NULL);
+	ASSERT_STREQ("Serial port is already in use", second_error);
+	ASSERT_TRUE(reopened_successfully);
+	ASSERT_TRUE(reopen_error == NULL);
+}
+#endif
+
+#if defined(INDIGO_LINUX) || defined(INDIGO_MACOS)
+static void serial_open_reports_open_error(void) {
+	const char *error_message = NULL;
+	indigo_uni_handle *handle = indigo_uni_open_serial2("/dev/indigo-test-nonexistent-serial", INDIGO_LOG_ERROR, &error_message);
+	ASSERT_TRUE(handle == NULL);
+	ASSERT_TRUE(error_message != NULL);
+	ASSERT_STREQ("Serial port does not exist", error_message);
+	error_message = NULL;
+	handle = indigo_uni_open_serial_with_speed2("/dev/indigo-test-nonexistent-serial", 9600, INDIGO_LOG_ERROR, &error_message);
+	ASSERT_TRUE(handle == NULL);
+	ASSERT_TRUE(error_message != NULL);
+	ASSERT_STREQ("Serial port does not exist", error_message);
+	error_message = NULL;
+	handle = indigo_uni_open_serial_with_config2("auto:///dev/indigo-test-nonexistent-serial", "9600-8N1", INDIGO_LOG_ERROR, &error_message);
+	ASSERT_TRUE(handle == NULL);
+	ASSERT_TRUE(error_message != NULL);
+	ASSERT_STREQ("Serial port does not exist", error_message);
+}
+
+static void serial_open_reports_configuration_error(void) {
+	const char *error_message = NULL;
+	indigo_uni_handle *handle = indigo_uni_open_serial_with_config2("/unused", "invalid", INDIGO_LOG_ERROR, &error_message);
+	ASSERT_TRUE(handle == NULL);
+	ASSERT_TRUE(error_message != NULL);
+	ASSERT_STREQ("Invalid serial port configuration", error_message);
+}
+
+static void serial_open_reports_not_a_serial_port(void) {
+	// A regular file produces ENOTTY; /dev/null can produce ENODEV on macOS.
+	char path[] = "/tmp/indigo-uni-io-nonserial.XXXXXX";
+	int descriptor = mkstemp(path);
+	ASSERT_TRUE(descriptor >= 0);
+	close(descriptor);
+	const char *error_message = NULL;
+	indigo_uni_handle *handle = indigo_uni_open_serial2(path, INDIGO_LOG_ERROR, &error_message);
+	bool open_failed = handle == NULL;
+	indigo_uni_close(&handle);
+	int unlink_result = unlink(path);
+	ASSERT_EQ_INT(0, unlink_result);
+	ASSERT_TRUE(open_failed);
+	ASSERT_TRUE(error_message != NULL);
+	ASSERT_STREQ("Not a serial port", error_message);
+}
+
+static void serial_open_clears_error_on_success(void) {
+	int master = posix_openpt(O_RDWR | O_NOCTTY);
+	ASSERT_TRUE(master >= 0);
+	ASSERT_EQ_INT(0, grantpt(master));
+	ASSERT_EQ_INT(0, unlockpt(master));
+	const char *error_message = "unset";
+	indigo_uni_handle *handle = indigo_uni_open_serial2(ptsname(master), INDIGO_LOG_ERROR, &error_message);
+	bool opened = handle != NULL;
+	indigo_uni_close(&handle);
+	close(master);
+	ASSERT_TRUE(opened);
+	ASSERT_TRUE(error_message == NULL);
+}
+
+// The port is opened exclusively; closing it must release the claim even while the other end of
+// the line stays open. A Linux pseudo-terminal keeps TIOCEXCL after its last descriptor is
+// closed, which refused every reconnect to a serial simulator with EBUSY.
+static void serial_port_reopens_after_close(void) {
+	int master = posix_openpt(O_RDWR | O_NOCTTY);
+	ASSERT_TRUE(master >= 0);
+	ASSERT_EQ_INT(0, grantpt(master));
+	ASSERT_EQ_INT(0, unlockpt(master));
+	const char *error_message = NULL;
+	indigo_uni_handle *handle = indigo_uni_open_serial2(ptsname(master), INDIGO_LOG_ERROR, &error_message);
+	bool opened = handle != NULL;
+	indigo_uni_close(&handle);
+	error_message = "unset";
+	handle = indigo_uni_open_serial2(ptsname(master), INDIGO_LOG_ERROR, &error_message);
+	bool reopened = handle != NULL;
+	const char *reopen_error = error_message;
+	indigo_uni_close(&handle);
+	close(master);
+	ASSERT_TRUE(opened);
+	ASSERT_TRUE(reopened);
+	ASSERT_TRUE(reopen_error == NULL);
+}
+#endif
 
 // A file handle is enough to exercise the delimited reader: with both timeouts
 // set to -1 the reader skips indigo_uni_wait_for_data() and goes straight to
@@ -63,6 +207,7 @@ static void read_section_accepts_null_ignore_list(void) {
 	indigo_uni_handle *handle = open_handle_with("ab#cd", path, sizeof(path));
 	ASSERT_TRUE(handle != NULL);
 	ASSERT_EQ_INT(3, (int)indigo_uni_read_section2(handle, buffer, sizeof(buffer) - 1, "#", NULL, -1, -1));
+	ASSERT_TRUE(buffer != NULL);
 	ASSERT_STREQ("ab#", buffer);
 	indigo_uni_close(&handle);
 	unlink(path);
@@ -77,6 +222,7 @@ static void read_section_accepts_null_terminator_list(void) {
 	indigo_uni_handle *handle = open_handle_with("abcdef", path, sizeof(path));
 	ASSERT_TRUE(handle != NULL);
 	ASSERT_EQ_INT(4, (int)indigo_uni_read_section2(handle, buffer, 4, NULL, NULL, -1, -1));
+	ASSERT_TRUE(buffer != NULL);
 	ASSERT_STREQ("abcd", buffer);
 	indigo_uni_close(&handle);
 	unlink(path);
@@ -91,9 +237,96 @@ static void read_section_still_ignores_and_terminates(void) {
 	indigo_uni_handle *handle = open_handle_with("a\rb\r\ncd", path, sizeof(path));
 	ASSERT_TRUE(handle != NULL);
 	ASSERT_EQ_INT(2, (int)indigo_uni_read_section2(handle, buffer, sizeof(buffer) - 1, "\n", "\r\n", -1, -1));
+	ASSERT_TRUE(buffer != NULL);
 	ASSERT_STREQ("ab", buffer);
 	indigo_uni_close(&handle);
 	unlink(path);
+}
+
+// ---- interrupted system calls ----
+
+// A signal delivered to a thread waiting in select() makes it return EINTR. That is not an error of the port: the
+// wait went on to fail with -1 and stored EINTR as the error of the handle, so every later read and write of a
+// working port failed until it was closed.
+
+static void interrupt_handler(int signal) {
+}
+
+typedef struct {
+	pthread_t target;
+	int master;
+	bool send_data;
+} interrupter;
+
+static void *interrupt_thread(void *data) {
+	interrupter *context = data;
+	indigo_usleep(100000);
+	pthread_kill(context->target, SIGUSR1);
+	if (context->send_data) {
+		indigo_usleep(200000);
+		if (write(context->master, "x\n", 2) != 2) {
+			return NULL;
+		}
+	}
+	return NULL;
+}
+
+// A pseudo-terminal stands in for the serial port, so the wait really goes through select().
+static indigo_uni_handle *open_pseudo_terminal(int *master) {
+	*master = posix_openpt(O_RDWR | O_NOCTTY);
+	if (*master < 0 || grantpt(*master) != 0 || unlockpt(*master) != 0) {
+		return NULL;
+	}
+	return indigo_uni_open_serial(ptsname(*master), INDIGO_LOG_ERROR);
+}
+
+// Installed without SA_RESTART, so the signal interrupts select() instead of restarting it.
+static void interrupt_wait(bool send_data, long timeout, int *result, double *elapsed, int *last_error, char *line, int line_size) {
+	struct sigaction action, previous;
+	memset(&action, 0, sizeof(action));
+	action.sa_handler = interrupt_handler;
+	sigemptyset(&action.sa_mask);
+	sigaction(SIGUSR1, &action, &previous);
+	int master = -1;
+	indigo_uni_handle *handle = open_pseudo_terminal(&master);
+	ASSERT_TRUE(handle != NULL);
+	interrupter context = { pthread_self(), master, send_data };
+	pthread_t thread;
+	ASSERT_EQ_INT(0, pthread_create(&thread, NULL, interrupt_thread, &context));
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	*result = indigo_uni_wait_for_data(handle, timeout);
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	*elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+	*last_error = handle->last_error;
+	if (*result > 0) {
+		indigo_uni_read_section(handle, line, line_size, "\n", "\r\n", INDIGO_DELAY(1));
+	}
+	pthread_join(thread, NULL);
+	indigo_uni_close(&handle);
+	close(master);
+	sigaction(SIGUSR1, &previous, NULL);
+}
+
+static void wait_for_data_continues_after_signal(void) {
+	int result, last_error;
+	double elapsed;
+	char line[16] = { 0 };
+	interrupt_wait(true, INDIGO_DELAY(2), &result, &elapsed, &last_error, line, sizeof(line));
+	ASSERT_EQ_INT(1, result);
+	ASSERT_EQ_INT(0, last_error);
+	ASSERT_TRUE(line != NULL);
+	ASSERT_STREQ("x", line);
+}
+
+static void wait_for_data_keeps_timeout_after_signal(void) {
+	int result, last_error;
+	double elapsed;
+	char line[16] = { 0 };
+	interrupt_wait(false, INDIGO_DELAY(0.5), &result, &elapsed, &last_error, line, sizeof(line));
+	ASSERT_EQ_INT(0, result);
+	ASSERT_EQ_INT(0, last_error);
+	ASSERT_TRUE(elapsed >= 0.45);
 }
 
 // ---- indigo_uni_discover() ----
@@ -319,11 +552,272 @@ static void connect_with_timeout_is_bounded(void) {
 #endif
 }
 
+// ---- indigo_uni_is_connection_lost() ----
+
+// A serial port whose device went away: the write fails and the error stays on the handle. A garbled reply is not
+// a loss, so data that arrives does not change the answer.
+static void connection_lost_after_serial_failure(void) {
+	int master = -1;
+	indigo_uni_handle *handle = open_pseudo_terminal(&master);
+	ASSERT_TRUE(handle != NULL);
+	ASSERT_FALSE(indigo_uni_is_connection_lost(handle));
+	ASSERT_EQ_INT(2, (int)write(master, "?!", 2));
+	indigo_usleep(50000);
+	ASSERT_FALSE(indigo_uni_is_connection_lost(handle));
+	close(master);
+	indigo_uni_write(handle, "x", 1);
+	char c;
+	indigo_uni_read(handle, &c, 1);
+	ASSERT_TRUE(handle->last_error != 0);
+	ASSERT_TRUE(indigo_uni_is_connection_lost(handle));
+	indigo_uni_close(&handle);
+	ASSERT_FALSE(indigo_uni_is_connection_lost(handle));
+}
+
+// A TCP connection is lost once the peer closes it, not while it is open or has unread data.
+static void connection_lost_after_peer_close(void) {
+	int port = 0;
+	int listener = open_tcp_listener(&port);
+	ASSERT_TRUE(listener >= 0);
+	indigo_uni_handle *handle = indigo_uni_open_client_socket_with_timeout("127.0.0.1", port, SOCK_STREAM, INDIGO_DELAY(1), INDIGO_LOG_ERROR);
+	ASSERT_TRUE(handle != NULL);
+	int peer = accept(listener, NULL, NULL);
+	ASSERT_TRUE(peer >= 0);
+	ASSERT_FALSE(indigo_uni_is_connection_lost(handle));
+	ASSERT_EQ_INT(3, (int)send(peer, "abc", 3, 0));
+	indigo_usleep(50000);
+	ASSERT_FALSE(indigo_uni_is_connection_lost(handle));
+	char buffer[8];
+	ASSERT_EQ_INT(3, (int)indigo_uni_read(handle, buffer, 3));
+	close(peer);
+	indigo_usleep(50000);
+	ASSERT_TRUE(indigo_uni_is_connection_lost(handle));
+	indigo_uni_close(&handle);
+	close(listener);
+}
+
+static void standard_stream_handles_have_file_descriptors(void) {
+	indigo_uni_handle *handles[] = { indigo_stdin_handle, indigo_stdout_handle, indigo_stderr_handle };
+	for (int i = 0; i < 3; i++) {
+		ASSERT_EQ_INT(INDIGO_FILE_HANDLE, handles[i]->type);
+		ASSERT_EQ_INT(i, handles[i]->fd);
+	}
+}
+
+// Deterministic incompressible bytes: deflate stores them, so the gzip stream is larger than the input.
+static void fill_incompressible(char *buffer, unsigned size) {
+	unsigned state = 0x12345678;
+	for (unsigned i = 0; i < size; i++) {
+		state = state * 1103515245 + 12345;
+		buffer[i] = (char)(state >> 24);
+	}
+}
+
+static bool gunzip_matches(const unsigned char *stream, unsigned stream_size, const char *expected, unsigned expected_size) {
+	unsigned char *output = malloc(expected_size + 1);
+	z_stream inflater = { 0 };
+	if (output == NULL || inflateInit2(&inflater, MAX_WBITS + 16) != Z_OK) {
+		free(output);
+		return false;
+	}
+	inflater.next_in = (Bytef *)stream;
+	inflater.avail_in = stream_size;
+	inflater.next_out = output;
+	inflater.avail_out = expected_size + 1;
+	int result = inflate(&inflater, Z_FINISH);
+	bool matches = result == Z_STREAM_END && inflater.avail_in == 0 && inflater.total_out == expected_size && memcmp(output, expected, expected_size) == 0;
+	inflateEnd(&inflater);
+	free(output);
+	return matches;
+}
+
+static void compress_rejects_output_buffer_too_small(void) {
+	char input[32];
+	unsigned char output[32];
+	for (int i = 0; i < 32; i++) {
+		input[i] = (char)i;
+	}
+	unsigned size = sizeof(output);
+	indigo_uni_compress("image", input, sizeof(input), output, &size);
+	ASSERT_EQ_INT(0, size);
+	char large[70000];
+	fill_incompressible(large, sizeof(large));
+	unsigned char *large_output = malloc(sizeof(large));
+	ASSERT_TRUE(large_output != NULL);
+	size = sizeof(large);
+	indigo_uni_compress("image", large, sizeof(large), large_output, &size);
+	ASSERT_EQ_INT(0, size);
+	free(large_output);
+}
+
+static void compress_incompressible_payload_round_trips(void) {
+	unsigned sizes[] = { 1, 32, 16384, 70000, 300000 };
+	for (int i = 0; i < (int)(sizeof(sizes) / sizeof(sizes[0])); i++) {
+		unsigned input_size = sizes[i];
+		char *input = malloc(input_size);
+		// the capacity used by the HTTP BLOB download
+		unsigned capacity = input_size + input_size / 1000 + 64;
+		unsigned char *output = malloc(capacity);
+		ASSERT_TRUE(input != NULL && output != NULL);
+		fill_incompressible(input, input_size);
+		unsigned size = capacity;
+		indigo_uni_compress("image", input, input_size, output, &size);
+		ASSERT_TRUE(size > 0);
+		ASSERT_TRUE(size <= capacity);
+		ASSERT_TRUE(gunzip_matches(output, size, input, input_size));
+		free(input);
+		free(output);
+	}
+}
+
+#if defined(INDIGO_LINUX) || defined(INDIGO_MACOS)
+// hid_device shares a union with fd: a HID handle without a device aliases descriptor 0, which the close of the
+// HID handle went on to shut down and close
+static void hid_close_leaves_aliased_descriptor_open(void) {
+	int saved = dup(0);
+	int null_fd = open("/dev/null", O_RDONLY);
+	ASSERT_TRUE(null_fd >= 0);
+	ASSERT_TRUE(dup2(null_fd, 0) == 0);
+	close(null_fd);
+	indigo_uni_handle *handle = indigo_safe_malloc(sizeof(indigo_uni_handle));
+	memset(handle, 0, sizeof(*handle));
+	handle->type = INDIGO_HID_HANDLE;
+	handle->hid_device = NULL;
+	int aliased_fd = handle->fd;
+	indigo_uni_close(&handle);
+	bool still_open = fcntl(0, F_GETFD) != -1;
+	if (saved >= 0) {
+		dup2(saved, 0);
+		close(saved);
+	} else {
+		close(0);
+	}
+	ASSERT_EQ_INT(0, aliased_fd);
+	ASSERT_TRUE(handle == NULL);
+	ASSERT_TRUE(still_open);
+}
+
+static int open_unlinked_temporary_file(void) {
+	char path[PATH_MAX];
+	snprintf(path, sizeof(path), "%s/indigo_test_printf.XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+	int fd = mkstemp(path);
+	if (fd >= 0) {
+		unlink(path);
+	}
+	return fd;
+}
+
+// The legacy formatter passed the full vsnprintf() length to indigo_write() even when the output did not fit its
+// buffer, so it sent bytes from beyond the buffer instead of the end of the output
+static void legacy_printf_sends_output_longer_than_its_buffer(void) {
+	int fd = open_unlinked_temporary_file();
+	ASSERT_TRUE(fd >= 0);
+	size_t size = INDIGO_BUFFER_SIZE + 100;
+	char *text = malloc(size + 1);
+	char *read_back = malloc(size + 16);
+	bool ok = text != NULL && read_back != NULL;
+	if (ok) {
+		for (size_t i = 0; i < size; i++) {
+			text[i] = 'a' + (char)(i % 26);
+		}
+		text[size] = '\0';
+		ok = indigo_printf(fd, "%s|%d", text, 42);
+	}
+	long total = 0;
+	if (ok) {
+		lseek(fd, 0, SEEK_SET);
+		long count;
+		while ((count = read(fd, read_back + total, size + 16 - total)) > 0) {
+			total += count;
+		}
+	}
+	bool same = ok && total == (long)size + 3 && !memcmp(read_back, text, size) && !memcmp(read_back + size, "|42", 3);
+	close(fd);
+	free(text);
+	free(read_back);
+	ASSERT_TRUE(ok);
+	ASSERT_EQ_INT((int)size + 3, (int)total);
+	ASSERT_TRUE(same);
+}
+
+static void legacy_printf_sends_short_output_unchanged(void) {
+	int fd = open_unlinked_temporary_file();
+	ASSERT_TRUE(fd >= 0);
+	bool ok = indigo_printf(fd, ":%s%03d#", "GR", 7) && indigo_printf(fd, "plain");
+	char buffer[32] = { 0 };
+	lseek(fd, 0, SEEK_SET);
+	long count = read(fd, buffer, sizeof(buffer) - 1);
+	close(fd);
+	ASSERT_TRUE(ok);
+	ASSERT_EQ_INT(12, (int)count);
+	ASSERT_STREQ(":GR007#plain", buffer);
+}
+
+static void is_creatable_accepts_folders_below_a_writable_ancestor(void) {
+	char base[] = "/tmp/indigo_creatable_XXXXXX";
+	ASSERT_TRUE(mkdtemp(base) != NULL);
+	char path[PATH_MAX];
+	char below_file[2 * PATH_MAX];
+	char below_read_only[2 * PATH_MAX];
+	char read_only[PATH_MAX];
+	snprintf(path, sizeof(path), "%s/", base);
+	bool existing = indigo_uni_is_creatable(path);
+	snprintf(path, sizeof(path), "%s/a/b/c/", base);
+	bool nested = indigo_uni_is_creatable(path);
+	bool nested_created = access(path, F_OK) == 0;
+	snprintf(path, sizeof(path), "%s/a/b", base);
+	bool without_separator = indigo_uni_is_creatable(path);
+	snprintf(path, sizeof(path), "%s/file", base);
+	FILE *file = fopen(path, "w");
+	ASSERT_TRUE(file != NULL);
+	fclose(file);
+	snprintf(below_file, sizeof(below_file), "%s/file/sub/", base);
+	bool regular_file = indigo_uni_is_creatable(path);
+	bool below_regular_file = indigo_uni_is_creatable(below_file);
+	snprintf(read_only, sizeof(read_only), "%s/read_only", base);
+	ASSERT_EQ_INT(0, mkdir(read_only, 0555));
+	snprintf(below_read_only, sizeof(below_read_only), "%s/read_only/sub/dir/", base);
+	bool read_only_ancestor = indigo_uni_is_creatable(below_read_only);
+	bool is_root = geteuid() == 0;
+	bool relative = indigo_uni_is_creatable("indigo_creatable_does_not_exist/sub/");
+	bool root = indigo_uni_is_creatable("/");
+	chmod(read_only, 0755);
+	snprintf(path, sizeof(path), "rm -rf '%s'", base);
+	ASSERT_EQ_INT(0, system(path));
+	ASSERT_TRUE(existing);
+	ASSERT_TRUE(nested);
+	ASSERT_FALSE(nested_created);
+	ASSERT_TRUE(without_separator);
+	ASSERT_FALSE(regular_file);
+	ASSERT_FALSE(below_regular_file);
+	ASSERT_TRUE(is_root || !read_only_ancestor);
+	ASSERT_TRUE(relative || access(".", W_OK) != 0);
+	ASSERT_TRUE(is_root || !root);
+}
+#endif
+
 int main(void) {
 	const indigo_test_case tests[] = {
+		{ "standard_stream_handles_have_file_descriptors", standard_stream_handles_have_file_descriptors },
+		{ "compress_rejects_output_buffer_too_small", compress_rejects_output_buffer_too_small },
+		{ "compress_incompressible_payload_round_trips", compress_incompressible_payload_round_trips },
 		{ "read_section_accepts_null_ignore_list", read_section_accepts_null_ignore_list },
 		{ "read_section_accepts_null_terminator_list", read_section_accepts_null_terminator_list },
 		{ "read_section_still_ignores_and_terminates", read_section_still_ignores_and_terminates },
+#if defined(INDIGO_LINUX) || defined(INDIGO_MACOS)
+		{ "passive_discovery_bind_failure_closes_socket", passive_discovery_bind_failure_closes_socket },
+		{ "serial_open_reports_open_error", serial_open_reports_open_error },
+		{ "serial_open_reports_configuration_error", serial_open_reports_configuration_error },
+		{ "serial_open_reports_not_a_serial_port", serial_open_reports_not_a_serial_port },
+		{ "serial_open_clears_error_on_success", serial_open_clears_error_on_success },
+		{ "serial_port_reopens_after_close", serial_port_reopens_after_close },
+		{ "hid_close_leaves_aliased_descriptor_open", hid_close_leaves_aliased_descriptor_open },
+		{ "legacy_printf_sends_output_longer_than_its_buffer", legacy_printf_sends_output_longer_than_its_buffer },
+		{ "legacy_printf_sends_short_output_unchanged", legacy_printf_sends_short_output_unchanged },
+		{ "is_creatable_accepts_folders_below_a_writable_ancestor", is_creatable_accepts_folders_below_a_writable_ancestor },
+#endif
+		{ "wait_for_data_continues_after_signal", wait_for_data_continues_after_signal },
+		{ "wait_for_data_keeps_timeout_after_signal", wait_for_data_keeps_timeout_after_signal },
 		{ "discover_collects_all_replies", discover_collects_all_replies },
 		{ "discover_repeats_request_for_each_poll", discover_repeats_request_for_each_poll },
 		{ "discover_stops_when_callback_returns_false", discover_stops_when_callback_returns_false },
@@ -332,7 +826,25 @@ int main(void) {
 		{ "discover_rejects_invalid_arguments", discover_rejects_invalid_arguments },
 		{ "connect_with_timeout_succeeds", connect_with_timeout_succeeds },
 		{ "connect_with_timeout_reports_refused_connection", connect_with_timeout_reports_refused_connection },
-		{ "connect_with_timeout_is_bounded", connect_with_timeout_is_bounded }
+		{ "connect_with_timeout_is_bounded", connect_with_timeout_is_bounded },
+		{ "connection_lost_after_serial_failure", connection_lost_after_serial_failure },
+		{ "connection_lost_after_peer_close", connection_lost_after_peer_close }
 	};
+#if defined(INDIGO_LINUX) || defined(INDIGO_MACOS)
+	// Set INDIGO_TEST_TIOCEXCL_PORT to opt into testing one physical serial port.
+	serial_exclusive_test_port = getenv("INDIGO_TEST_TIOCEXCL_PORT");
+	if (serial_exclusive_test_port != NULL) {
+		if (*serial_exclusive_test_port == '\0') {
+			fprintf(stderr, "INDIGO_TEST_TIOCEXCL_PORT must contain one serial port path\n");
+			return 1;
+		}
+		const indigo_test_case serial_test[] = {
+			{ "serial_port_open_is_exclusive", serial_port_open_is_exclusive }
+		};
+		if (indigo_run_tests("indigo_uni_io TIOCEXCL physical-port test", serial_test, sizeof(serial_test) / sizeof(serial_test[0]))) {
+			return 1;
+		}
+	}
+#endif
 	return indigo_run_tests("indigo_uni_io unit tests", tests, sizeof(tests) / sizeof(tests[0]));
 }

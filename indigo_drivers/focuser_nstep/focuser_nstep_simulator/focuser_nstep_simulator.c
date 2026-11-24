@@ -23,6 +23,8 @@ typedef struct {
 	bool headless;
 	bool trace;
 	bool temperature_present;
+	// fixed-width numbers padded with spaces instead of zeros, and a CR after the status byte
+	bool padded;
 	const char *ready_file;
 	const char *event_file;
 	const char *fault_file;
@@ -48,6 +50,11 @@ static char rw_value = '0';
 static char ro_value[4] = "003";
 static char cs_value[4] = "001";
 static serial_motion motion;
+static bool stalled;
+// status reads that still report motion after a stop
+static int lingering;
+static int initial_position = 50;
+static int temperature_tenths = 275;
 
 static void usage(const char *name) {
 	printf("Rigel Systems nSTEP focuser simulator\n");
@@ -57,6 +64,8 @@ static void usage(const char *name) {
 	printf("  --event-file <path>     Append received commands and injected faults\n");
 	printf("  --fault-file <path>     Read one-shot fault injection commands\n");
 	printf("  --temperature absent    Report the optional sensor as absent\n");
+	printf("  --profile alternate     Start with non-default settings, position and temperature\n");
+	printf("  --profile padded        Pad numbers with spaces and end the status byte with a CR\n");
 	printf("  --trace                 Log protocol requests and replies\n");
 	printf("  -h, --help              Show this help and exit\n");
 }
@@ -98,6 +107,24 @@ static bool parse_args(int argc, char *argv[]) {
 				return false;
 			}
 			options.fault_file = argv[i];
+		} else if (!strcmp(argv[i], "--profile")) {
+			if (++i < argc && !strcmp(argv[i], "padded")) {
+				options.padded = true;
+				continue;
+			}
+			if (i == argc || strcmp(argv[i], "alternate")) {
+				fprintf(stderr, "--profile requires alternate or padded\n");
+				return false;
+			}
+			// a controller left in a non-default state by an earlier session
+			snprintf(ra_value, sizeof(ra_value), "-010");
+			snprintf(rb_value, sizeof(rb_value), "004");
+			rg_value = '2';
+			snprintf(re_value, sizeof(re_value), "012");
+			rw_value = '1';
+			snprintf(ro_value, sizeof(ro_value), "054");
+			initial_position = -1234;
+			temperature_tenths = -55;
 		} else if (!strcmp(argv[i], "--temperature")) {
 			if (++i == argc) {
 				fprintf(stderr, "--temperature requires present or absent\n");
@@ -344,6 +371,11 @@ static bool dispatch_fault(int handle, const char *command, int length) {
 	if (!strcmp(action, "silent")) {
 		return true;
 	}
+	if (!strcmp(action, "delay")) {
+		// the reply is held long enough for a request to arrive meanwhile
+		usleep(400000);
+		return false;
+	}
 	if (!strcmp(action, "close")) {
 		running = 0;
 		close(handle);
@@ -386,6 +418,32 @@ static bool dispatch_fault(int handle, const char *command, int length) {
 		write_reply(handle, "-888", 4);
 		return true;
 	}
+	if (!strcmp(action, "linger") && !strncmp(command, ":F10000#", 8)) {
+		// the motor stops, but the next status read still reports motion
+		serial_motion_stop(&motion);
+		lingering = 1;
+		return true;
+	}
+	if (!strcmp(action, "zero") && !strncmp(command, ":RO", 3)) {
+		// an on-time outside the driver's speed range, set by other software
+		write_reply(handle, "000", 3);
+		return true;
+	}
+	if (!strcmp(action, "implausible") && !strncmp(command, ":RT", 3)) {
+		write_reply(handle, "+999", 4);
+		return true;
+	}
+	if (!strcmp(action, "stall") && !strncmp(command, ":F", 2)) {
+		// the motor reports motion but the position never changes
+		stalled = true;
+		serial_motion_update(&motion);
+		return true;
+	}
+	if (!strncmp(action, "move", 4) && !strncmp(command, ":RP", 3)) {
+		// motion the driver did not command (hand control) starts just before this readback
+		serial_motion_start(&motion, motion.position + atoi(action + 4), 80);
+		return false;
+	}
 	return false;
 }
 
@@ -397,9 +455,19 @@ static void dispatch_command(int handle, const char *command, int length) {
 		sim_printf(handle, "S");
 	} else if (length == 1 && command[0] == 'S') {
 		serial_motion_update(&motion);
-		sim_printf(handle, motion.duration > 0 ? "1" : "0");
+		sim_printf(handle, stalled || lingering-- > 0 || motion.duration > 0 ? "1" : "0");
+		if (lingering < 0) {
+			lingering = 0;
+		}
+		if (options.padded) {
+			sim_printf(handle, "\r");
+		}
 	} else if (!strncmp(command, ":RT", 3)) {
-		sim_printf(handle, options.temperature_present ? "+275" : "-888");
+		if (options.temperature_present) {
+			sim_printf(handle, options.padded ? "%4d" : "%+04d", temperature_tenths);
+		} else {
+			sim_printf(handle, "-888");
+		}
 	} else if (!strncmp(command, ":RA", 3)) {
 		write_reply(handle, ra_value, 4);
 	} else if (!strncmp(command, ":RB", 3)) {
@@ -411,9 +479,14 @@ static void dispatch_command(int handle, const char *command, int length) {
 	} else if (!strncmp(command, ":RW", 3)) {
 		write_reply(handle, &rw_value, 1);
 	} else if (!strncmp(command, ":RO", 3)) {
-		write_reply(handle, ro_value, 3);
+		if (options.padded) {
+			sim_printf(handle, "%3d", atoi(ro_value));
+		} else {
+			write_reply(handle, ro_value, 3);
+		}
 	} else if (!strncmp(command, ":RP", 3)) {
-		sim_printf(handle, "%+07d", (int)(serial_motion_update(&motion) + 0.5));
+		double position = stalled ? motion.position : serial_motion_update(&motion);
+		sim_printf(handle, options.padded ? "%7d" : "%+07d", (int)(position < 0 ? position - 0.5 : position + 0.5));
 	} else if (!strncmp(command, ":CS", 3) && length >= 7) {
 		copy_digits(cs_value, sizeof(cs_value), command + 3);
 	} else if (!strncmp(command, ":CO", 3) && length >= 7) {
@@ -429,7 +502,11 @@ static void dispatch_command(int handle, const char *command, int length) {
 	} else if (!strncmp(command, ":TB", 3) && length >= 7) {
 		copy_digits(re_value, sizeof(re_value), command + 3);
 	} else if (!strncmp(command, ":F10000#", 8)) {
-		serial_motion_stop(&motion);
+		if (stalled) {
+			stalled = false;
+		} else {
+			serial_motion_stop(&motion);
+		}
 	} else if (!strncmp(command, ":F", 2) && length >= 8) {
 		char steps_text[4] = { command[4], command[5], command[6], 0 };
 		int steps = atoi(steps_text);
@@ -448,7 +525,7 @@ int main(int argc, char *argv[]) {
 
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
-	serial_motion_sync(&motion, 50);
+	serial_motion_sync(&motion, initial_position);
 
 	serial_fd = serial_simulator_open_pty(port, sizeof(port));
 	if (serial_fd < 0) {

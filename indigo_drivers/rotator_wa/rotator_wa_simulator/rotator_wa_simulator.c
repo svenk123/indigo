@@ -49,6 +49,11 @@ static char status_fault[128];
 static char completion_fault[128];
 static bool ignore_setting;
 static bool ignore_stop;
+// a stop decelerates for this long, the box handles no command meanwhile, and then reports the interrupted move
+// with the usual completion feedback; 0 stops at once without feedback
+static int stop_feedback_ms;
+// the completion feedback pauses this long after its first field (angle rotated) before the rest follows
+static int completion_gap_ms;
 static double backlash = 1.2;
 static bool reversed = false;
 
@@ -124,6 +129,10 @@ static void load_control(void) {
 		ignore_setting = true;
 	} else if (!strcmp(control, "ignore_stop")) {
 		ignore_stop = true;
+	} else if (!strncmp(control, "completion_gap:", 15)) {
+		completion_gap_ms = atoi(control + 15);
+	} else if (!strncmp(control, "stop_feedback:", 14)) {
+		stop_feedback_ms = atoi(control + 14);
 	} else if (!strncmp(control, "position:", 9)) {
 		serial_motion_sync(&motion, atof(control + 9));
 	}
@@ -178,6 +187,14 @@ static void send_status(void) {
 static void send_move_complete(void) {
 	char response[64];
 	snprintf(response, sizeof(response), "%.2fA%.0fA\r\n", moved, serial_motion_update(&motion) * 1000);
+	char *gap = strchr(response, 'A');
+	if (completion_gap_ms > 0 && !*completion_fault && gap != NULL) {
+		serial_simulator_write_all(serial_fd, response, (size_t)(gap + 1 - response));
+		usleep(completion_gap_ms * 1000);
+		write_response(gap + 1);
+		pending = false;
+		return;
+	}
 	send_frame(response, completion_fault);
 	pending = false;
 }
@@ -192,6 +209,11 @@ static void dispatch_command(const char *command) {
 		if (ignore_stop) {
 			ignore_stop = false;
 			strcpy(status_fault, "silent");
+		} else if (pending && stop_feedback_ms > 0) {
+			usleep(stop_feedback_ms * 1000);
+			moved = serial_motion_update(&motion) - motion.origin;
+			serial_motion_stop(&motion);
+			send_move_complete();
 		} else {
 			serial_motion_stop(&motion);
 			pending = false;
@@ -219,6 +241,10 @@ static void dispatch_command(const char *command) {
 			if (!strcmp(completion_fault, "np")) {
 				send_frame("NP\n", completion_fault);
 				return;
+			}
+			// steps + 1000000 is a move at fast speed (not in the protocol document; used by the 3.0-7 and INDI drivers)
+			if (steps >= 500000 && steps < 1500000) {
+				steps -= 1000000;
 			}
 			moved = (double)steps / steps_degree;
 			serial_motion_start(&motion, serial_motion_update(&motion) + moved, 30);

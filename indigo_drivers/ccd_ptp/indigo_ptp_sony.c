@@ -44,6 +44,13 @@
 #define SONY_ILCE_7RM4A_PRODUCT_ID 0x0d9f
 // SONY ILCE-9M2 with Camera Remote SDK Ver.1.10.00
 #define SONY_NEW_API_SUPPORT_PRODUCT_ID_BORDER SONY_ILCE_7RM4_PRODUCT_ID
+
+#ifndef SONY_OLD_API_VERIFY_TIMEOUT
+#define SONY_OLD_API_VERIFY_TIMEOUT 15
+#endif
+#ifndef SONY_OLD_API_REWRITE_DELAY
+#define SONY_OLD_API_REWRITE_DELAY 5
+#endif
 #define SONY_NEW_API 300
 #define SONY_OLD_API 200
 
@@ -119,7 +126,7 @@ char *ptp_property_sony_code_name(uint16_t code) {
 		//case ptp_property_sony_D256: return "ADV_SONY_D256";
 		//case ptp_property_sony_D259: return "ADV_SONY_D259";
 		// all model has D25A (writable 2 items, [0, 1])
-		//case ptp_property_sony_D25A: return "ADV_SONY_D25A";
+		//case ptp_property_sony_PriorityMode: return "ADV_SONY_D25A";
 		//case ptp_property_sony_D25B: return "ADV_SONY_D25B";
 		case ptp_property_sony_ZoomSetting: return "ADV_ZoomSetting";
 		//case ptp_property_sony_D260: return "ADV_SONY_D260";
@@ -893,7 +900,61 @@ char *ptp_property_sony_value_code_label(indigo_device *device, uint16_t propert
 	return ptp_property_value_code_label(device, property, code);
 }
 
-uint8_t *ptp_sony_decode_property(uint8_t *source, indigo_device *device) {
+static uint8_t *ptp_sony_skip_enum(uint8_t *source, uint8_t *end, ptp_type type) {
+	if (source == NULL || source > end || end - source < 2) {
+		return NULL;
+	}
+	uint16_t count;
+	source = ptp_decode_uint16(source, &count);
+	if (type == ptp_str_type) {
+		for (unsigned i = 0; i < count && source != NULL; i++) {
+			source = ptp_skip_property_value(source, end, type);
+		}
+		return source;
+	}
+	size_t length = ptp_type_size(type);
+	if (length == 0 || length > 8 || count > (size_t)(end - source) / length) {
+		return NULL;
+	}
+	return source + count * length;
+}
+
+// Validate both values, the form and the optional new-API enumeration before publishing a record.
+static uint8_t *ptp_sony_property_end(uint8_t *source, uint8_t *end, bool new_api) {
+	if (source == NULL || end == NULL || source > end || end - source < 6) {
+		return NULL;
+	}
+	uint16_t type;
+	ptp_decode_uint16(source + 2, &type);
+	if (type == ptp_undef_type) {
+		return NULL;
+	}
+	source = ptp_skip_property_value(source + 6, end, type);
+	source = ptp_skip_property_value(source, end, type);
+	if (source == NULL || source == end) {
+		return NULL;
+	}
+	uint8_t form = *source++;
+	if (form == ptp_range_form && type != ptp_str_type) {
+		for (int i = 0; i < 3 && source != NULL; i++) {
+			source = ptp_skip_property_value(source, end, type);
+		}
+	} else if (form == ptp_enum_form) {
+		source = ptp_sony_skip_enum(source, end, type);
+		if (new_api) {
+			source = ptp_sony_skip_enum(source, end, type);
+		}
+	} else if (form != ptp_none_form) {
+		return NULL;
+	}
+	return source;
+}
+
+uint8_t *ptp_sony_decode_property(uint8_t *source, uint8_t *end, indigo_device *device) {
+	uint8_t *property_end = ptp_sony_property_end(source, end, SONY_PRIVATE_DATA->api_version == SONY_NEW_API);
+	if (property_end == NULL) {
+		return NULL;
+	}
 	uint16_t code;
 	source = ptp_decode_uint16(source, &code);
 	ptp_property dummy, *target = &dummy;
@@ -902,6 +963,9 @@ uint8_t *ptp_sony_decode_property(uint8_t *source, indigo_device *device) {
 			target = PRIVATE_DATA->properties + i;
 			break;
 		}
+	}
+	if (target == &dummy) {
+		return property_end;
 	}
 	target->code = code;
 	source = ptp_decode_uint16(source, &target->type);
@@ -1068,59 +1132,78 @@ uint8_t *ptp_sony_decode_property(uint8_t *source, indigo_device *device) {
 		case ptp_enum_form: {
 			uint16_t count;
 			source = ptp_decode_uint16(source, &count);
-			target->count = count;
-			for (int i = 0; i < target->count; i++) {
+			// Values that do not fit PTP_MAX_ELEMENTS numbers or 16 strings are skipped.
+			int capacity = target->type == ptp_str_type ? 16 : PTP_MAX_ELEMENTS;
+			target->count = count < capacity ? count : capacity;
+			for (int i = 0; i < count; i++) {
+				int64_t *value_target = i < capacity ? target->value.sw.values + i : NULL;
 				switch (target->type) {
 					case ptp_uint8_type: {
 						uint8_t value;
 						source = ptp_decode_uint8(source, &value);
-						target->value.sw.values[i] = value;
+						if (value_target) {
+							*value_target = value;
+						}
 						break;
 					}
 					case ptp_int8_type: {
 						int8_t value;
 						source = ptp_decode_uint8(source, (uint8_t *)&value);
-						target->value.sw.values[i] = value;
+						if (value_target) {
+							*value_target = value;
+						}
 						break;
 					}
 					case ptp_uint16_type: {
 						uint16_t value;
 						source = ptp_decode_uint16(source, &value);
-						target->value.sw.values[i] = value;
+						if (value_target) {
+							*value_target = value;
+						}
 						break;
 					}
 					case ptp_int16_type: {
 						int16_t value;
 						source = ptp_decode_uint16(source, (uint16_t *)&value);
-						target->value.sw.values[i] = value;
+						if (value_target) {
+							*value_target = value;
+						}
 						break;
 					}
 					case ptp_uint32_type: {
 						uint32_t value;
 						source = ptp_decode_uint32(source, &value);
-						target->value.sw.values[i] = value;
+						if (value_target) {
+							*value_target = value;
+						}
 						break;
 					}
 					case ptp_int32_type: {
 						int32_t value;
 						source = ptp_decode_uint32(source, (uint32_t *)&value);
-						target->value.sw.values[i] = value;
+						if (value_target) {
+							*value_target = value;
+						}
 						break;
 					}
 					case ptp_uint64_type: {
 						uint64_t value;
 						source = ptp_decode_uint64(source, &value);
-						target->value.sw.values[i] = value;
+						if (value_target) {
+							*value_target = value;
+						}
 						break;
 					}
 					case ptp_int64_type: {
 						int64_t value;
 						source = ptp_decode_uint64(source, (uint64_t *)&value);
-						target->value.sw.values[i] = value;
+						if (value_target) {
+							*value_target = value;
+						}
 						break;
 					}
 					case ptp_str_type: {
-						if (i < 16) {
+						if (i < capacity) {
 							source = ptp_decode_string(source, target->value.sw_str.values[i]);
 						} else {
 							char tmp[PTP_MAX_CHARS];
@@ -1299,11 +1382,30 @@ static void ptp_check_event(indigo_device *device) {
 	}
 }
 
+static bool ptp_sony_decode_properties(uint8_t *buffer, uint32_t size, indigo_device *device) {
+	if (buffer == NULL || size < 8) {
+		PRIVATE_DATA->last_error = ptp_response_GeneralError;
+		return false;
+	}
+	uint8_t *source = buffer + 8, *end = buffer + size;
+	uint32_t count;
+	ptp_decode_uint32(buffer, &count);
+	for (uint32_t i = 0; i < count; i++) {
+		source = ptp_sony_decode_property(source, end, device);
+		if (source == NULL) {
+			PRIVATE_DATA->last_error = ptp_response_GeneralError;
+			return false;
+		}
+	}
+	return true;
+}
+
 bool ptp_sony_initialise(indigo_device *device) {
 	DSLR_MIRROR_LOCKUP_PROPERTY->hidden = true;
 	DSLR_DELETE_IMAGE_PROPERTY->hidden = true;
 	indigo_set_switch(DSLR_DELETE_IMAGE_PROPERTY, DSLR_DELETE_IMAGE_OFF_ITEM, true);
 	PRIVATE_DATA->vendor_private_data = indigo_safe_malloc(sizeof(sony_private_data));
+	SONY_PRIVATE_DATA->spent_memory = -1;
 	if (!ptp_initialise(device))
 		return false;
 	INDIGO_LOG(indigo_log("%s[%d, %s]: device ext_info", DRIVER_NAME, __LINE__, __FUNCTION__));
@@ -1312,11 +1414,16 @@ bool ptp_sony_initialise(indigo_device *device) {
 		uint32_t size;
 		ptp_transaction_3_0(device, ptp_operation_sony_SDIOConnect, 1, 0, 0);
 		ptp_transaction_3_0(device, ptp_operation_sony_SDIOConnect, 2, 0, 0);
+		// ILCE-7RM4 drops a SetControlDeviceA it acknowledged while busy after a capture; ILCE-7RM2 applies
+		// one up to about 9 s later (when idle), and a shot taken before that uses the old value.
+		PRIVATE_DATA->refresh_properties = ptp_sony_refresh_properties;
 		if (PRIVATE_DATA->model.product >= SONY_NEW_API_SUPPORT_PRODUCT_ID_BORDER) {
 			SONY_PRIVATE_DATA->api_version = SONY_NEW_API;
 			indigo_log("0x%04x >= 0x%04x new API used", PRIVATE_DATA->model.product, SONY_NEW_API_SUPPORT_PRODUCT_ID_BORDER);
 		} else {
 			SONY_PRIVATE_DATA->api_version = SONY_OLD_API;
+			PRIVATE_DATA->property_verify_timeout = SONY_OLD_API_VERIFY_TIMEOUT;
+			PRIVATE_DATA->property_rewrite_delay = SONY_OLD_API_REWRITE_DELAY;
 			indigo_log("0x%04x < 0x%04x old API used", PRIVATE_DATA->model.product, SONY_NEW_API_SUPPORT_PRODUCT_ID_BORDER);
 		}
 		if (PRIVATE_DATA->model.product == SONY_ILCE_7RM4_PRODUCT_ID || PRIVATE_DATA->model.product == SONY_ILCE_7RM4A_PRODUCT_ID) {
@@ -1329,13 +1436,14 @@ bool ptp_sony_initialise(indigo_device *device) {
 			uint16_t operations[PTP_MAX_ELEMENTS] = { 0 }, *last_operation = operations;
 			uint16_t events[PTP_MAX_ELEMENTS] = { 0 }, *last_event = events;
 			uint16_t properties[PTP_MAX_ELEMENTS] = { 0 }, *last_property = properties;
+			// Codes that do not fit the zero-terminated lists are dropped.
 			for (int i = 0; i < count; i++) {
 				uint16_t code = ((uint16_t *)buffer)[i];
-				if ((code & 0x7000) == 0x1000) {
+				if ((code & 0x7000) == 0x1000 && last_operation < operations + PTP_MAX_ELEMENTS - 1) {
 					*last_operation++ = code;
-				} else if ((code & 0x7000) == 0x4000) {
+				} else if ((code & 0x7000) == 0x4000 && last_event < events + PTP_MAX_ELEMENTS - 1) {
 					*last_event++ = code;
-				} else if ((code & 0x7000) == 0x5000) {
+				} else if ((code & 0x7000) == 0x5000 && last_property < properties + PTP_MAX_ELEMENTS - 1) {
 					*last_property++ = code;
 				}
 			}
@@ -1360,16 +1468,15 @@ bool ptp_sony_initialise(indigo_device *device) {
 			// SONY a7II and a7S need to wait to boot
 			indigo_sleep(1);
 			ptp_transaction_3_0(device, ptp_operation_sony_SDIOConnect, 3, 0, 0);
-			if (ptp_transaction_0_0_i(device, ptp_operation_sony_GetAllDevicePropData, &buffer, &size)) {
-				uint8_t *source = buffer;
-				source = ptp_decode_uint32(source, &count);
-				source += sizeof(uint32_t);
-				for (int i = 0; i < count; i++) {
-					source = ptp_sony_decode_property(source, device);
-					if (source == NULL) {
-						break;
-					}
+			if (ptp_property_supported(device, ptp_property_sony_PriorityMode)) {
+				// Application priority, written on every connect as libgphoto2 does; ILCE-7RM4 accepts it.
+				uint8_t priority = 1;
+				if (!ptp_transaction_0_1_o(device, ptp_operation_sony_SetControlDeviceA, ptp_property_sony_PriorityMode, &priority, sizeof(priority))) {
+					INDIGO_DRIVER_DEBUG(DRIVER_NAME, "PriorityMode not written (%04x)", PRIVATE_DATA->last_error);
 				}
+			}
+			if (ptp_transaction_0_0_i(device, ptp_operation_sony_GetAllDevicePropData, &buffer, &size)) {
+				ptp_sony_decode_properties(buffer, size, device);
 				free(buffer);
 				buffer = NULL;
 			}
@@ -1385,43 +1492,87 @@ bool ptp_sony_initialise(indigo_device *device) {
 	return true;
 }
 
+bool ptp_sony_refresh_properties(indigo_device *device) {
+	void *buffer = NULL;
+	uint32_t size;
+	bool result = ptp_transaction_0_0_i(device, ptp_operation_sony_GetAllDevicePropData, &buffer, &size);
+	if (result) {
+		result = ptp_sony_decode_properties(buffer, size, device);
+	}
+	free(buffer);
+	return result;
+}
+
+// A shot pressed by the driver whose image has not arrived yet; kept across a reconnect (ILCE-7RM4 delivered a
+// 10 s shot, interrupted by a disconnect, as the image of the next session's first exposure).
+static bool sony_shot_pending(indigo_device *device) {
+	return PRIVATE_DATA->pending_shot_until > indigo_monotonic_time();
+}
+
+// Downloads an object nobody waits for so the camera can release it; with pair, also the RAW+JPEG partner
+// announced by the same event.
+static void sony_discard_object(indigo_device *device, uint32_t handle, bool pair) {
+	for (int i = 0; i < (pair ? 2 : 1); i++) {
+		void *buffer = NULL;
+		uint32_t info_size = 0, size = 0;
+		char filename[PTP_MAX_CHARS] = "";
+		if (!ptp_transaction_1_0_i(device, ptp_operation_GetObjectInfo, handle, &buffer, &info_size) || !buffer) {
+			free(buffer);
+			return;
+		}
+		bool valid = ptp_decode_object_info(buffer, info_size, &size, filename);
+		free(buffer);
+		buffer = NULL;
+		bool downloaded = valid && size && ptp_transaction_1_0_i(device, ptp_operation_GetObject, handle, &buffer, &size);
+		free(buffer);
+		INDIGO_DRIVER_LOG(DRIVER_NAME, "ptp_event_ObjectAdded: handle = %08x, '%s' belongs to no exposure, %s", handle, filename, downloaded ? "discarded" : "download failed");
+		if (!valid || !PRIVATE_DATA->check_dual_compression(device) || !ptp_check_jpeg_ext(strchr(filename, '.'))) {
+			return;
+		}
+	}
+}
+
 bool ptp_sony_handle_event(indigo_device *device, ptp_event_code code, uint32_t *params) {
 	switch ((int)code) {
 		case ptp_event_sony_PropertyChanged: {
-			void *buffer = NULL;
-			uint32_t size, count;
-			if (ptp_transaction_0_0_i(device, ptp_operation_sony_GetAllDevicePropData, &buffer, &size)) {
-				uint8_t *source = buffer;
-				source = ptp_decode_uint32(source, &count);
-				source += sizeof(uint32_t);
-				for (int i = 0; i < count; i++) {
-					source = ptp_sony_decode_property(source, device);
-					if (source == NULL) {
-						break;
-					}
-				}
-			}
-			free(buffer);
-			buffer = NULL;
+			ptp_sony_refresh_properties(device);
 			return true;
 		}
 		case ptp_event_sony_ObjectAdded: {
+			// ILCE-7RM2 reports a shot about 9 s after the press, also one taken for an aborted exposure; that
+			// object must not be taken for the next exposure's image.
+			// A shot the camera never reported (ignored press, full card) must not cost a later image.
+			if (SONY_PRIVATE_DATA->stale_objects > 0 && indigo_monotonic_time() >= SONY_PRIVATE_DATA->stale_until) {
+				SONY_PRIVATE_DATA->stale_objects = 0;
+			}
+			if (SONY_PRIVATE_DATA->stale_objects > 0 || (!PRIVATE_DATA->capture_active && sony_shot_pending(device))) {
+				if (SONY_PRIVATE_DATA->stale_objects > 0) {
+					SONY_PRIVATE_DATA->stale_objects--;
+				} else {
+					PRIVATE_DATA->pending_shot_until = 0;
+				}
+				sony_discard_object(device, params[0], true);
+				return true;
+			}
 			void *buffer = NULL;
-			if (ptp_transaction_1_0_i(device, ptp_operation_GetObjectInfo, params[0], &buffer, NULL) && buffer) {
+			uint32_t info_size = 0;
+			if (ptp_transaction_1_0_i(device, ptp_operation_GetObjectInfo, params[0], &buffer, &info_size) && buffer) {
 				uint32_t size;
 				char filename[PTP_MAX_CHARS];
-				memset(&filename, 0, PTP_MAX_CHARS);
-				uint8_t *source = buffer;
-				source = ptp_decode_uint32(source + 8, &size);
-				source = ptp_decode_string(source + 40 , filename);
+				bool valid = ptp_decode_object_info(buffer, info_size, &size, filename);
 				free(buffer);
 				buffer = NULL;
+				if (!valid) {
+					INDIGO_DRIVER_ERROR(DRIVER_NAME, "ptp_event_ObjectAdded: handle = %08x, malformed ObjectInfo (%u bytes)", params[0], info_size);
+					return true;
+				}
 				INDIGO_DRIVER_LOG(DRIVER_NAME, "ptp_event_ObjectAdded: handle = %08x, size = %u, name = '%s'", params[0], size, filename);
-				if (size && ptp_transaction_1_0_i(device, ptp_operation_GetObject, params[0], &buffer, NULL)) {
+				// Publish the bytes actually received; ObjectInfo size is only advisory.
+				if (size && ptp_transaction_1_0_i(device, ptp_operation_GetObject, params[0], &buffer, &size) && size) {
 					SONY_PRIVATE_DATA->downloaded_objects++;
 					const char *ext = strchr(filename, '.');
 					if (PRIVATE_DATA->check_dual_compression(device) && ptp_check_jpeg_ext(ext)) {
-						if (CCD_PREVIEW_ENABLED_ITEM->sw.value) {
+						if (CCD_PREVIEW_ENABLED_ITEM->sw.value || CCD_PREVIEW_ENABLED_WITH_HISTOGRAM_ITEM->sw.value) {
 							indigo_process_dslr_preview_image(device, buffer, size);
 						}
 						if (SONY_PRIVATE_DATA->api_version != SONY_NEW_API && !PRIVATE_DATA->image_added) {
@@ -1434,6 +1585,7 @@ bool ptp_sony_handle_event(indigo_device *device, ptp_event_code code, uint32_t 
 						}
 						PRIVATE_DATA->image_buffer = buffer;
 						PRIVATE_DATA->image_added = true;
+						PRIVATE_DATA->pending_shot_until = 0;
 						buffer = NULL;
 					}
 				}
@@ -1463,6 +1615,8 @@ bool ptp_sony_set_property(indigo_device *device, ptp_property *property) {
 					value = -value;
 				}
 				indigo_set_switch(property->property, property->property->items + 1, true);
+				// A step has no requested value the camera could confirm.
+				PRIVATE_DATA->write_unconfirmed = true;
 				return ptp_transaction_0_1_o(device, ptp_operation_sony_SetControlDeviceB, property->code, &value, sizeof(uint16_t));
 			}
 		}
@@ -1473,7 +1627,7 @@ bool ptp_sony_set_property(indigo_device *device, ptp_property *property) {
 			for (int i = 0; i < property->property->count; i++) {
 				indigo_item *item = property->property->items + i;
 				if (item->sw.value) {
-					value = strtol(item->name, NULL, 16);
+					value = (int64_t)strtoull(item->name, NULL, 16);
 					break;
 				}
 			}
@@ -1514,20 +1668,71 @@ static bool sony_capture_stop(indigo_device *device) {
 	return ptp_transaction_0_1_o(device, ptp_operation_sony_SetControlDeviceB, ptp_property_sony_Autofocus, &value, sizeof(value)) && result;
 }
 
+#define SONY_SESSION_BUSY_WINDOW	10
+#ifndef SONY_SHOT_CONFIRM_TIME
+#define SONY_SHOT_CONFIRM_TIME		3
+#endif
+#define SONY_SHOT_RETRIES					2
+// How long after the expected end of a shot its late object may still arrive (ILCE-7RM2: up to about 17 s).
+#ifndef SONY_STALE_SHOT_TIME
+#define SONY_STALE_SHOT_TIME				30
+#endif
+
+static double sony_shutter_time(indigo_device *device) {
+	uint32_t a = (uint32_t)(SONY_PRIVATE_DATA->shutter_speed >> 16) & 0xFFFF;
+	uint32_t b = (uint32_t)SONY_PRIVATE_DATA->shutter_speed & 0xFFFF;
+	return b ? (double)a / b : 0;
+}
+
 bool ptp_sony_exposure(indigo_device *device) {
 	if (PRIVATE_DATA->capture_phase == 0) {
+		// ObjectInMemory lags a download (ILCE-7RM4: about 0.2 s); the value an object was taken at gives no
+		// further access to 0xffffc001 until the camera reports another one (accessing it with nothing ready is
+		// reported to crash the firmware).
 		PRIVATE_DATA->capture_stop = sony_capture_stop;
 		SONY_PRIVATE_DATA->downloaded_objects = 0;
+		SONY_PRIVATE_DATA->shot_retries = 0;
+		SONY_PRIVATE_DATA->shot_deadline = 0;
 		if (PRIVATE_DATA->abort_capture) {
 			return false;
 		}
 		if (SONY_PRIVATE_DATA->needs_pre_capture_delay && indigo_monotonic_time() < PRIVATE_DATA->connected_at + 3) {
 			return true;
 		}
+		// A ready object left in the camera (the RAW of a pair shot before a compression write applied, or a
+		// late shot) would be returned as this exposure's image; drain it first, as libgphoto2 does.
+		ptp_property *memory = ptp_property_supported(device, ptp_property_sony_ObjectInMemory);
+		// One object per check: touching 0xffffc001 without a ready object is reported to crash the firmware.
+		// Each drained object is counted as one late shot; a RAW left from a published pair may thus clear
+		// the count of another late shot, which then expires by time.
+		for (int i = 0; memory && i < 4 && ptp_sony_refresh_properties(device) && memory->value.number.value > 0x8000 && (int64_t)memory->value.number.value != SONY_PRIVATE_DATA->spent_memory; i++) {
+			SONY_PRIVATE_DATA->spent_memory = (int64_t)memory->value.number.value;
+			SONY_PRIVATE_DATA->spent_at = indigo_monotonic_time();
+			sony_discard_object(device, 0xffffc001, false);
+			if (sony_shot_pending(device)) {
+				PRIVATE_DATA->pending_shot_until = 0;
+			} else if (SONY_PRIVATE_DATA->stale_objects > 0) {
+				SONY_PRIVATE_DATA->stale_objects--;
+			}
+		}
+		if (sony_shot_pending(device)) {
+			// The previous exposure, possibly in an earlier session, ended before its image arrived; that image
+			// comes first.
+			SONY_PRIVATE_DATA->stale_objects++;
+			SONY_PRIVATE_DATA->stale_until = PRIVATE_DATA->pending_shot_until;
+		}
+		PRIVATE_DATA->pending_shot_until = 0;
+		PRIVATE_DATA->capture_phase = 4;
+	}
+	if (PRIVATE_DATA->capture_phase == 4) {
+		if (PRIVATE_DATA->abort_capture) {
+			return false;
+		}
 		int16_t value = 2;
 		SONY_PRIVATE_DATA->focus_state = 1;
 		if (!ptp_transaction_0_1_o(device, ptp_operation_sony_SetControlDeviceB, ptp_property_sony_Autofocus, &value, sizeof(value))) {
-			return false;
+			// ILCE-7RM4 answers DeviceBusy for a few seconds after a new session; retry until it settles.
+			return PRIVATE_DATA->last_error == ptp_response_DeviceBusy && indigo_monotonic_time() < PRIVATE_DATA->connected_at + SONY_SESSION_BUSY_WINDOW;
 		}
 		PRIVATE_DATA->capture_phase = 3;
 		PRIVATE_DATA->phase_deadline = indigo_monotonic_time() + (SONY_PRIVATE_DATA->focus_mode == 1 ? 1 : 5);
@@ -1550,10 +1755,21 @@ bool ptp_sony_exposure(indigo_device *device) {
 			return false;
 		}
 		PRIVATE_DATA->shutter_open = true;
+		double shot_time = bulb ? CCD_EXPOSURE_ITEM->number.target : sony_shutter_time(device);
+		// Long exposure noise reduction doubles a timed shot.
+		PRIVATE_DATA->pending_shot_until = indigo_monotonic_time() + (bulb ? shot_time : 2 * (shot_time > CCD_EXPOSURE_ITEM->number.target ? shot_time : CCD_EXPOSURE_ITEM->number.target)) + SONY_STALE_SHOT_TIME;
 		if (!bulb && !sony_capture_stop(device)) {
 			return false;
 		}
 		ptp_capture_start(device, bulb, 0);
+		if (!bulb) {
+			double shutter_time = sony_shutter_time(device);
+			if (shutter_time < CCD_EXPOSURE_ITEM->number.target) {
+				shutter_time = CCD_EXPOSURE_ITEM->number.target;
+			}
+			// Long exposure noise reduction (on by default from 1 s) records a dark frame of the same length.
+			SONY_PRIVATE_DATA->shot_deadline = indigo_monotonic_time() + (shutter_time >= 1 ? 2 * shutter_time : shutter_time) + SONY_SHOT_CONFIRM_TIME;
+		}
 		return true;
 	}
 	if (PRIVATE_DATA->capture_phase == 1) {
@@ -1566,12 +1782,43 @@ bool ptp_sony_exposure(indigo_device *device) {
 		PRIVATE_DATA->capture_phase = 2;
 	}
 	ptp_property *property = ptp_property_supported(device, ptp_property_sony_ObjectInMemory);
-	if (!PRIVATE_DATA->readout_detected && property && property->value.number.value > 0x8000) {
+	// After a reconnect ILCE-7RM4 may accept a full press, refocus and never shoot, and ILCE-7RM2 ignores a
+	// press made right after the previous download; ObjectInMemory then stays 0.
+	if (PRIVATE_DATA->capture_phase == 2 && SONY_PRIVATE_DATA->shot_deadline > 0 && !PRIVATE_DATA->abort_capture && !PRIVATE_DATA->readout_detected && !PRIVATE_DATA->image_added && SONY_PRIVATE_DATA->downloaded_objects == 0 && property && property->value.number.value == 0 && indigo_monotonic_time() >= SONY_PRIVATE_DATA->shot_deadline && ptp_sony_refresh_properties(device) && property->value.number.value == 0) {
+		if (SONY_PRIVATE_DATA->shot_retries >= SONY_SHOT_RETRIES) {
+			INDIGO_DRIVER_ERROR(DRIVER_NAME, "Camera did not take the picture after %d attempts", SONY_PRIVATE_DATA->shot_retries + 1);
+			// ObjectInMemory was just read as 0: no image of this exposure will come.
+			PRIVATE_DATA->pending_shot_until = 0;
+			return false;
+		}
+		SONY_PRIVATE_DATA->shot_retries++;
+		SONY_PRIVATE_DATA->shot_deadline = 0;
+		INDIGO_DRIVER_LOG(DRIVER_NAME, "Camera did not take the picture, pressing the shutter again");
+		PRIVATE_DATA->capture_phase = 4;
+		return true;
+	}
+	if (property && (int64_t)property->value.number.value != SONY_PRIVATE_DATA->spent_memory) {
+		SONY_PRIVATE_DATA->spent_memory = -1;
+	} else if (property && SONY_PRIVATE_DATA->spent_memory >= 0 && indigo_monotonic_time() >= SONY_PRIVATE_DATA->spent_at + 1 && ptp_sony_refresh_properties(device)) {
+		// The report lags a download by about 0.2 s and its change may not be announced; a value read a second
+		// later is current, also when it is the same.
+		SONY_PRIVATE_DATA->spent_memory = -1;
+	}
+	if (!PRIVATE_DATA->readout_detected && property && property->value.number.value > 0x8000 && SONY_PRIVATE_DATA->spent_memory < 0) {
 		// Even an aborted NEW_API capture must drain its object before reuse.
 		uint32_t dummy[] = { 0xffffc001 };
 		PRIVATE_DATA->readout_detected = property->value.number.value == 0x8001 || SONY_PRIVATE_DATA->api_version == SONY_NEW_API;
+		unsigned downloaded_objects = SONY_PRIVATE_DATA->downloaded_objects;
+		int64_t memory = (int64_t)property->value.number.value;
 		if (!ptp_sony_handle_event(device, (ptp_event_code)ptp_event_sony_ObjectAdded, dummy)) {
 			return false;
+		}
+		if (SONY_PRIVATE_DATA->downloaded_objects == downloaded_objects && !PRIVATE_DATA->image_added) {
+			// Nothing of this exposure came (a stale object was discarded, or none was ready): its own object is
+			// still to come.
+			PRIVATE_DATA->readout_detected = false;
+			SONY_PRIVATE_DATA->spent_memory = memory;
+			SONY_PRIVATE_DATA->spent_at = indigo_monotonic_time();
 		}
 	}
 	// NEW_API exposes the pair through the same memory handle, in either order.
@@ -1583,7 +1830,31 @@ bool ptp_sony_exposure(indigo_device *device) {
 	if (SONY_PRIVATE_DATA->api_version != SONY_NEW_API && PRIVATE_DATA->abort_capture) {
 		return false;
 	}
-	return PRIVATE_DATA->capture_complete ? !PRIVATE_DATA->abort_capture : indigo_monotonic_time() < PRIVATE_DATA->capture_deadline;
+	if (PRIVATE_DATA->capture_complete) {
+		return !PRIVATE_DATA->abort_capture;
+	}
+	if (indigo_monotonic_time() < PRIVATE_DATA->capture_deadline) {
+		return true;
+	}
+	// The capture timed out after the shot's expected end (twice the shutter time) with nothing in the camera's
+	// memory: no image of this exposure will come.
+	if (property && indigo_monotonic_time() >= PRIVATE_DATA->pending_shot_until - SONY_STALE_SHOT_TIME && ptp_sony_refresh_properties(device) && property->value.number.value == 0) {
+		PRIVATE_DATA->pending_shot_until = 0;
+	}
+	return false;
+}
+
+// ILCE-7RM2 refuses live view frames with AccessDenied for about 9 s after a capture, 17 s after two.
+#ifndef SONY_LIVEVIEW_WAIT
+#define SONY_LIVEVIEW_WAIT				30
+#endif
+
+// Counts a missing frame; true while the camera has been without a frame for less than SONY_LIVEVIEW_WAIT.
+static bool sony_liveview_wait(indigo_device *device) {
+	if (PRIVATE_DATA->stream_retries++ == 0) {
+		SONY_PRIVATE_DATA->liveview_deadline = indigo_monotonic_time() + SONY_LIVEVIEW_WAIT;
+	}
+	return indigo_monotonic_time() < SONY_PRIVATE_DATA->liveview_deadline;
 }
 
 bool ptp_sony_liveview(indigo_device *device) {
@@ -1596,7 +1867,7 @@ bool ptp_sony_liveview(indigo_device *device) {
 	bool result = ptp_transaction_1_0_i(device, ptp_operation_GetObject, 0xffffc002, &buffer, &size);
 	if (!result) {
 		free(buffer);
-		return (PRIVATE_DATA->last_error == ptp_response_AccessDenied || PRIVATE_DATA->last_error == ptp_response_DeviceBusy) && ++PRIVATE_DATA->stream_retries <= 100;
+		return (PRIVATE_DATA->last_error == ptp_response_AccessDenied || PRIVATE_DATA->last_error == ptp_response_DeviceBusy) && sony_liveview_wait(device);
 	}
 	uint8_t *bytes = buffer;
 	for (uint32_t start = 0; bytes && start + 3 < size; start++) {
@@ -1611,7 +1882,7 @@ bool ptp_sony_liveview(indigo_device *device) {
 		}
 	}
 	free(buffer);
-	return ++PRIVATE_DATA->stream_retries <= 100;
+	return sony_liveview_wait(device);
 }
 
 bool ptp_sony_af_stop(indigo_device *device) {

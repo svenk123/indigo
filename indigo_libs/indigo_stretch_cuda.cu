@@ -38,9 +38,9 @@ template <typename T> __global__ static void debayer_stretch_kernel(const T *inp
 	float red = 0, green = 0, blue = 0;
 	indigo_debayer_pixel(input, index, row, column, width, height, offsets, red, green, blue);
 	uint8_t *pixel = output + 3 * (size_t)index;
-	pixel[0] = indigo_stretch_value(red, channels.channel[0].native_shadows, channels.channel[0].native_highlights, channels.channel[0].k1_k2, channels.channel[0].midtones_k2);
-	pixel[1] = indigo_stretch_value(green, channels.channel[1].native_shadows, channels.channel[1].native_highlights, channels.channel[1].k1_k2, channels.channel[1].midtones_k2);
-	pixel[2] = indigo_stretch_value(blue, channels.channel[2].native_shadows, channels.channel[2].native_highlights, channels.channel[2].k1_k2, channels.channel[2].midtones_k2);
+	pixel[0] = indigo_stretch_value(red, channels.channel[0].native_shadows, channels.channel[0].native_highlights, channels.channel[0].k1, channels.channel[0].k2, channels.channel[0].midtones);
+	pixel[1] = indigo_stretch_value(green, channels.channel[1].native_shadows, channels.channel[1].native_highlights, channels.channel[1].k1, channels.channel[1].k2, channels.channel[1].midtones);
+	pixel[2] = indigo_stretch_value(blue, channels.channel[2].native_shadows, channels.channel[2].native_highlights, channels.channel[2].k1, channels.channel[2].k2, channels.channel[2].midtones);
 }
 
 // libjpeg (jccolor.c) fixed point RGB -> YCbCr, the same constants and rounding
@@ -78,9 +78,9 @@ template <typename T> __global__ static void debayer_stretch_ycc_kernel(const T 
 			const int row = min(2 * block_row + dy, height - 1);
 			float red = 0, green = 0, blue = 0;
 			indigo_debayer_pixel(input, row * width + column, row, column, width, height, offsets, red, green, blue);
-			const int r = indigo_stretch_value(red, channels.channel[0].native_shadows, channels.channel[0].native_highlights, channels.channel[0].k1_k2, channels.channel[0].midtones_k2);
-			const int g = indigo_stretch_value(green, channels.channel[1].native_shadows, channels.channel[1].native_highlights, channels.channel[1].k1_k2, channels.channel[1].midtones_k2);
-			const int b = indigo_stretch_value(blue, channels.channel[2].native_shadows, channels.channel[2].native_highlights, channels.channel[2].k1_k2, channels.channel[2].midtones_k2);
+			const int r = indigo_stretch_value(red, channels.channel[0].native_shadows, channels.channel[0].native_highlights, channels.channel[0].k1, channels.channel[0].k2, channels.channel[0].midtones);
+			const int g = indigo_stretch_value(green, channels.channel[1].native_shadows, channels.channel[1].native_highlights, channels.channel[1].k1, channels.channel[1].k2, channels.channel[1].midtones);
+			const int b = indigo_stretch_value(blue, channels.channel[2].native_shadows, channels.channel[2].native_highlights, channels.channel[2].k1, channels.channel[2].k2, channels.channel[2].midtones);
 			int y, cb, cr;
 			rgb_to_ycc(r, g, b, y, cb, cr);
 			if (dy == 1) {
@@ -124,7 +124,7 @@ template <typename T> __global__ static void debayer_kernel(const T *input, uint
 template <typename T> __global__ static void stretch_kernel(const T *input, uint8_t *output, size_t size, indigo_stretch_channel channel) {
 	const size_t index = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < size) {
-		output[index] = indigo_stretch_value(input[index] / 1.0f, channel.native_shadows, channel.native_highlights, channel.k1_k2, channel.midtones_k2);
+		output[index] = indigo_stretch_value(input[index] / 1.0f, channel.native_shadows, channel.native_highlights, channel.k1, channel.k2, channel.midtones);
 	}
 }
 
@@ -134,7 +134,7 @@ template <typename T> __global__ static void stretch_rgb_kernel(const T *input, 
 	if (index < size) {
 		const float coef[3] = { coef0, coef1, coef2 };
 		for (int i = 0; i < 3; i++) {
-			output[3 * index + i] = indigo_stretch_value(input[3 * index + i] / coef[i], channel.native_shadows, channel.native_highlights, channel.k1_k2, channel.midtones_k2);
+			output[3 * index + i] = indigo_stretch_value(input[3 * index + i] / coef[i], channel.native_shadows, channel.native_highlights, channel.k1, channel.k2, channel.midtones);
 		}
 	}
 }

@@ -104,6 +104,7 @@ static bool read_fault(const char *command, char *action, size_t size) {
 	}
 	action[size - 1] = 0;
 	unlink(fault_file);
+	event("FAULT", action);
 	return true;
 }
 
@@ -111,6 +112,10 @@ static bool write_reply(const char *payload, const char *action) {
 	char frame[128];
 	if (!strcmp(action, "silent")) {
 		return true;
+	}
+	if (!strcmp(action, "delay")) {
+		// The reply is sent late, so the request stays outstanding for a while.
+		usleep(400000);
 	}
 	if (!strcmp(action, "close")) {
 		running = 0;
@@ -196,13 +201,14 @@ static bool dispatch(const char *command) {
 		snprintf(reply, sizeof(reply), "%02X", motor->step_mode);
 		return write_reply(reply, action);
 	} else if (!strcmp(body, "GI")) {
-		snprintf(reply, sizeof(reply), "%02X", motor->moving ? 1 : 0);
+		// a compatible controller answers without the leading zeros ("1#", which INDI accepts)
+		snprintf(reply, sizeof(reply), !strcmp(profile, "short") ? "%X" : "%02X", motor->moving ? 1 : 0);
 		return write_reply(reply, action);
 	} else if (!strcmp(body, "GN")) {
 		snprintf(reply, sizeof(reply), "%04X", motor->target);
 		return write_reply(reply, action);
 	} else if (!strcmp(body, "GP")) {
-		snprintf(reply, sizeof(reply), "%04X", (unsigned)motor->motion.position & 0xffff);
+		snprintf(reply, sizeof(reply), !strcmp(profile, "short") ? "%X" : "%04X", (unsigned)motor->motion.position & 0xffff);
 		return write_reply(reply, action);
 	} else if (!strcmp(body, "GT") && port == 0) {
 		if (temperature_pending && serial_motion_time() - temperature_started < 0.75) {
@@ -267,14 +273,14 @@ static bool parse_args(int argc, char **argv) {
 		} else if (index + 1 < argc && !strcmp(argv[index], "--profile")) {
 			profile = argv[++index];
 		} else if (!strcmp(argv[index], "--help") || !strcmp(argv[index], "-h")) {
-			printf("Usage: %s [--headless] [--trace] [--ready-file PATH] [--profile normal|split|alternate]\n", argv[0]);
+			printf("Usage: %s [--headless] [--trace] [--ready-file PATH] [--profile normal|split|alternate|short]\n", argv[0]);
 			exit(0);
 		} else {
 			fprintf(stderr, "Unknown/incomplete option: %s\n", argv[index]);
 			return false;
 		}
 	}
-	return !strcmp(profile, "normal") || !strcmp(profile, "split") || !strcmp(profile, "alternate");
+	return !strcmp(profile, "normal") || !strcmp(profile, "split") || !strcmp(profile, "alternate") || !strcmp(profile, "short");
 }
 
 int main(int argc, char **argv) {

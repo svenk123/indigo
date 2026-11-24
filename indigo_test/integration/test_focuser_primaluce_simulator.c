@@ -21,9 +21,11 @@
 #include <indigo_drivers/focuser_primaluce/indigo_focuser_primaluce.h>
 
 #include "serial_simulator_test_common.h"
+#include <indigo/indigo_usbserial_utils.h>
 #include <errno.h>
 #include <sys/wait.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 #ifndef FOCUSER_PRIMALUCE_SIMULATOR_EXECUTABLE
 #define FOCUSER_PRIMALUCE_SIMULATOR_EXECUTABLE "build/integration/focuser_primaluce_simulator"
@@ -47,6 +49,7 @@
 #define X_WIFI_AP_SSID_ITEM_NAME           "AP_SSID"
 #define X_WIFI_AP_PASSWORD_ITEM_NAME       "AP_PASSWORD"
 #define X_WIFI_STA_PROPERTY_NAME           "X_WIFI_STA"
+#define X_WIFI_STATUS_PROPERTY_NAME        "X_WIFI_STATUS"
 #define X_WIFI_STA_SSID_ITEM_NAME          "STA_SSID"
 #define X_WIFI_STA_PASSWORD_ITEM_NAME      "STA_PASSWORD"
 #define X_LEDS_PROPERTY_NAME               "X_LEDS"
@@ -71,6 +74,7 @@
 #define X_HOLD_CURR_ON_ITEM_NAME           "ON"
 #define X_CALIBRATE_F_PROPERTY_NAME        "X_CALIBRATE"
 #define X_CALIBRATE_F_START_ITEM_NAME      "START"
+#define X_CALIBRATE_F_START_INVERTED_ITEM_NAME "START_INVERTED"
 #define X_CALIBRATE_F_END_ITEM_NAME        "END"
 #define X_CALIBRATE_R_PROPERTY_NAME        "X_CALIBRATE_A"
 #define X_CALIBRATE_R_START_ITEM_NAME      "START"
@@ -145,8 +149,8 @@ static void print_journal(const char *reason) {
 
 // The driver publishes a property state as soon as its transaction returns, so
 // the controller may not have logged the request yet.
-static bool wait_for_requests(const char *fragment, int expected) {
-	for (int i = 0; i < 200; i++) {
+static bool wait_for_requests_within(const char *fragment, int expected, int seconds) {
+	for (int i = 0; i < seconds * 40; i++) {
 		if (requests(fragment) >= expected) {
 			return true;
 		}
@@ -158,7 +162,77 @@ static bool wait_for_requests(const char *fragment, int expected) {
 	return false;
 }
 
+static bool wait_for_requests(const char *fragment, int expected) {
+	return wait_for_requests_within(fragment, expected, 5);
+}
+
+// The n-th request of the journal (0 based) contains fragment.
+static bool journal_line_has(int index, const char *fragment) {
+	FILE *file = fopen(event_path, "r");
+	if (file == NULL) {
+		return false;
+	}
+	char line[4096];
+	bool found = false;
+	for (int i = 0; fgets(line, sizeof(line), file) != NULL; i++) {
+		if (i == index) {
+			found = strstr(line, fragment) != NULL;
+			break;
+		}
+	}
+	fclose(file);
+	if (!found) {
+		print_journal("Unexpected request order");
+	}
+	return found;
+}
+
+static bool remove_fault(void) {
+	return unlink(fault_path) == 0 || errno == ENOENT;
+}
+
 // ----------------------------------------------------------------- helpers
+
+// Every FOCUSER_POSITION state the focuser published, in order, and the values of the focuser and rotator
+// position updates.
+static atomic_uint position_log_count;
+static indigo_property_state position_log[256];
+static double position_value_log[256];
+static atomic_uint rotator_log_count;
+static indigo_property_state rotator_log[256];
+static double rotator_value_log[256];
+
+static indigo_result observe_update(indigo_client *client, indigo_device *device, indigo_property *property, const char *message) {
+	if (!strcmp(property->device, PRIMALUCE_FOCUSER_NAME) && !strcmp(property->name, FOCUSER_POSITION_PROPERTY_NAME)) {
+		unsigned slot = atomic_fetch_add(&position_log_count, 1);
+		if (slot < ARRAY_SIZE(position_log)) {
+			position_log[slot] = property->state;
+			position_value_log[slot] = property->items[0].number.value;
+		}
+	} else if (!strcmp(property->device, PRIMALUCE_ROTATOR_NAME) && !strcmp(property->name, ROTATOR_POSITION_PROPERTY_NAME)) {
+		unsigned slot = atomic_fetch_add(&rotator_log_count, 1);
+		if (slot < ARRAY_SIZE(rotator_log)) {
+			rotator_log[slot] = property->state;
+			rotator_value_log[slot] = property->items[0].number.value;
+		}
+	}
+	return simulator_client_update_property(client, device, property, message);
+}
+
+// The first BUSY update logged from index from on shows the measured position as its value, not the request.
+static bool first_busy_value_is(indigo_property_state *states, double *values, unsigned count, unsigned from, double expected) {
+	for (unsigned i = from; i < count && i < 256; i++) {
+		if (states[i] == INDIGO_BUSY_STATE) {
+			if (fabs(values[i] - expected) > 0.01) {
+				fprintf(stderr, "First BUSY update shows %g instead of %g\n", values[i], expected);
+				return false;
+			}
+			return true;
+		}
+	}
+	fprintf(stderr, "No BUSY update logged\n");
+	return false;
+}
 
 static const char *device_name(void) {
 	return context.driver_case == NULL ? PRIMALUCE_FOCUSER_NAME : context.driver_case->device_name;
@@ -169,7 +243,19 @@ static const char *device_name(void) {
 static pthread_mutex_t message_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char messages[4096];
 
+// The focuser device as the driver attached it, for the USB match pattern it registers.
+static indigo_device *attached_focuser;
+
+static indigo_result observe_define(indigo_client *client, indigo_device *device, indigo_property *property, const char *message) {
+	if (!strcmp(property->device, primaluce_focuser.device_name)) {
+		attached_focuser = device;
+	}
+	return simulator_client_define_property(client, device, property, message);
+}
+
 static indigo_result record_message(indigo_client *client, indigo_device *device, indigo_property *property, const char *message) {
+	// the shared harness counts BUSY refusal messages
+	simulator_client_send_message(client, device, property, message);
 	if (message != NULL && *message) {
 		pthread_mutex_lock(&message_mutex);
 		if (strlen(messages) + strlen(message) + 2 < sizeof(messages)) {
@@ -237,8 +323,8 @@ static bool rejected_number_change(const char *property, const char *item, doubl
 		return false;
 	}
 	double target = cached->number.target;
-	unsigned int revision = property_state_revision(property, INDIGO_ALERT_STATE);
-	if (indigo_change_number_property_1(&simulator_test_client, device_name(), property, item, value) != INDIGO_OK || !state_seen(property, INDIGO_ALERT_STATE, revision)) {
+	// a BUSY property is refused with a BUSY message, any other one with ALERT (indigo_reject_change())
+	if (!assert_rejected_number_change_on(device_name(), property, item, value)) {
 		return false;
 	}
 	cached = find_cached_item(property, item);
@@ -292,6 +378,20 @@ static bool position_is(double expected) {
 	return false;
 }
 
+// The rotator publishes an angle strictly between origin and target while the move is BUSY.
+static bool rotator_in_motion(double origin, double target) {
+	for (int i = 0; i < 400; i++) {
+		indigo_property *property = find_cached_property(ROTATOR_POSITION_PROPERTY_NAME);
+		indigo_item *item = find_cached_item(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME);
+		if (property != NULL && item != NULL && property->state == INDIGO_BUSY_STATE && ((item->number.value > origin && item->number.value < target) || (item->number.value < origin && item->number.value > target))) {
+			return true;
+		}
+		indigo_usleep(25000);
+	}
+	fprintf(stderr, "Rotator never published an angle between %g and %g while moving\n", origin, target);
+	return false;
+}
+
 static bool rotator_position_is(double expected) {
 	for (int i = 0; i < 400; i++) {
 		indigo_property *property = find_cached_property(ROTATOR_POSITION_PROPERTY_NAME);
@@ -305,6 +405,51 @@ static bool rotator_position_is(double expected) {
 	indigo_item *item = find_cached_item(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME);
 	fprintf(stderr, "Rotator did not settle at %g (value %g, state %d)\n", expected, item == NULL ? NAN : item->number.value, property == NULL ? -1 : property->state);
 	return false;
+}
+
+static double number_target(const char *property_name, const char *item_name) {
+	indigo_item *item = find_cached_item(property_name, item_name);
+	return item == NULL ? NAN : item->number.target;
+}
+
+static indigo_property_state property_state(const char *property_name) {
+	indigo_property *property = find_cached_property(property_name);
+	return property == NULL ? -1 : property->state;
+}
+
+// Wait until a fresh publication carries the state, also when it was only transient.
+static bool state_seen_within(const char *property, indigo_property_state state, unsigned int revision, int seconds) {
+	for (int i = 0; i < seconds * 40; i++) {
+		if (property_state_revision(property, state) > revision) {
+			return true;
+		}
+		indigo_usleep(25000);
+	}
+	fprintf(stderr, "%s never published state %d within %d s\n", property, state, seconds);
+	return false;
+}
+
+// Both motion properties ended the move in state with the target of the request, wherever the focuser stopped.
+static bool motion_ended(indigo_property_state state, double expected) {
+	for (int i = 0; i < 400; i++) {
+		if (property_state(FOCUSER_POSITION_PROPERTY_NAME) == state && property_state(FOCUSER_STEPS_PROPERTY_NAME) == state) {
+			break;
+		}
+		indigo_usleep(25000);
+	}
+	double value = cached_number_value(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME);
+	double target = number_target(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME);
+	if (property_state(FOCUSER_POSITION_PROPERTY_NAME) != state || property_state(FOCUSER_STEPS_PROPERTY_NAME) != state || target != expected) {
+		fprintf(stderr, "Motion ended with position %d, steps %d, value %g, target %g\n", property_state(FOCUSER_POSITION_PROPERTY_NAME), property_state(FOCUSER_STEPS_PROPERTY_NAME), value, target);
+		return false;
+	}
+	return true;
+}
+
+// Two idle position polls (2 s apart) run, each waited for on its own.
+static bool idle_polls(void) {
+	int polls = requests("\"ABS_POS\"");
+	return wait_for_requests("\"ABS_POS\"", polls + 1) && wait_for_requests("\"ABS_POS\"", polls + 2);
 }
 
 // Wait until the controller reports a position between origin and target, so an
@@ -350,6 +495,28 @@ static void driver_stop(void) {
 
 // ----------------------------------------------------------------- identity and lifecycle
 
+// The focuser prefers a port of a CP2102N bridge with the Silicon Labs VID/PID (10c4:ea60), as the SESTO SENSO 3 and
+// the ESATTO2 report; a CP2102N name behind another VID/PID, or another bridge with the same VID/PID, does not match.
+static void usb_match_pattern(void) {
+	SERIAL_CHECK_TRUE(driver_up());
+	SERIAL_CHECK_TRUE(attached_focuser != NULL);
+	SERIAL_CHECK_EQ_INT(1, attached_focuser->match_patterns_count);
+	indigo_serial_info ports[3] = { { 0 } };
+	ports[0].vendor_id = 0x0403;
+	ports[0].product_id = 0x6001;
+	strcpy(ports[0].product_string, "CP2102N USB to UART Bridge Controller");
+	ports[1].vendor_id = 0x10c4;
+	ports[1].product_id = 0xea60;
+	strcpy(ports[1].product_string, "CP2104 USB to UART Bridge Controller");
+	ports[2].vendor_id = 0x10c4;
+	ports[2].product_id = 0xea60;
+	strcpy(ports[2].product_string, "CP2102N USB to UART Bridge Controller");
+	SERIAL_CHECK_TRUE(indigo_usbserial_match(ports, 2, attached_focuser->match_patterns, attached_focuser->match_patterns_count) == NULL);
+	SERIAL_CHECK_TRUE(indigo_usbserial_match(ports, 3, attached_focuser->match_patterns, attached_focuser->match_patterns_count) == &ports[2]);
+cleanup:
+	driver_stop();
+}
+
 static void metadata(void) {
 	assert_simulator_driver_info(&primaluce_focuser);
 	SERIAL_CHECK_TRUE(driver_start());
@@ -358,6 +525,11 @@ static void metadata(void) {
 	// The handshake asks for the model and the firmware before the full state.
 	SERIAL_CHECK_TRUE(wait_for_requests("\"MODNAME\"", 1));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"SWVERS\"", 1));
+	// The connect sequence: identity, firmware, quiet log level, then the full state.
+	SERIAL_CHECK_TRUE(journal_line_has(0, "\"MODNAME\""));
+	SERIAL_CHECK_TRUE(journal_line_has(1, "\"SWVERS\""));
+	SERIAL_CHECK_TRUE(journal_line_has(2, "\"LOGLEVEL\""));
+	SERIAL_CHECK_TRUE(journal_line_has(3, "{\"req\":{\"get\": \"\"}}"));
 	SERIAL_CHECK_TRUE(text_is(INFO_PROPERTY_NAME, INFO_DEVICE_MODEL_ITEM_NAME, "SESTOSENSO2"));
 	SERIAL_CHECK_TRUE(text_is(INFO_PROPERTY_NAME, INFO_DEVICE_FW_REVISION_ITEM_NAME, "3.10 / 3.10"));
 	SERIAL_CHECK_TRUE(text_is(INFO_PROPERTY_NAME, INFO_DEVICE_SERIAL_NUM_ITEM_NAME, "SESTOSENSO20716"));
@@ -445,10 +617,39 @@ static void esatto_profile(void) {
 	// An Esatto reports no stored positions.
 	SERIAL_CHECK_TRUE(!has_defined_property(X_PRESETS_PROPERTY_NAME));
 	SERIAL_CHECK_TRUE(!has_defined_property(X_PRESET_GOTO_PROPERTY_NAME));
-	// The focuser calibration stays available on an Esatto.
-	SERIAL_CHECK_TRUE(has_defined_property(X_CALIBRATE_F_PROPERTY_NAME));
+	// An Esatto has no calibration command (protocol v4.0: CAL_FOCUSER is SESTOSENSO2 only; an ESATTO2 answers
+	// "Error: invalid command"), so the focuser calibration is not offered.
+	SERIAL_CHECK_TRUE(!has_defined_property(X_CALIBRATE_F_PROPERTY_NAME));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18200, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(position_is(18200));
+	SERIAL_CHECK_EQ_INT(0, requests("\"CAL_FOCUSER\""));
+cleanup:
+	driver_stop();
+}
+
+// An Esatto moving inward close to its home sensor stops and resets its coordinate to 0; the move ends ALERT
+// with that reason, and the next move runs from 0.
+static void esatto_home_reset(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 17500, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_is(17500));
+	clear_messages();
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 400, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 400));
+	SERIAL_CHECK_TRUE(message_seen("The focuser reached its home sensor and reset its position to 0"));
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 0, 0));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 500, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_is(500));
+cleanup:
+	driver_stop();
+}
+
+// An Esatto flagged for calibration names the reason without pointing to a calibration it cannot run.
+static void esatto_needs_calibration(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(message_seen("CalRestart_NoSensorActiveInMinPos"));
+	SERIAL_CHECK_TRUE(message_seen("needs calibration, which an ESATTO cannot run from the driver"));
+	SERIAL_CHECK_TRUE(!has_defined_property(X_CALIBRATE_F_PROPERTY_NAME));
 cleanup:
 	driver_stop();
 }
@@ -464,6 +665,157 @@ static void sestosenso3_profile(void) {
 	SERIAL_CHECK_EQ_INT(0, requests("\"MOVE_ABS\""));
 	SERIAL_CHECK_TRUE(position_is(18400));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"STATUS\":{\"MST\"", 1));
+	// The log line printed before the LOGLEVEL reply and the "cmd" acknowledgement of DIMLEDS are accepted.
+	SERIAL_CHECK_TRUE(switch_change(X_LEDS_PROPERTY_NAME, X_LEDS_OFF_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"DIMLEDS\":\"off\"", 1));
+cleanup:
+	driver_stop();
+}
+
+// An uncalibrated SESTO SENSO 3 acknowledges GOTO without moving, so the driver refuses the move and says why.
+static void sestosenso3_uncalibrated(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	clear_messages();
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18400, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("not calibrated"));
+	SERIAL_CHECK_EQ_INT(0, requests("\"GOTO\""));
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18075, 0));
+cleanup:
+	driver_stop();
+}
+
+// The SESTO SENSO 3 semi-automatic calibration keeps the direction it has, ends the run with StopMotor and
+// publishes the new maximum, which the controller reports only a moment after StoreAsMaxPos.
+static void sestosenso3_calibration(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(number_max(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME) == 100000);
+	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"Init\"", 1));
+	SERIAL_CHECK_EQ_INT(0, requests("\"set\": {\"MOT1\": {\"CAL_DIR\""));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"StoreAsMinPos\"", 1));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"GoOutToFindMaxPos\"", 1));
+	SERIAL_CHECK_TRUE(position_in_motion(1000, 1000000));
+	// While the run moves, a second start is refused instead of starting another calibration.
+	clear_messages();
+	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_INVERTED_ITEM_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("The calibration is running"));
+	SERIAL_CHECK_EQ_INT(1, requests("\"CAL_FOCUSER\":\"Init\""));
+	// END stops the run and the new range is polled by a finalizer, so the queue serves a request meanwhile.
+	unsigned int completions = property_state_revision(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_OK_STATE);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&simulator_test_client, device_name(), X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_END_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"StoreAsMaxPos\"", 1));
+	SERIAL_CHECK_TRUE(switch_change(X_LEDS_PROPERTY_NAME, X_LEDS_OFF_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(property_state(X_CALIBRATE_F_PROPERTY_NAME) == INDIGO_BUSY_STATE);
+	SERIAL_CHECK_TRUE(state_seen(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_OK_STATE, completions));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"StopMotor\"", 1));
+	// The stale maximum the controller still reports right after StoreAsMaxPos is not taken.
+	double stopped = cached_number_value(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME);
+	double maximum = number_max(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME);
+	printf("Calibrated to %g, stopped at %g\n", maximum, stopped);
+	SERIAL_CHECK_TRUE(maximum > 1000 && maximum < 100000 && fabs(maximum - stopped) <= 1);
+	char completed[64];
+	snprintf(completed, sizeof(completed), "Calibration complete, range 0 to %.0f", maximum);
+	SERIAL_CHECK_TRUE(message_seen(completed));
+	SERIAL_CHECK_TRUE(number_max(FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME) == maximum);
+	SERIAL_CHECK_TRUE(property_state(FOCUSER_POSITION_PROPERTY_NAME) == INDIGO_OK_STATE);
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 500, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_is(500));
+cleanup:
+	driver_stop();
+}
+
+// A refusal the controller reports in the field of the parameter ("Error: invalid parameter", SESTO SENSO 3
+// protocol v1.0) fails the calibration step, the move and the sync with that text as the reason.
+static void sestosenso3_field_errors(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(fault("\"CAL_FOCUSER\":\"Init\"", "fielderror"));
+	clear_messages();
+	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("Error: invalid parameter"));
+	SERIAL_CHECK_EQ_INT(0, requests("\"CAL_FOCUSER\":\"StoreAsMinPos\""));
+	SERIAL_CHECK_TRUE(fault("\"GOTO\"", "fielderror"));
+	clear_messages();
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18400, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("Move refused: Error: invalid parameter"));
+	SERIAL_CHECK_TRUE(connect_rotator());
+	SERIAL_CHECK_TRUE(fault("\"MOVE_ABS\"", "fielderror"));
+	clear_messages();
+	SERIAL_CHECK_TRUE(number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 45, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("Move refused: Error: invalid parameter"));
+	SERIAL_CHECK_TRUE(switch_change(ROTATOR_ON_POSITION_SET_PROPERTY_NAME, ROTATOR_ON_POSITION_SET_SYNC_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(fault("\"SYNC_POS\"", "fielderror"));
+	clear_messages();
+	SERIAL_CHECK_TRUE(number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 120, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("Sync refused: Error: invalid parameter"));
+	SERIAL_CHECK_TRUE(switch_change(ROTATOR_ON_POSITION_SET_PROPERTY_NAME, ROTATOR_ON_POSITION_SET_GOTO_ITEM_NAME, INDIGO_OK_STATE));
+cleanup:
+	driver_stop();
+}
+
+// A SESTO SENSO 3 that reports a lost coordinate (1000000) after StoreAsMaxPos fails the calibration and asks
+// for another one instead of publishing a position outside the new range as calibrated.
+static void sestosenso3_calibration_lost_position(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(position_in_motion(500, 1000000));
+	SERIAL_CHECK_TRUE(fault("\"StoreAsMaxPos\"", "lostposition"));
+	clear_messages();
+	unsigned int alerts = property_state_revision(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&simulator_test_client, device_name(), X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_END_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(state_seen(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_ALERT_STATE, alerts));
+	SERIAL_CHECK_TRUE(message_seen("run the calibration again"));
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 1000000, 0));
+	// A new calibration is accepted and runs.
+	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_EQ_INT(2, requests("\"CAL_FOCUSER\":\"Init\""));
+cleanup:
+	driver_stop();
+}
+
+// A SESTO SENSO 3 restarts after a CAL_DIR write and answers late. Requests meanwhile are refused, the
+// calibration follows the restart once, and an abort stops the run with StopMotor and stop_calib.
+static void sestosenso3_calibration_restart(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	clear_messages();
+	unsigned int busy = property_state_revision(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_BUSY_STATE);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&simulator_test_client, device_name(), X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_INVERTED_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(state_seen(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_BUSY_STATE, busy));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_DIR\":\"invert\"", 1));
+	SERIAL_CHECK_TRUE(message_seen("restarts"));
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&simulator_test_client, device_name(), X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(message_seen("A calibration step is in progress"));
+	// The restart is followed by a finalizer, and a request meanwhile is refused at once instead of waiting
+	// for the controller.
+	unsigned int led_alerts = property_state_revision(X_LEDS_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&simulator_test_client, device_name(), X_LEDS_PROPERTY_NAME, X_LEDS_OFF_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(state_seen_within(X_LEDS_PROPERTY_NAME, INDIGO_ALERT_STATE, led_alerts, 1));
+	SERIAL_CHECK_TRUE(property_state(X_CALIBRATE_F_PROPERTY_NAME) == INDIGO_BUSY_STATE);
+	SERIAL_CHECK_EQ_INT(0, requests("\"DIMLEDS\""));
+	// The restart lasts 5 s in the simulator, then the late replies are read away.
+	SERIAL_CHECK_TRUE(wait_for_requests_within("\"CAL_FOCUSER\":\"Init\"", 1, 15));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"GoOutToFindMaxPos\"", 1));
+	SERIAL_CHECK_TRUE(wait_for_property_state(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(switch_is(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_INVERTED_ITEM_NAME, true));
+	SERIAL_CHECK_EQ_INT(1, requests("\"CAL_FOCUSER\":\"Init\""));
+	SERIAL_CHECK_EQ_INT(1, requests("\"CAL_DIR\":\"invert\""));
+	SERIAL_CHECK_EQ_INT(0, requests("\"CAL_DIR\":\"normal\""));
+	SERIAL_CHECK_TRUE(position_in_motion(500, 1000000));
+	// The ordinary stop does not end a SESTO SENSO 3 calibration run, so the abort uses the calibration commands.
+	clear_messages();
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"StopMotor\"", 1));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"stop_calib\"", 1));
+	SERIAL_CHECK_TRUE(wait_for_property_state(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("not calibrated"));
+	SERIAL_CHECK_TRUE(switch_is(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_INVERTED_ITEM_NAME, false));
+	SERIAL_CHECK_TRUE(idle_polls());
+	double stopped = cached_number_value(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME);
+	SERIAL_CHECK_TRUE(idle_polls());
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, stopped, 0));
+	// The focuser is uncalibrated now, so moves are refused without a command.
+	int gotos = requests("\"GOTO\"");
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 100, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_EQ_INT(gotos, requests("\"GOTO\""));
 cleanup:
 	driver_stop();
 }
@@ -497,6 +849,7 @@ static void unsupported_device(void) {
 	SERIAL_CHECK_TRUE(!context.connected);
 	SERIAL_CHECK_EQ_INT(INDIGO_ALERT_STATE, context.last_connection_state);
 	SERIAL_CHECK_TRUE(find_cached_property(X_CONFIG_PROPERTY_NAME) == NULL);
+	SERIAL_CHECK_TRUE(!has_defined_property(FOCUSER_POSITION_PROPERTY_NAME) && !has_defined_property(FOCUSER_STEPS_PROPERTY_NAME) && !has_defined_property(FOCUSER_TEMPERATURE_PROPERTY_NAME) && !has_defined_property(X_STATE_PROPERTY_NAME) && !has_defined_property(X_LEDS_PROPERTY_NAME));
 	SERIAL_CHECK_TRUE(!connect_focuser());
 	SERIAL_CHECK_TRUE(!context.connected);
 cleanup:
@@ -509,10 +862,52 @@ static void handshake_timeout(void) {
 	SERIAL_CHECK_TRUE(driver_up());
 	SERIAL_CHECK_TRUE(fault("\"MODNAME\"", "silent"));
 	SERIAL_CHECK_TRUE(!connect_focuser());
+	// connect_focuser() gives up after 5 s, the same time the unanswered MODNAME read takes, so the
+	// attempt can still be BUSY with CONNECTED on here; it has to end refused before the check.
+	SERIAL_CHECK_TRUE(wait_for_property_state(CONNECTION_PROPERTY_NAME, INDIGO_ALERT_STATE));
 	SERIAL_CHECK_TRUE(!context.connected);
 	SERIAL_CHECK_TRUE(connect_focuser());
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18200, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(position_is(18200));
+cleanup:
+	driver_stop();
+}
+
+static const char *active_profile;
+
+static void long_firmware_metadata(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	char app[701], web[701], combined[1500], expected[INDIGO_VALUE_SIZE];
+	size_t length = !strcmp(active_profile, "long-combined") ? 300 : 700;
+	memset(app, 'x', length);
+	memcpy(app, "3.10", 4);
+	app[length] = 0;
+	memcpy(web, app, length + 1);
+	if (!strcmp(active_profile, "long-web")) {
+		strcpy(app, "3.10");
+	} else if (!strcmp(active_profile, "long-app")) {
+		strcpy(web, "3.10");
+	}
+	snprintf(combined, sizeof(combined), "%s / %s", app, web);
+	memcpy(expected, combined, sizeof(expected) - 1);
+	expected[sizeof(expected) - 1] = 0;
+	SERIAL_CHECK_TRUE(text_is(INFO_PROPERTY_NAME, INFO_DEVICE_FW_REVISION_ITEM_NAME, expected));
+	SERIAL_CHECK_TRUE(text_is(INFO_PROPERTY_NAME, INFO_DEVICE_SERIAL_NUM_ITEM_NAME, "SESTOSENSO20716"));
+cleanup:
+	driver_stop();
+}
+
+static void wifi_escaped_credentials(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(text_change(X_WIFI_AP_PROPERTY_NAME, X_WIFI_AP_SSID_ITEM_NAME, "AP\"\\", INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"WIFIAP\":{\"SSID\":\"AP\\\"\\\\\"", 1));
+	// An access point password needs at least 8 characters (WPA2).
+	SERIAL_CHECK_TRUE(text_change(X_WIFI_AP_PROPERTY_NAME, X_WIFI_AP_PASSWORD_ITEM_NAME, "pw\"\\word", INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"PWD\":\"pw\\\"\\\\word\"", 1));
+	SERIAL_CHECK_TRUE(text_change(X_WIFI_STA_PROPERTY_NAME, X_WIFI_STA_SSID_ITEM_NAME, "STA\"\\", INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"WIFISTA\":{\"SSID\":\"STA\\\"\\\\\"", 1));
+	SERIAL_CHECK_TRUE(text_change(X_WIFI_STA_PROPERTY_NAME, X_WIFI_STA_PASSWORD_ITEM_NAME, "key\"\\", INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"PWD\":\"key\\\"\\\\\"", 1));
 cleanup:
 	driver_stop();
 }
@@ -535,6 +930,12 @@ static void needs_calibration(void) {
 	SERIAL_CHECK_TRUE(position_is(18075));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18200, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(position_is(18200));
+	// A move the controller acknowledges and does not run names the calibration as the reason.
+	SERIAL_CHECK_TRUE(fault("\"MOVE_ABS\"", "ignore"));
+	clear_messages();
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18300, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 18300));
+	SERIAL_CHECK_TRUE(message_seen("The focuser needs calibration"));
 cleanup:
 	driver_stop();
 }
@@ -578,7 +979,13 @@ cleanup:
 
 static void absolute_move(void) {
 	SERIAL_CHECK_TRUE(driver_start());
+	unsigned int steps_busy = property_state_revision(FOCUSER_STEPS_PROPERTY_NAME, INDIGO_BUSY_STATE);
+	unsigned position_updates = atomic_load(&position_log_count);
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 19000, INDIGO_BUSY_STATE));
+	// The move starts from the measured position rather than showing the request as the value.
+	SERIAL_CHECK_TRUE(first_busy_value_is(position_log, position_value_log, atomic_load(&position_log_count), position_updates, 18075));
+	// An absolute move holds FOCUSER_STEPS busy too.
+	SERIAL_CHECK_TRUE(state_seen(FOCUSER_STEPS_PROPERTY_NAME, INDIGO_BUSY_STATE, steps_busy));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"STEP\":19000", 1));
 	SERIAL_CHECK_TRUE(position_is(19000));
 	SERIAL_CHECK_TRUE(find_cached_property(FOCUSER_STEPS_PROPERTY_NAME)->state == INDIGO_OK_STATE);
@@ -692,10 +1099,18 @@ static void abort_motion(void) {
 	SERIAL_CHECK_TRUE(wait_for_requests("\"MOT_ABORT\"", 1));
 	// An interrupted move is reported as such, not as a completed one.
 	SERIAL_CHECK_TRUE(state_seen(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE, position_alerts));
-	indigo_usleep(1500000);
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 90000));
+	SERIAL_CHECK_TRUE(switch_is(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, false));
 	double stopped = cached_number_value(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME);
+	indigo_usleep(1500000);
 	printf("Aborted at %g of 90000\n", stopped);
 	SERIAL_CHECK_TRUE(stopped > 18075 && stopped < 90000);
+	// The stop holds: later readbacks report the same position, still short of the target, and idle
+	// polls keep the requested target.
+	SERIAL_CHECK_TRUE(idle_polls());
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, stopped, 0));
+	SERIAL_CHECK_TRUE(number_target(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME) == 90000);
+	SERIAL_CHECK_TRUE(property_state(FOCUSER_POSITION_PROPERTY_NAME) == INDIGO_ALERT_STATE);
 	// A fresh move has to be accepted right after the abort.
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18100, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(position_is(18100));
@@ -707,6 +1122,10 @@ static void abort_while_idle(void) {
 	SERIAL_CHECK_TRUE(driver_start());
 	SERIAL_CHECK_TRUE(position_is(18075));
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, INDIGO_OK_STATE));
+	// Nothing moves, so no stop is sent and the position stays settled.
+	SERIAL_CHECK_EQ_INT(0, requests("\"MOT_ABORT\"") + requests("\"MOT_STOP\""));
+	SERIAL_CHECK_TRUE(switch_is(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, false));
+	SERIAL_CHECK_TRUE(position_is(18075));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18200, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(position_is(18200));
 cleanup:
@@ -721,6 +1140,10 @@ static void overlap_rejected(void) {
 	int relative_moves = requests("\"STEP\":18");
 	SERIAL_CHECK_TRUE(rejected_number_change(FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, 100));
 	SERIAL_CHECK_EQ_INT(relative_moves, requests("\"STEP\":18"));
+	SERIAL_CHECK_TRUE(rejected_number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18500));
+	// The running move keeps its target and stays the only move command.
+	SERIAL_CHECK_TRUE(number_target(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME) == 90000);
+	SERIAL_CHECK_EQ_INT(1, requests("\"MOVE_ABS\""));
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, INDIGO_OK_STATE));
 cleanup:
 	driver_stop();
@@ -731,12 +1154,24 @@ static void move_command_failures(void) {
 	SERIAL_CHECK_TRUE(driver_start());
 	SERIAL_CHECK_TRUE(fault("\"MOVE_ABS\"", "silent"));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18300, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 18300));
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18075, 0));
+	// A controller refusal reaches the client with its reason.
+	clear_messages();
+	SERIAL_CHECK_TRUE(fault("\"MOVE_ABS\"", "reject"));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18320, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("Invalid command"));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 18320));
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18075, 0));
 	SERIAL_CHECK_TRUE(fault("\"MOVE_ABS\"", "garbage"));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18350, INDIGO_ALERT_STATE));
 	// A controller that refuses MOT_ABORT is stopped with MOT_STOP.
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 90000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_in_motion(18075, 90000));
 	SERIAL_CHECK_TRUE(fault("\"MOT_ABORT\"", "reject"));
 	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"MOT1\":{\"MOT_STOP\"", 1));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 90000));
 	// The driver stays usable after each rejected transaction.
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18300, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(position_is(18300));
@@ -746,11 +1181,19 @@ cleanup:
 
 // The controller is already moving when the driver connects.
 static void external_motion_observed(void) {
-	SERIAL_CHECK_TRUE(driver_start());
-	SERIAL_CHECK_TRUE(position_in_motion(18075, 20000));
-	SERIAL_CHECK_EQ_INT(0, requests("\"MOVE_ABS\""));
-	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 20000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(driver_up());
+	unsigned int busy = property_state_revision(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_BUSY_STATE);
+	SERIAL_CHECK_TRUE(connect_focuser());
+	SERIAL_CHECK_TRUE(state_seen_within(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_BUSY_STATE, busy, 5));
 	SERIAL_CHECK_TRUE(position_is(20000));
+	SERIAL_CHECK_TRUE(number_target(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME) == 20000);
+	SERIAL_CHECK_TRUE(property_state(FOCUSER_STEPS_PROPERTY_NAME) == INDIGO_OK_STATE);
+	SERIAL_CHECK_EQ_INT(0, requests("\"MOVE_ABS\""));
+	// A relative move starts from the position the uncommanded motion reached.
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_DIRECTION_PROPERTY_NAME, FOCUSER_DIRECTION_MOVE_OUTWARD_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, 100, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"STEP\":20100", 1));
+	SERIAL_CHECK_TRUE(position_is(20100));
 cleanup:
 	driver_stop();
 }
@@ -761,10 +1204,17 @@ static void disconnect_during_motion(void) {
 	SERIAL_CHECK_TRUE(position_in_motion(18075, 90000));
 	disconnect_serial_device(&primaluce_focuser);
 	SERIAL_CHECK_TRUE(!context.connected);
+	// The motor is stopped before the port closes.
+	SERIAL_CHECK_EQ_INT(1, requests("\"MOT_ABORT\""));
 	int polls = requests("\"ABS_POS\"");
 	indigo_usleep(2000000);
 	SERIAL_CHECK_EQ_INT(polls, requests("\"ABS_POS\""));
 	SERIAL_CHECK_TRUE(connect_focuser());
+	double stopped = cached_number_value(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME);
+	SERIAL_CHECK_TRUE(stopped > 18075 && stopped < 90000);
+	SERIAL_CHECK_TRUE(position_is(stopped));
+	indigo_usleep(2500000);
+	SERIAL_CHECK_TRUE(position_is(stopped));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18100, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(position_is(18100));
 cleanup:
@@ -787,6 +1237,11 @@ static void controller_settings(void) {
 	SERIAL_CHECK_TRUE(wait_for_requests("\"AP_SET_STATUS\":\"off\"", 1));
 	SERIAL_CHECK_TRUE(text_change(X_WIFI_AP_PROPERTY_NAME, X_WIFI_AP_SSID_ITEM_NAME, "INDIGO-AP", INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"SSID\":\"INDIGO-AP\"", 1));
+	// A password the access point cannot use is refused with a reason and not sent; the controller would store it.
+	clear_messages();
+	SERIAL_CHECK_TRUE(text_change(X_WIFI_AP_PROPERTY_NAME, X_WIFI_AP_PASSWORD_ITEM_NAME, "abc", INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("at least 8 characters"));
+	SERIAL_CHECK_EQ_INT(0, requests("\"PWD\":\"abc\""));
 	// The settings the driver reads back on the next connect must be the ones
 	// it wrote.
 	disconnect_serial_device(&primaluce_focuser);
@@ -808,12 +1263,24 @@ static void wifi_station_mode(void) {
 	SERIAL_CHECK_TRUE(wait_for_requests("\"WIFISTA\":{\"SSID\":\"INDIGO-STA\"", 1));
 	SERIAL_CHECK_TRUE(switch_change(X_WIFI_PROPERTY_NAME, X_WIFI_STA_ITEM_NAME, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"LANCFG\":\"sta\"", 1));
+	// The address the controller got on the joined network is shown; the access point is off.
+	SERIAL_CHECK_TRUE(text_is(X_WIFI_STATUS_PROPERTY_NAME, "IP_ADDRESS", "192.0.2.23"));
+	SERIAL_CHECK_TRUE(text_is(X_WIFI_STATUS_PROPERTY_NAME, "PORT", "80"));
+	SERIAL_CHECK_TRUE(text_is(X_WIFI_STATUS_PROPERTY_NAME, "CONNECTION", "gotip"));
+	SERIAL_CHECK_TRUE(find_cached_property(X_WIFI_STATUS_PROPERTY_NAME)->state == INDIGO_OK_STATE);
 	disconnect_serial_device(&primaluce_focuser);
 	SERIAL_CHECK_TRUE(connect_focuser());
 	SERIAL_CHECK_TRUE(switch_is(X_WIFI_PROPERTY_NAME, X_WIFI_STA_ITEM_NAME, true));
-	SERIAL_CHECK_TRUE(switch_change(X_WIFI_PROPERTY_NAME, X_WIFI_AP_ITEM_NAME, INDIGO_OK_STATE));
+	// Off from station mode returns to the access point mode first, with the access point switched off.
+	SERIAL_CHECK_TRUE(switch_change(X_WIFI_PROPERTY_NAME, X_WIFI_OFF_ITEM_NAME, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"LANCFG\":\"ap\"", 1));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"AP_SET_STATUS\":\"off\"", 1));
+	disconnect_serial_device(&primaluce_focuser);
+	SERIAL_CHECK_TRUE(connect_focuser());
+	SERIAL_CHECK_TRUE(switch_is(X_WIFI_PROPERTY_NAME, X_WIFI_OFF_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(switch_change(X_WIFI_PROPERTY_NAME, X_WIFI_AP_ITEM_NAME, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"AP_SET_STATUS\":\"on\"", 1));
+	SERIAL_CHECK_EQ_INT(1, requests("\"LANCFG\":\"ap\""));
 	disconnect_serial_device(&primaluce_focuser);
 	SERIAL_CHECK_TRUE(connect_focuser());
 	SERIAL_CHECK_TRUE(switch_is(X_WIFI_PROPERTY_NAME, X_WIFI_AP_ITEM_NAME, true));
@@ -844,14 +1311,21 @@ static void settings_reported_failures(void) {
 	SERIAL_CHECK_TRUE(driver_start());
 	SERIAL_CHECK_TRUE(fault("\"BKLASH\"", "silent"));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_BACKLASH_PROPERTY_NAME, FOCUSER_BACKLASH_ITEM_NAME, 30, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_BACKLASH_PROPERTY_NAME, FOCUSER_BACKLASH_ITEM_NAME, 0, 0));
 	SERIAL_CHECK_TRUE(fault("\"SPEED\"", "garbage"));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_SPEED_PROPERTY_NAME, FOCUSER_SPEED_ITEM_NAME, 0, INDIGO_ALERT_STATE));
 	SERIAL_CHECK_TRUE(fault("\"HOLDCURR_STATUS\"", "silent"));
 	SERIAL_CHECK_TRUE(switch_change(X_HOLD_CURR_PROPERTY_NAME, X_HOLD_CURR_OFF_ITEM_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(switch_is(X_HOLD_CURR_PROPERTY_NAME, X_HOLD_CURR_ON_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(fault("\"DIMLEDS\"", "fielderror"));
+	SERIAL_CHECK_TRUE(switch_change(X_LEDS_PROPERTY_NAME, X_LEDS_OFF_ITEM_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(switch_is(X_LEDS_PROPERTY_NAME, X_LEDS_ON_ITEM_NAME, true));
 	SERIAL_CHECK_TRUE(fault("\"DIMLEDS\"", "silent"));
 	SERIAL_CHECK_TRUE(switch_change(X_LEDS_PROPERTY_NAME, X_LEDS_OFF_ITEM_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(switch_is(X_LEDS_PROPERTY_NAME, X_LEDS_ON_ITEM_NAME, true));
 	SERIAL_CHECK_TRUE(fault("\"AP_SET_STATUS\"", "silent"));
 	SERIAL_CHECK_TRUE(switch_change(X_WIFI_PROPERTY_NAME, X_WIFI_OFF_ITEM_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(switch_is(X_WIFI_PROPERTY_NAME, X_WIFI_AP_ITEM_NAME, true));
 	SERIAL_CHECK_TRUE(fault("\"RUNPRESET\"", "silent"));
 	SERIAL_CHECK_TRUE(switch_change(X_RUNPRESET_PROPERTY_NAME, X_RUNPRESET_M_ITEM_NAME, INDIGO_ALERT_STATE));
 	// Every control keeps working once the controller answers again.
@@ -866,17 +1340,97 @@ cleanup:
 // finishes by reading the new coordinate back.
 static void focuser_calibration(void) {
 	SERIAL_CHECK_TRUE(driver_start());
+	// The property says that the draw tube has to be fully in, and START repeats it.
+	indigo_property *calibrate = find_cached_property(X_CALIBRATE_F_PROPERTY_NAME);
+	SERIAL_CHECK_TRUE(calibrate != NULL && strstr(calibrate->label, "fully in") != NULL);
+	clear_messages();
+	unsigned int busy = property_state_revision(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_BUSY_STATE);
+	double start = cached_number_value(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME);
 	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"Init\"", 1));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_DIR\":\"normal\"", 1));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"StoreAsMinPos\"", 1));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"GoOutToFindMaxPos\"", 1));
+	SERIAL_CHECK_TRUE(message_seen("The current position is stored as the innermost one"));
+	// The calibration run moves the draw tube while the idle poll follows it: the run is the driver's
+	// own motion, so the position never turns BUSY and END is accepted to stop it.
+	indigo_usleep(5000000);
+	SERIAL_CHECK_TRUE(cached_number_value(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME) > start);
+	SERIAL_CHECK_TRUE(property_state_revision(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_BUSY_STATE) == busy);
 	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_END_ITEM_NAME, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"CAL_FOCUSER\":\"StoreAsMaxPos\"", 1));
 	SERIAL_CHECK_TRUE(switch_is(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_END_ITEM_NAME, false));
+	// A finished calibration says so, with the range it stored.
+	SERIAL_CHECK_TRUE(message_seen("Calibration complete, range 0 to"));
 	// A failed step is reported instead of being published as a calibration.
 	SERIAL_CHECK_TRUE(fault("\"CAL_FOCUSER\":\"Init\"", "silent"));
 	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(switch_is(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, false));
+	// An abort stops a calibration in progress and ends it ALERT.
+	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"MOT_ABORT\"", 1));
+	SERIAL_CHECK_TRUE(wait_for_property_state(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(switch_is(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, false));
+cleanup:
+	driver_stop();
+}
+
+// An abort while a SESTO SENSO 3 restarts for a new direction cancels the calibration before it starts.
+static void sestosenso3_abort_during_restart(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	clear_messages();
+	unsigned int busy = property_state_revision(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_BUSY_STATE);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&simulator_test_client, device_name(), X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_INVERTED_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(state_seen(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_BUSY_STATE, busy));
+	SERIAL_CHECK_TRUE(message_seen("restarts"));
+	unsigned int position_alerts = property_state_revision(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	unsigned int alerts = property_state_revision(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	// The abort is served at once, within the restart (5 s in the simulator), not after it.
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&simulator_test_client, device_name(), FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(state_seen_within(X_CALIBRATE_F_PROPERTY_NAME, INDIGO_ALERT_STATE, alerts, 1));
+	SERIAL_CHECK_TRUE(message_seen("Calibration aborted"));
+	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_ABORT_MOTION_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(switch_is(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_INVERTED_ITEM_NAME, false));
+	// No step follows the restart, the focuser stays where it is and keeps its range, and the polls skipped
+	// during the restart did not turn the position ALERT.
+	indigo_usleep(4000000);
+	SERIAL_CHECK_EQ_INT(0, requests("\"CAL_FOCUSER\""));
+	SERIAL_CHECK_TRUE(property_state_revision(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE) == position_alerts);
+	SERIAL_CHECK_TRUE(idle_polls());
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18075, 0));
+	SERIAL_CHECK_TRUE(number_max(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME) == 100000);
+	// A new calibration in the direction the controller now has starts without a restart.
+	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_INVERTED_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_EQ_INT(1, requests("\"CAL_DIR\":\"invert\""));
+	SERIAL_CHECK_EQ_INT(1, requests("\"CAL_FOCUSER\":\"Init\""));
+cleanup:
+	driver_stop();
+}
+
+// END without a running calibration is refused rather than storing the position as the maximum.
+static void calibration_end_without_run(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	clear_messages();
+	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_END_ITEM_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("No calibration is running"));
+	SERIAL_CHECK_EQ_INT(0, requests("\"CAL_FOCUSER\""));
+	SERIAL_CHECK_TRUE(number_max(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME) == 100000);
+cleanup:
+	driver_stop();
+}
+
+// A move the controller acknowledges but never runs ends ALERT with the reason.
+static void move_not_started(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(fault("\"MOVE_ABS\"", "ignore"));
+	clear_messages();
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 19000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 19000));
+	SERIAL_CHECK_TRUE(message_seen("stopped before reaching the target"));
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18075, 0));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18200, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_is(18200));
 cleanup:
 	driver_stop();
 }
@@ -888,10 +1442,268 @@ static void status_polling(void) {
 	SERIAL_CHECK_TRUE(number_is(FOCUSER_TEMPERATURE_PROPERTY_NAME, FOCUSER_TEMPERATURE_ITEM_NAME, 22.5, .005));
 	SERIAL_CHECK_TRUE(number_is(X_STATE_PROPERTY_NAME, X_STATE_MOTOR_TEMP_ITEM_NAME, 37.12, .005));
 	SERIAL_CHECK_TRUE(number_is(X_STATE_PROPERTY_NAME, X_STATE_VIN_12V_ITEM_NAME, 13.98, .005));
-	// A lost poll answer must not corrupt the published readings.
+	// A lost poll answer is reported ALERT with the last valid reading, the next poll restores OK.
+	// The environment is polled every 10 s (5 position polls of 2 s) and a silent answer takes the
+	// 5 s serial read timeout, so the ALERT is published up to 15 s after the fault is armed; 15 s
+	// was the exact limit and failed whenever the poll came a little late.
+	unsigned int alerts = property_state_revision(FOCUSER_TEMPERATURE_PROPERTY_NAME, INDIGO_ALERT_STATE);
 	SERIAL_CHECK_TRUE(fault("\"EXT_T\"", "silent"));
-	indigo_usleep(1000000);
+	SERIAL_CHECK_TRUE(state_seen_within(FOCUSER_TEMPERATURE_PROPERTY_NAME, INDIGO_ALERT_STATE, alerts, 20));
 	SERIAL_CHECK_TRUE(number_is(FOCUSER_TEMPERATURE_PROPERTY_NAME, FOCUSER_TEMPERATURE_ITEM_NAME, 22.5, .005));
+	unsigned int recoveries = property_state_revision(FOCUSER_TEMPERATURE_PROPERTY_NAME, INDIGO_OK_STATE);
+	SERIAL_CHECK_TRUE(state_seen_within(FOCUSER_TEMPERATURE_PROPERTY_NAME, INDIGO_OK_STATE, recoveries, 15));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18200, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_is(18200));
+cleanup:
+	driver_stop();
+}
+
+// A unit without an external probe reports -127, which is published IDLE once and never as a value.
+static void no_probe(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(wait_for_property_state(FOCUSER_TEMPERATURE_PROPERTY_NAME, INDIGO_IDLE_STATE));
+	SERIAL_CHECK_TRUE(cached_number_value(FOCUSER_TEMPERATURE_PROPERTY_NAME, FOCUSER_TEMPERATURE_ITEM_NAME) != -127);
+	unsigned int revision = property_revision(FOCUSER_TEMPERATURE_PROPERTY_NAME);
+	int polls = requests("\"EXT_T\"");
+	for (int i = 0; i < 600 && requests("\"EXT_T\"") <= polls; i++) {
+		indigo_usleep(25000);
+	}
+	SERIAL_CHECK_TRUE(requests("\"EXT_T\"") > polls);
+	indigo_usleep(200000);
+	SERIAL_CHECK_EQ_INT(revision, property_revision(FOCUSER_TEMPERATURE_PROPERTY_NAME));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18200, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_is(18200));
+cleanup:
+	driver_stop();
+}
+
+// An idle position poll that fails publishes ALERT with the last position; the next poll recovers.
+static void position_poll_failure(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(position_is(18075));
+	unsigned int alerts = property_state_revision(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(fault("\"ABS_POS\"", "garbage"));
+	SERIAL_CHECK_TRUE(state_seen_within(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE, alerts, 6));
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18075, 0));
+	SERIAL_CHECK_TRUE(position_is(18075));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18200, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_is(18200));
+cleanup:
+	driver_stop();
+}
+
+// The hand keypad moves the focuser: BUSY then OK at the measured position, no command is sent.
+static void hand_keypad_motion(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(position_is(18075));
+	unsigned int busy = property_state_revision(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_BUSY_STATE);
+	SERIAL_CHECK_TRUE(fault("handmove", "21000"));
+	SERIAL_CHECK_TRUE(state_seen_within(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_BUSY_STATE, busy, 5));
+	SERIAL_CHECK_TRUE(position_is(21000));
+	SERIAL_CHECK_TRUE(number_target(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME) == 21000);
+	SERIAL_CHECK_TRUE(property_state(FOCUSER_STEPS_PROPERTY_NAME) == INDIGO_OK_STATE);
+	SERIAL_CHECK_EQ_INT(0, requests("\"MOVE_ABS\""));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 20900, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_is(20900));
+cleanup:
+	driver_stop();
+}
+
+// A move whose motor reports running but never advances is stopped and ends ALERT.
+static void stalled_move(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(fault("\"MOVE_ABS\"", "stall"));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 19000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"MOT_ABORT\"", 1));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 19000));
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18075, 0));
+	// Idle polls neither turn the stall OK nor rewrite the requested target.
+	SERIAL_CHECK_TRUE(idle_polls());
+	SERIAL_CHECK_TRUE(property_state(FOCUSER_POSITION_PROPERTY_NAME) == INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(number_target(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME) == 19000);
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18200, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_is(18200));
+cleanup:
+	driver_stop();
+}
+
+// A single lost readback during a move is retried; a persistent one stops the motor and ends ALERT.
+static void move_readback_failures(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 21000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(fault("\"ABS_POS\"", "silent"));
+	SERIAL_CHECK_TRUE(position_is(21000));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_OK_STATE, 21000));
+	SERIAL_CHECK_EQ_INT(0, requests("\"MOT_ABORT\""));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 60000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_in_motion(21000, 60000));
+	SERIAL_CHECK_TRUE(fault("\"ABS_POS\"", "always_garbage"));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"MOT_ABORT\"", 1));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 60000));
+	SERIAL_CHECK_TRUE(remove_fault());
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 21000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_is(21000));
+cleanup:
+	driver_stop();
+}
+
+// A stop the controller refuses ends FOCUSER_ABORT_MOTION ALERT and the move is not completed; a retry stops it.
+static void abort_refused(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 90000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_in_motion(18075, 90000));
+	SERIAL_CHECK_TRUE(fault("\"MOT_", "always_reject"));
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(switch_is(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, false));
+	indigo_usleep(500000);
+	SERIAL_CHECK_TRUE(property_state(FOCUSER_POSITION_PROPERTY_NAME) == INDIGO_BUSY_STATE);
+	SERIAL_CHECK_TRUE(remove_fault());
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 90000));
+cleanup:
+	driver_stop();
+}
+
+// An abort that overtakes a move still queued sends the stop once and never the move.
+static void abort_overtakes_queued_move(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(position_is(18075));
+	SERIAL_CHECK_TRUE(fault("\"ABS_POS\"", "always_slow"));
+	int polls = requests("\"ABS_POS\"");
+	SERIAL_CHECK_TRUE(wait_for_requests("\"ABS_POS\"", polls + 1));
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, PRIMALUCE_FOCUSER_NAME, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 19000));
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&simulator_test_client, PRIMALUCE_FOCUSER_NAME, FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, true));
+	SERIAL_CHECK_TRUE(remove_fault());
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 19000));
+	SERIAL_CHECK_EQ_INT(0, requests("\"MOVE_ABS\""));
+	SERIAL_CHECK_EQ_INT(1, requests("\"MOT_ABORT\""));
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18075, 0));
+	// The target stays the cancelled request through later idle polls.
+	SERIAL_CHECK_TRUE(idle_polls());
+	SERIAL_CHECK_TRUE(number_target(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME) == 19000);
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18200, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_is(18200));
+cleanup:
+	driver_stop();
+}
+
+// A poll in flight when a move is accepted neither completes nor overwrites it.
+static void request_versus_poll(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(position_is(18075));
+	SERIAL_CHECK_TRUE(fault("\"ABS_POS\"", "slow"));
+	int polls = requests("\"ABS_POS\"");
+	SERIAL_CHECK_TRUE(wait_for_requests("\"ABS_POS\"", polls + 1));
+	atomic_store(&position_log_count, 0);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, PRIMALUCE_FOCUSER_NAME, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18300));
+	SERIAL_CHECK_TRUE(position_is(18300));
+	SERIAL_CHECK_EQ_INT(1, requests("\"MOVE_ABS\""));
+	// The property stays busy from the request until the move ends, and its first result is OK.
+	unsigned int count = atomic_load(&position_log_count);
+	SERIAL_CHECK_TRUE(count >= 2 && count <= ARRAY_SIZE(position_log));
+	int first_result = -1;
+	for (unsigned int i = 0; i < count && first_result < 0; i++) {
+		if (position_log[i] != INDIGO_BUSY_STATE) {
+			first_result = (int)i;
+		}
+	}
+	SERIAL_CHECK_TRUE(first_result > 0);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK_STATE, position_log[first_result]);
+cleanup:
+	driver_stop();
+}
+
+// A second request refused while the accepted move is still queued behind a poll in flight does
+// not hide that move: the poll does not take its target and the queued move goes where it was sent.
+static void refusal_keeps_queued_move(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(position_is(18075));
+	SERIAL_CHECK_TRUE(fault("\"ABS_POS\"", "slow"));
+	int polls = requests("\"ABS_POS\"");
+	SERIAL_CHECK_TRUE(wait_for_requests("\"ABS_POS\"", polls + 1));
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, PRIMALUCE_FOCUSER_NAME, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18300));
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, PRIMALUCE_FOCUSER_NAME, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18100));
+	SERIAL_CHECK_TRUE(position_is(18300));
+	SERIAL_CHECK_EQ_INT(1, requests("\"MOVE_ABS\""));
+	SERIAL_CHECK_EQ_INT(1, requests("\"STEP\":18300"));
+cleanup:
+	driver_stop();
+}
+
+// Both motion properties are busy from the moment a move is accepted, so a request refused while the move is still
+// queued behind a poll in flight is answered with a BUSY message only and neither property publishes ALERT.
+static void refusal_while_move_queued(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(position_is(18075));
+	unsigned int position_alerts = property_state_revision(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	unsigned int steps_alerts = property_state_revision(FOCUSER_STEPS_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(fault("\"ABS_POS\"", "slow"));
+	int polls = requests("\"ABS_POS\"");
+	SERIAL_CHECK_TRUE(wait_for_requests("\"ABS_POS\"", polls + 1));
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, PRIMALUCE_FOCUSER_NAME, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18300));
+	SERIAL_CHECK_TRUE(property_state(FOCUSER_STEPS_PROPERTY_NAME) == INDIGO_BUSY_STATE);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, PRIMALUCE_FOCUSER_NAME, FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, 100));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_OK_STATE, 18300));
+	SERIAL_CHECK_EQ_INT(steps_alerts, property_state_revision(FOCUSER_STEPS_PROPERTY_NAME, INDIGO_ALERT_STATE));
+	// and the other way round: an absolute request refused while a relative move is queued
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_DIRECTION_PROPERTY_NAME, FOCUSER_DIRECTION_MOVE_OUTWARD_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(fault("\"ABS_POS\"", "slow"));
+	polls = requests("\"ABS_POS\"");
+	SERIAL_CHECK_TRUE(wait_for_requests("\"ABS_POS\"", polls + 1));
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, PRIMALUCE_FOCUSER_NAME, FOCUSER_STEPS_PROPERTY_NAME, FOCUSER_STEPS_ITEM_NAME, 100));
+	SERIAL_CHECK_TRUE(property_state(FOCUSER_POSITION_PROPERTY_NAME) == INDIGO_BUSY_STATE);
+	SERIAL_CHECK_EQ_INT(INDIGO_OK, indigo_change_number_property_1(&simulator_test_client, PRIMALUCE_FOCUSER_NAME, FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18100));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_OK_STATE, 18400));
+	SERIAL_CHECK_EQ_INT(position_alerts, property_state_revision(FOCUSER_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_EQ_INT(0, requests("\"STEP\":18100"));
+cleanup:
+	driver_stop();
+}
+
+// Backlash and calibration requested during a move are refused without a command.
+static void settings_during_motion(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 90000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_in_motion(18075, 90000));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_BACKLASH_PROPERTY_NAME, FOCUSER_BACKLASH_ITEM_NAME, 40, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(number_is(FOCUSER_BACKLASH_PROPERTY_NAME, FOCUSER_BACKLASH_ITEM_NAME, 0, 0));
+	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(switch_is(X_CALIBRATE_F_PROPERTY_NAME, X_CALIBRATE_F_START_ITEM_NAME, false));
+	SERIAL_CHECK_EQ_INT(0, requests("\"BKLASH\":40") + requests("\"CAL_FOCUSER\""));
+	SERIAL_CHECK_TRUE(property_state(FOCUSER_POSITION_PROPERTY_NAME) == INDIGO_BUSY_STATE);
+	SERIAL_CHECK_TRUE(switch_change(FOCUSER_ABORT_MOTION_PROPERTY_NAME, FOCUSER_ABORT_MOTION_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 90000));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_BACKLASH_PROPERTY_NAME, FOCUSER_BACKLASH_ITEM_NAME, 40, INDIGO_OK_STATE));
+cleanup:
+	driver_stop();
+}
+
+// A transport lost during a move ends both motion properties ALERT and every later request ALERT.
+static void transport_loss_during_motion(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	int handshakes = requests("\"MODNAME\"");
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 90000, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(position_in_motion(18075, 90000));
+	SERIAL_CHECK_TRUE(fault("\"ABS_POS\"", "close"));
+	SERIAL_CHECK_TRUE(motion_ended(INDIGO_ALERT_STATE, 90000));
+	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18300, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(property_state(FOCUSER_STEPS_PROPERTY_NAME) != INDIGO_BUSY_STATE);
+	SERIAL_CHECK_EQ_INT(handshakes, requests("\"MODNAME\""));
+	disconnect_serial_device(&primaluce_focuser);
+	SERIAL_CHECK_TRUE(!context.connected);
+cleanup:
+	driver_stop();
+}
+
+// A WiFi mode change restarts the controller, so it is refused while the rotator shares the connection.
+static void controller_restart_refused_with_sibling(void) {
+	SERIAL_CHECK_TRUE(driver_start());
+	SERIAL_CHECK_TRUE(connect_rotator());
+	reset_simulator_context(&primaluce_focuser);
+	enumerate_simulator_device();
+	SERIAL_CHECK_TRUE(switch_change(X_WIFI_PROPERTY_NAME, X_WIFI_STA_ITEM_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(switch_is(X_WIFI_PROPERTY_NAME, X_WIFI_AP_ITEM_NAME, true));
+	SERIAL_CHECK_EQ_INT(0, requests("\"REBOOT\"") + requests("\"set\":{\"LANCFG\""));
 	SERIAL_CHECK_TRUE(number_change(FOCUSER_POSITION_PROPERTY_NAME, FOCUSER_POSITION_ITEM_NAME, 18200, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(position_is(18200));
 cleanup:
@@ -934,15 +1746,34 @@ cleanup:
 	driver_stop();
 }
 
-// Disconnecting the rotator switches the ARCO port off again.
+// The ARCO port is switched on once and stays on: a disconnect leaves it on (switching it off loses the ARCO
+// calibration on a SESTO SENSO 3), and a reconnect finds it on and does not switch it again.
 static void rotator_lifecycle(void) {
 	SERIAL_CHECK_TRUE(driver_up());
 	SERIAL_CHECK_TRUE(connect_rotator());
+	SERIAL_CHECK_TRUE(wait_for_requests("\"ARCO\":1", 1));
 	disconnect_serial_device(&primaluce_rotator);
 	SERIAL_CHECK_TRUE(!context.connected);
-	SERIAL_CHECK_TRUE(wait_for_requests("\"ARCO\":0", 1));
 	SERIAL_CHECK_TRUE(connect_rotator());
-	SERIAL_CHECK_TRUE(wait_for_requests("\"ARCO\":1", 2));
+	SERIAL_CHECK_EQ_INT(0, requests("\"ARCO\":0"));
+	SERIAL_CHECK_EQ_INT(1, requests("\"ARCO\":1"));
+cleanup:
+	driver_stop();
+}
+
+// A SESTO SENSO 3 keeps the ARCO calibrated across a rotator disconnect and reconnect.
+static void sestosenso3_arco_stays_calibrated(void) {
+	SERIAL_CHECK_TRUE(driver_up());
+	SERIAL_CHECK_TRUE(connect_rotator());
+	disconnect_serial_device(&primaluce_rotator);
+	clear_messages();
+	SERIAL_CHECK_TRUE(connect_rotator());
+	SERIAL_CHECK_TRUE(number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 45, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(rotator_position_is(45));
+	pthread_mutex_lock(&message_mutex);
+	bool needs_calibration = strstr(messages, "needs calibration") != NULL;
+	pthread_mutex_unlock(&message_mutex);
+	SERIAL_CHECK_TRUE(!needs_calibration);
 cleanup:
 	driver_stop();
 }
@@ -981,6 +1812,62 @@ static void rotator_move(void) {
 	SERIAL_CHECK_TRUE(number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 10, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"DEG\":10", 1));
 	SERIAL_CHECK_TRUE(rotator_position_is(10));
+	// The angle is published while the rotator turns, not only when it arrives, and the move starts from the
+	// measured angle rather than showing the request as the value.
+	unsigned rotator_updates = atomic_load(&rotator_log_count);
+	SERIAL_CHECK_TRUE(number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 200, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(first_busy_value_is(rotator_log, rotator_value_log, atomic_load(&rotator_log_count), rotator_updates, 10));
+	SERIAL_CHECK_TRUE(rotator_in_motion(10, 200));
+	SERIAL_CHECK_TRUE(rotator_position_is(200));
+cleanup:
+	driver_stop();
+}
+
+// An ARCO flagged for calibration on a SESTO SENSO 3 acknowledges a move and does not turn; the move ends
+// ALERT with the reason, and moves work again after a calibration.
+static void sestosenso3_rotator_needs_calibration(void) {
+	SERIAL_CHECK_TRUE(driver_up());
+	SERIAL_CHECK_TRUE(connect_rotator());
+	SERIAL_CHECK_TRUE(message_seen("ARCO needs calibration"));
+	clear_messages();
+	SERIAL_CHECK_TRUE(number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 45, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("The rotator needs calibration"));
+	unsigned int completions = property_state_revision(X_CALIBRATE_R_PROPERTY_NAME, INDIGO_OK_STATE);
+	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_R_PROPERTY_NAME, X_CALIBRATE_R_START_ITEM_NAME, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(state_seen(X_CALIBRATE_R_PROPERTY_NAME, INDIGO_OK_STATE, completions));
+	SERIAL_CHECK_TRUE(number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 45, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(rotator_position_is(45));
+cleanup:
+	driver_stop();
+}
+
+// A relative move goes to the current angle plus the offset, both ways; a target outside the ROTATOR_POSITION
+// range is refused without a command, and an abort ends both properties ALERT.
+static void rotator_relative_move(void) {
+	SERIAL_CHECK_TRUE(driver_up());
+	SERIAL_CHECK_TRUE(connect_rotator());
+	SERIAL_CHECK_TRUE(!find_cached_property(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME)->hidden);
+	SERIAL_CHECK_TRUE(number_change(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, ROTATOR_RELATIVE_MOVE_ITEM_NAME, 30, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"MOVE_ABS\":{\"DEG\":30}", 1));
+	SERIAL_CHECK_TRUE(rotator_position_is(30));
+	SERIAL_CHECK_TRUE(wait_for_property_state(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(number_change(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, ROTATOR_RELATIVE_MOVE_ITEM_NAME, -50, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(wait_for_requests("\"MOVE_ABS\":{\"DEG\":-20}", 1));
+	SERIAL_CHECK_TRUE(rotator_position_is(-20));
+	SERIAL_CHECK_TRUE(wait_for_property_state(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, INDIGO_OK_STATE));
+	// -20 - 170 is outside -180..360: refused, nothing is sent.
+	int moves = requests("\"MOVE_ABS\"");
+	clear_messages();
+	SERIAL_CHECK_TRUE(number_change(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, ROTATOR_RELATIVE_MOVE_ITEM_NAME, -170, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(message_seen("outside the rotator range"));
+	SERIAL_CHECK_EQ_INT(moves, requests("\"MOVE_ABS\""));
+	SERIAL_CHECK_TRUE(rotator_position_is(-20));
+	// An abort during a relative move ends both properties ALERT.
+	SERIAL_CHECK_TRUE(number_change(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, ROTATOR_RELATIVE_MOVE_ITEM_NAME, 170, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(rotator_in_motion(-20, 150));
+	SERIAL_CHECK_TRUE(switch_change(ROTATOR_ABORT_MOTION_PROPERTY_NAME, ROTATOR_ABORT_MOTION_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(wait_for_property_state(ROTATOR_RELATIVE_MOVE_PROPERTY_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(wait_for_property_state(ROTATOR_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE));
 cleanup:
 	driver_stop();
 }
@@ -993,6 +1880,18 @@ static void rotator_abort(void) {
 	SERIAL_CHECK_TRUE(switch_change(ROTATOR_ABORT_MOTION_PROPERTY_NAME, ROTATOR_ABORT_MOTION_ITEM_NAME, INDIGO_OK_STATE));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"MOT2\":{\"MOT_STOP\"", 1));
 	SERIAL_CHECK_TRUE(state_seen(ROTATOR_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE, alerts));
+	// The aborted move stays ALERT with its target after the motor has stopped and the movement poll has ended.
+	indigo_usleep(2000000);
+	SERIAL_CHECK_EQ_INT(INDIGO_ALERT_STATE, find_cached_property(ROTATOR_POSITION_PROPERTY_NAME)->state);
+	SERIAL_CHECK_TRUE(find_cached_item(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME)->number.target == 300);
+	// Also when the rotator already is at the target when the abort arrives.
+	double angle = find_cached_item(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME)->number.value;
+	alerts = property_state_revision(ROTATOR_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE);
+	SERIAL_CHECK_TRUE(number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, angle, INDIGO_BUSY_STATE));
+	SERIAL_CHECK_TRUE(switch_change(ROTATOR_ABORT_MOTION_PROPERTY_NAME, ROTATOR_ABORT_MOTION_ITEM_NAME, INDIGO_OK_STATE));
+	SERIAL_CHECK_TRUE(state_seen(ROTATOR_POSITION_PROPERTY_NAME, INDIGO_ALERT_STATE, alerts));
+	indigo_usleep(2000000);
+	SERIAL_CHECK_EQ_INT(INDIGO_ALERT_STATE, find_cached_property(ROTATOR_POSITION_PROPERTY_NAME)->state);
 	// A failed stop is reported instead of being published as a stop.
 	SERIAL_CHECK_TRUE(fault("\"MOT2\":{\"MOT_STOP\"", "silent"));
 	SERIAL_CHECK_TRUE(switch_change(ROTATOR_ABORT_MOTION_PROPERTY_NAME, ROTATOR_ABORT_MOTION_ITEM_NAME, INDIGO_ALERT_STATE));
@@ -1008,6 +1907,7 @@ static void rotator_calibration(void) {
 	SERIAL_CHECK_TRUE(switch_change(X_CALIBRATE_R_PROPERTY_NAME, X_CALIBRATE_R_START_ITEM_NAME, INDIGO_BUSY_STATE));
 	SERIAL_CHECK_TRUE(wait_for_requests("\"set\":{\"MOT2\":{\"CAL_STATUS\":\"exec\"", 1));
 	SERIAL_CHECK_TRUE(state_seen(X_CALIBRATE_R_PROPERTY_NAME, INDIGO_OK_STATE, completions));
+	SERIAL_CHECK_TRUE(message_seen("ARCO calibration complete"));
 	SERIAL_CHECK_TRUE(switch_is(X_CALIBRATE_R_PROPERTY_NAME, X_CALIBRATE_R_START_ITEM_NAME, false));
 	// An abort stops a running calibration.
 	unsigned int alerts = property_state_revision(X_CALIBRATE_R_PROPERTY_NAME, INDIGO_ALERT_STATE);
@@ -1039,7 +1939,8 @@ static void rotator_sync(void) {
 	// A refused sync keeps the angle the rotator had.
 	SERIAL_CHECK_TRUE(fault("\"SYNC_POS\"", "reject"));
 	SERIAL_CHECK_TRUE(number_change(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 200, INDIGO_ALERT_STATE));
-	SERIAL_CHECK_TRUE(number_is(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 130, 0));
+	// A SESTO SENSO 3 reads the angle back with the rounding of its step conversion.
+	SERIAL_CHECK_TRUE(number_is(ROTATOR_POSITION_PROPERTY_NAME, ROTATOR_POSITION_ITEM_NAME, 130, 0.01));
 	SERIAL_CHECK_TRUE(switch_change(ROTATOR_ON_POSITION_SET_PROPERTY_NAME, ROTATOR_ON_POSITION_SET_GOTO_ITEM_NAME, INDIGO_OK_STATE));
 cleanup:
 	driver_stop();
@@ -1060,17 +1961,58 @@ cleanup:
 
 typedef struct { const char *name; void (*run)(void); const char *profile; } simulated_case;
 
+// Opt-in reference trace: with INDIGO_SIMULATOR_TRACE_DIR set, the requests a case sent are kept
+// as <case>.events, so a refactoring can compare the wire traffic of the driver before and after.
+static void copy_case_trace(const char *name) {
+	const char *directory = getenv("INDIGO_SIMULATOR_TRACE_DIR");
+	if (directory == NULL || *directory == 0) {
+		return;
+	}
+	char target_path[PATH_MAX];
+	if (snprintf(target_path, sizeof(target_path), "%s/%s.events", directory, name) >= (int)sizeof(target_path)) {
+		fprintf(stderr, "trace target path does not fit %zu bytes\n", sizeof(target_path));
+		return;
+	}
+	FILE *source = fopen(event_path, "r");
+	if (source == NULL) {
+		return;
+	}
+	FILE *target = fopen(target_path, "w");
+	if (target != NULL) {
+		char buffer[4096];
+		size_t count;
+		while ((count = fread(buffer, 1, sizeof(buffer), source)) > 0) {
+			fwrite(buffer, 1, count, target);
+		}
+		fclose(target);
+	}
+	fclose(source);
+}
+
 int main(void) {
 	const simulated_case cases[] = {
 		{ "metadata", metadata, "normal" },
+		{ "usb_match_pattern", usb_match_pattern, "normal" },
 		{ "property_contract", property_contract, "normal" },
 		{ "esatto_profile", esatto_profile, "esatto" },
+		{ "esatto_home_reset", esatto_home_reset, "esatto" },
+		{ "esatto_needs_calibration", esatto_needs_calibration, "esatto-needs-calibration" },
 		{ "sestosenso3_profile", sestosenso3_profile, "sestosenso3" },
+		{ "sestosenso3_uncalibrated", sestosenso3_uncalibrated, "sestosenso3-uncalibrated" },
+		{ "sestosenso3_calibration", sestosenso3_calibration, "sestosenso3" },
+		{ "sestosenso3_calibration_restart", sestosenso3_calibration_restart, "sestosenso3" },
+		{ "sestosenso3_calibration_lost_position", sestosenso3_calibration_lost_position, "sestosenso3" },
+		{ "sestosenso3_field_errors", sestosenso3_field_errors, "sestosenso3" },
+		{ "sestosenso3_abort_during_restart", sestosenso3_abort_during_restart, "sestosenso3" },
 		{ "no_abs_pos_profile", no_abs_pos_profile, "no-abs-pos" },
 		{ "no_speed_profile", no_speed_profile, "no-speed" },
 		{ "unsupported_device", unsupported_device, "unsupported" },
 		{ "handshake_timeout", handshake_timeout, "normal" },
 		{ "old_firmware", old_firmware, "old-firmware" },
+		{ "long_application_firmware", long_firmware_metadata, "long-app" },
+		{ "long_web_firmware", long_firmware_metadata, "long-web" },
+		{ "long_combined_firmware", long_firmware_metadata, "long-combined" },
+		{ "wifi_escaped_credentials", wifi_escaped_credentials, "normal" },
 		{ "needs_calibration", needs_calibration, "needs-calibration" },
 		{ "repeated_init_shutdown", repeated_init_shutdown, "normal" },
 		{ "shutdown_rejected_while_connected", shutdown_rejected_while_connected, "normal" },
@@ -1093,12 +2035,35 @@ int main(void) {
 		{ "run_preset", run_preset, "normal" },
 		{ "settings_reported_failures", settings_reported_failures, "normal" },
 		{ "focuser_calibration", focuser_calibration, "normal" },
+		{ "calibration_end_without_run", calibration_end_without_run, "normal" },
+		{ "move_not_started", move_not_started, "normal" },
 		{ "status_polling", status_polling, "normal" },
 		{ "transport_loss", transport_loss, "normal" },
+		{ "no_probe", no_probe, "no-probe" },
+		{ "position_poll_failure", position_poll_failure, "normal" },
+		{ "hand_keypad_motion", hand_keypad_motion, "normal" },
+		{ "stalled_move", stalled_move, "normal" },
+		{ "move_readback_failures", move_readback_failures, "normal" },
+		{ "abort_refused", abort_refused, "normal" },
+		{ "abort_overtakes_queued_move", abort_overtakes_queued_move, "normal" },
+		{ "request_versus_poll", request_versus_poll, "normal" },
+		{ "refusal_keeps_queued_move", refusal_keeps_queued_move, "normal" },
+		{ "refusal_while_move_queued", refusal_while_move_queued, "normal" },
+		{ "settings_during_motion", settings_during_motion, "normal" },
+		{ "transport_loss_during_motion", transport_loss_during_motion, "normal" },
+		{ "controller_restart_refused_with_sibling", controller_restart_refused_with_sibling, "normal" },
 		{ "rotator_metadata", rotator_metadata, "normal" },
 		{ "rotator_lifecycle", rotator_lifecycle, "normal" },
 		{ "shared_connection", shared_connection, "normal" },
 		{ "rotator_move", rotator_move, "normal" },
+		{ "rotator_relative_move", rotator_relative_move, "normal" },
+		{ "sestosenso3_rotator_relative_move", rotator_relative_move, "sestosenso3" },
+		// A SESTO SENSO 3 acknowledges the ARCO move under DEG instead of STEP.
+		{ "sestosenso3_rotator_move", rotator_move, "sestosenso3" },
+		// A SESTO SENSO 3 acknowledges the ARCO sync under DEG, behind debug text.
+		{ "sestosenso3_rotator_sync", rotator_sync, "sestosenso3" },
+		{ "sestosenso3_rotator_needs_calibration", sestosenso3_rotator_needs_calibration, "sestosenso3-arco-uncalibrated" },
+		{ "sestosenso3_arco_stays_calibrated", sestosenso3_arco_stays_calibrated, "sestosenso3" },
 		{ "rotator_abort", rotator_abort, "normal" },
 		{ "rotator_calibration", rotator_calibration, "normal" },
 		{ "rotator_sync", rotator_sync, "normal" },
@@ -1106,6 +2071,8 @@ int main(void) {
 	};
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	simulator_test_client.send_message = record_message;
+	simulator_test_client.update_property = observe_update;
+	simulator_test_client.define_property = observe_define;
 	if (mkdtemp(fixture_directory) == NULL) {
 		fprintf(stderr, "Cannot create fixture directory\n");
 		return 1;
@@ -1120,6 +2087,7 @@ int main(void) {
 		if (filter != NULL && strstr(cases[i].name, filter) == NULL) {
 			continue;
 		}
+		active_profile = cases[i].profile;
 		unlink(fault_path);
 		const char *arguments[] = { "--profile", cases[i].profile, NULL, NULL };
 		if (getenv("PRIMALUCE_TEST_TRACE") != NULL) {
@@ -1147,6 +2115,7 @@ int main(void) {
 			}
 		}
 		stop_external_serial_simulator(&fixture);
+		copy_case_trace(cases[i].name);
 		if (child < 0 || status == -1 || !WIFEXITED(status) || WEXITSTATUS(status)) {
 			failures++;
 			printf("FAIL: %s (exit=%d, signal=%d)\n", cases[i].name, WIFEXITED(status) ? WEXITSTATUS(status) : -1, WIFSIGNALED(status) ? WTERMSIG(status) : 0);

@@ -24,11 +24,11 @@ properties are first of all defined memory structures which are, if needed, mapp
 | CONFIG | switch | no | yes | LOAD | yes | Load |
 |  |  |  |  | SAVE | yes | Save |
 |  |  |  |  | REMOVE | yes | Remove |
-| PROFILE_NAME | text | no | yes | NAME_0,... | yes | Set profile name |
+| PROFILE_NAME | text | no | yes | NAME_0,... | yes | Set profile name. Hidden for all agent interfaces; regular device profiles remain available. |
 | PROFILE | switch | no | yes | PROFILE_0,... | yes | Select the profile number for subsequent CONFIG operation |
 | DEVICE_PORT | text | no | no | PORT | no | Either device path like "/dev/tty0" or URL like "lx200://host:port". |
 | DEVICE_BAUDRATE | text | no | no | BAUDRATE | no | Serial port configuration in a string like this: 9600-8N1 |
-| DEVICE_PORTS | switch | no | no | valid serial port name |  | When selected, it is copied to DEVICE_PORT property. |
+| DEVICE_PORTS | switch | no | no | valid serial port name |  | When selected, it is copied to DEVICE_PORT property. REFRESH rescans the ports. The list is shared by all devices and is rebuilt automatically when a USB-serial port is plugged in or removed. |
 | GEOGRAPHIC_COORDINATES | number | no | yes | LATITUDE | yes | Defined in mount, GPS, and dome driver base classes. |
 |  |  |  |  | LONGITUDE | yes | Longitude (0° to 360° +E) |
 |  |  |  |  | ELEVATION | yes | Elevation (m) |
@@ -42,6 +42,12 @@ properties are first of all defined memory structures which are, if needed, mapp
 `CONFIG.LOAD` sets `CONFIG` to BUSY while the base framework applies saved requests in file order. Each available writable property must publish a new completion update after its request; BUSY keeps the restore pending, and ALERT fails it. CONFIG becomes OK only after all requests complete, or ALERT on failure, disconnection or a 120-second restore timeout. Properties no longer exposed by the device are skipped. Fully synchronous restores can complete within the initiating call; asynchronous handlers and finalizers are awaited. The direct `indigo_load_properties()` helper retains its existing dispatch-only behavior.
 
 Properties CONNECTION through ADDITIONAL_INSTANCES are implemented by the driver base class in [indigo_driver.c](https://github.com/indigo-astronomy/indigo/blob/master/indigo_libs/indigo_driver.c). GEOGRAPHIC_COORDINATES and UTC_TIME are implemented in the mount, GPS, and dome driver base classes.
+
+## MCP agent lifecycle
+
+MCP Agent hides the inherited `CONNECTION` property. Loading `indigo_agent_mcp` activates the MCP endpoint immediately; unloading it stops admission and drains active requests before releasing the internal bus client. There is no separate connect/disconnect control. Its `CONFIG`, `PROFILE` and `ADDITIONAL_INSTANCES` controls are also hidden; the visible `INFO` property identifies the agent.
+
+Sources: [MCP agent](../indigo_drivers/agent_mcp/indigo_agent_mcp.c), [common driver properties](../indigo_libs/indigo_driver.c).
 
 ## CCD specific properties
 
@@ -63,7 +69,7 @@ Properties CONNECTION through ADDITIONAL_INSTANCES are implemented by the driver
 |  |  |  |  | BOTH | yes | Upload and save |
 |  |  |  |  | NONE | no | Hidden by default. |
 | CCD_LOCAL_MODE | text | no | yes | DIR | yes | Directory |
-|  |  |  |  | PREFIX | yes | XXX or XXXX is replaced by sequence or a template with %M (MD5), %E/%nE (exposure), %D/%xD (date), %N/%xN (session night date), %H/%xH (time), %C (filter name), %nS (sequence), %F (frame type), %T (chip temperature), %G (gain), %O (offset), %R (resolution), %B (binning), %P (focuser position) format specifier. |
+|  |  |  |  | PREFIX | yes | XXX or XXXX is replaced by sequence or a template with %M (MD5), %o (object name), %E/%nE (exposure), %D/%xD (date), %N/%xN (session night date), %H/%xH (time), %C (filter name), %nS (sequence), %F (frame type), %T/%nT (target chip temperature), %t/%nt (current chip temperature), %G (gain), %O (offset), %R (resolution), %B (binning), %P (focuser position) format specifier. |
 |  |  |  |  | OBJECT | yes | Object name. |
 | CCD_EXPOSURE | number | no | yes | EXPOSURE | yes | Start exposure |
 | CCD_STREAMING | number | no | no | EXPOSURE | yes | The same as CCD_EXPOSURE, but will upload COUNT images. Use COUNT -1 for endless loop. |
@@ -124,6 +130,8 @@ Properties CONNECTION through ADDITIONAL_INSTANCES are implemented by the driver
 |  |  |  |  | DISABLED | yes | Disabled |
 | CCD_RBI_FLUSH | number | no | no | EXPOSURE | yes | Hidden by default. RBI flush parameters. |
 |  |  |  |  | COUNT | yes | Number of flushes |
+
+Temperature filename macros default to zero decimal places; the optional single digit `n` specifies decimal places, capped at five. `%T`/`%nT` use the target temperature and produce `NA` when temperature or cooler is hidden, or cooling is off. `%t`/`%nt` use the current temperature even when cooling is off or unavailable, and produce `NA` when temperature is hidden.
 
 Properties are implemented by CCD driver base class in [indigo_ccd_driver.c](https://github.com/indigo-astronomy/indigo/blob/master/indigo_libs/indigo_ccd_driver.c).
 
@@ -225,7 +233,7 @@ Properties are implemented by focuser driver base class in [indigo_focuser_drive
 |  |  |  |  | DEFAULT | yes | Set default position |
 | MOUNT_HOME_POSITION | number | no | no | HA | yes | Hidden by default. |
 |  |  |  |  | DEC | yes | Declination (-90 to 90°) |
-| MOUNT_ON_COORDINATES_SET | switch | no | yes | TRACK | yes | Slew to target and track |
+| MOUNT_ON_COORDINATES_SET | switch | no | yes | TRACK | yes | Slew to target and track. A change is refused (ALERT, previous mode kept) while MOUNT_EQUATORIAL_COORDINATES is BUSY. |
 |  |  |  |  | SYNC | yes | Sync to target |
 |  |  |  |  | SLEW | no | Slew to target and stop |
 | MOUNT_SLEW_RATE | switch | no | no | GUIDE | no | Guide rate |
@@ -446,13 +454,47 @@ To be used by auxiliary devices like powerboxes, weather stations, etc.
 |  |  |  |  | SKY_BRIGHTNESS | no | Sky brightness [m/arcsec²] |
 |  |  |  |  | SKY_TEMPERATURE | no | Sky temperature [°C] |
 |  |  |  |  | SKY_BORTLE_CLASS | no | Sky Bortle class |
+| AUX_HUMIDITY | light | yes | no | HUMID | yes | Humidity condition, the item of the current level is OK, the others IDLE |
+|  |  |  |  | NORMAL | yes | Normal humidity |
+|  |  |  |  | DRY | yes | Dry air |
+| AUX_WIND | light | yes | no | STRONG | yes | Wind condition, the item of the current level is OK, the others IDLE |
+|  |  |  |  | MODERATE | yes | Moderate wind |
+|  |  |  |  | CALM | yes | Calm |
+| AUX_RAIN | light | yes | no | RAINING | yes | Rain condition, the item of the current level is OK, the others IDLE |
+|  |  |  |  | WET | yes | Wet |
+|  |  |  |  | DRY | yes | Dry |
+| AUX_CLOUD | light | yes | no | CLEAR | yes | Cloud condition, the item of the current level is OK, the others IDLE |
+|  |  |  |  | CLOUDY | yes | Cloudy |
+|  |  |  |  | OVERCAST | yes | Overcast |
+| AUX_SKY | light | yes | no | DARK | yes | Sky darkness condition, the item of the current level is OK, the others IDLE |
+|  |  |  |  | LIGHT | yes | Light sky |
+|  |  |  |  | VERY_LIGHT | yes | Very light sky |
+| AUX_HUMIDITY_THRESHOLDS | number | no | no | HUMID | yes | Humid level threshold, in the device's units |
+|  |  |  |  | NORMAL | yes | Normal level threshold |
+| AUX_WIND_THRESHOLDS | number | no | no | STRONG | yes | Strong wind threshold, in the device's units |
+|  |  |  |  | MODERATE | yes | Moderate wind threshold |
+| AUX_RAIN_THRESHOLDS | number | no | no | RAINING | yes | Raining threshold, in the device's units |
+|  |  |  |  | WET | yes | Wet threshold |
+| AUX_CLOUD_THRESHOLDS | number | no | no | CLEAR | yes | Clear sky threshold, in the device's units |
+|  |  |  |  | CLOUDY | yes | Cloudy threshold |
+| AUX_SKY_THRESHOLDS | number | no | no | DARK | yes | Dark sky threshold, in the device's units |
+|  |  |  |  | LIGHT | yes | Light sky threshold |
+| AUX_WEATHER_SAFETY | light | yes | no | SAFE | yes | Weather safety verdict (IDLE = no condition has a sensor, OK = safe, ALERT = unsafe) |
+|  |  |  |  | CLOUDS | yes | Cloud condition (IDLE = no sensor, OK = below the OVERCAST level, ALERT = OVERCAST or no valid reading) |
+|  |  |  |  | RAIN | yes | Rain condition (IDLE = no sensor, OK = below the RAINING level, ALERT = RAINING or no valid reading) |
+|  |  |  |  | WIND | yes | Wind condition (IDLE = no sensor, OK = below the STRONG level, ALERT = STRONG or no valid reading) |
+|  |  |  |  | HUMIDITY | yes | Humidity condition (IDLE = no sensor, OK = below the HUMID level, ALERT = HUMID or no valid reading) |
 | AUX_INFO | number | yes | no | ... | no | Any number of any number items |
 | AUX_CONTROL | switch | no | no | ... | no | Any number of any switch items |
 | AUX_LIGHT_SWITCH | switch | no | no | ON | yes | Flatbox light on |
 |  |  |  |  | OFF | yes | Turn light off |
 | AUX_LIGHT_INTENSITY | number | no | no | LIGHT_INTENSITY | yes | Flatbox light intensity |
 
-Auxiliary property names are defined in `indigo_libs/indigo/indigo_names.h`; auxiliary devices use the common attach/change/enumerate hooks from `indigo_libs/indigo_aux_driver.c`.
+The aux base class defines the weather condition properties `AUX_HUMIDITY`, `AUX_WIND`, `AUX_RAIN`, `AUX_CLOUD` and `AUX_SKY`, their threshold properties `AUX_HUMIDITY_THRESHOLDS`, `AUX_WIND_THRESHOLDS`, `AUX_RAIN_THRESHOLDS`, `AUX_CLOUD_THRESHOLDS` and `AUX_SKY_THRESHOLDS`, and `AUX_WEATHER_SAFETY`, all hidden by default; a weather driver unhides those it supports and sets the threshold labels, ranges, defaults and units (generated drivers declare them as `inherited`). The thresholds are defined while the device is attached, changed by the base class and saved by CONFIG; the condition properties and `AUX_WEATHER_SAFETY` are defined only while the device is connected. A condition property is a read-only light vector: the item of the current level is OK and all other items are IDLE, e.g. `AUX_RAIN` while raining has `RAINING` OK, `WET` and `DRY` IDLE. Its property state reports the sensor: OK while the sensor operates normally, ALERT when it gives no valid reading and IDLE when the unit has no such sensor; in both latter cases all items are IDLE. Drivers set the lights and state with `indigo_aux_set_condition()`.
+
+`AUX_WEATHER_SAFETY` tells clients whether the weather allows observing. Like `AUX_WEATHER`, it is defined only while the device is connected, and a weather device defines all five items. Each condition is judged by the worst level of the device's classification (the light of that item is OK) and its threshold property: clouds by `OVERCAST` of `AUX_CLOUD` / `AUX_CLOUD_THRESHOLDS`, rain by `RAINING` of `AUX_RAIN` / `AUX_RAIN_THRESHOLDS`, wind by `STRONG` of `AUX_WIND` / `AUX_WIND_THRESHOLDS` and humidity by `HUMID` of `AUX_HUMIDITY` / `AUX_HUMIDITY_THRESHOLDS`, with thresholds in the device's own units. A condition item is IDLE when the device or the unit has no such sensor, OK while the reading is below its unsafe level and ALERT when the reading reaches it or a fitted sensor gives no valid reading. `SAFE` is ALERT as soon as any condition is ALERT, OK when every fitted condition is OK, and IDLE when no condition has a sensor. A condition is switched off by moving its unsafe threshold out of the sensor's reach. The property state keeps its usual meaning: OK while the readings are valid, ALERT when a fitted sensor gives no valid reading. An update carries the reason when the `SAFE` verdict changes and, while it is unsafe, whenever the set of unsafe or unreadable conditions changes, e.g. `Unsafe: wind 12.4 m/s above 10.0 m/s`, `Unsafe: rain sensor gives no valid reading` or `Safe: all conditions within limits`; other updates carry no message. A driver whose raw reading means nothing to the user sets `omit_values` of that condition, and its reason then names the condition only, e.g. `Unsafe: rain`. Drivers set the lights with `indigo_aux_evaluate_weather_safety()` before the property is defined and publish later changes with `indigo_aux_update_weather_safety()` from `indigo_libs/indigo/indigo_aux_driver.h`, so every driver applies the same rule.
+
+Auxiliary property names are defined in `indigo_libs/indigo/indigo_names.h`; auxiliary devices use the common attach/change/enumerate hooks from `indigo_libs/indigo_aux_driver.c`, which also defines the weather condition, threshold and safety properties (`indigo_libs/indigo/indigo_aux_driver.h`).
 
 ## Agent filter properties
 
@@ -514,6 +556,8 @@ Source: `indigo_drivers/agent_alpaca/indigo_agent_alpaca.c`.
 
 ### Astrometry agent
 
+This external backend shares the solver interface with the native Platesolver Agent; see the [native INDIGO solver reference](../indigo_drivers/agent_platesolver/doc/PLATESOLVER.md) for that backend.
+
 | Property name | Type | RO | Items | Comments |
 | ----- | ----- | ----- | ----- | ----- |
 | AGENT_ASTROMETRY_INDEX_41XX | switch | no | dynamic Tycho-2 index names | Installed 41xx index management. Also updates `AGENT_PLATESOLVER_USE_INDEX`. |
@@ -530,8 +574,11 @@ Source: `indigo_drivers/agent_astrometry/indigo_agent_astrometry.c`.
 | FILTER_AUX_3_LIST | switch | no | device name | Exposes the common AUX #3 selector. |
 | FILTER_AUX_4_LIST | switch | no | device name | Exposes the common AUX #4 selector. |
 | FILTER_RELATED_AGENT_LIST | switch | no | agent name | Exposes the common related-agent selector. |
+| AGENT_AUX_SAFETY | light | yes | SAFE, CLOUDS, RAIN, WIND, HUMIDITY | Safety of the observing conditions: `SAFE` is IDLE without safety information, OK if conditions are safe and ALERT if they are unsafe. Names are published in `indigo_agent_auxiliary.h`. |
 
-Source: `indigo_drivers/agent_auxiliary/indigo_agent_auxiliary.c`.
+`AGENT_AUX_SAFETY` combines `AUX_WEATHER_SAFETY` of the devices selected in `FILTER_AUX_1_LIST` to `FILTER_AUX_4_LIST`; every selected device that defines it is a source, and the agent keeps no thresholds of its own. Each light is combined worst-wins across the sources, the same rule as `indigo_aux_evaluate_weather_safety()`: ALERT if any source light is ALERT, otherwise OK if at least one is OK, otherwise IDLE; `CLOUDS`, `RAIN`, `WIND` and `HUMIDITY` combine the conditions of the same name. The property is IDLE until a source is selected and OK while at least one source is present. When the combined `SAFE` changes or the set of unsafe sources changes, the update passes on the reason of each source whose `SAFE` equals the combined verdict, with the device name appended and several sources separated by `; `, e.g. `Unsafe: wind 12.4 m/s above 10.0 m/s (AAG CloudWatcher)`; other updates carry no message. A change of a source is published at once: a source sends its reason only after the update that changes its `SAFE` light, so when no reason from the source is available for its current light (for example a source selected while already unsafe, or a change without a message), the agent writes its own reason from the lights without values, e.g. `Unsafe: wind (Weather Station Simulator)`. When the source's own reason then arrives and gives a different message, a second update without a change of the lights passes it on. A source that disconnects, is deselected or deletes the property is left out; when no source is left, `SAFE` and the conditions are IDLE, the property is ALERT with the message `Weather safety source lost`, and `AGENT_SCHEDULER_SAFETY_MISSING` of the Scheduler Agent decides how the missing information counts.
+
+Sources: `indigo_drivers/agent_auxiliary/indigo_agent_auxiliary.c`, `indigo_drivers/agent_auxiliary/indigo_agent_auxiliary.h`.
 
 ### Config agent
 
@@ -587,7 +634,7 @@ Source: `indigo_drivers/agent_guider/indigo_agent_guider.c`.
 | FILTER_AUX_1_LIST | switch | no | device name | Exposes the common AUX #1 selector as an external shutter. |
 | FILTER_RELATED_AGENT_LIST | switch | no | agent name | Exposes the common related-agent selector. |
 | AGENT_IMAGER_BATCH | number | no | COUNT, EXPOSURE, DELAY, FRAMES_TO_SKIP_BEFORE_DITHER, PAUSE_AFTER_TRANSIT | Imaging batch settings. |
-| AGENT_IMAGER_FOCUS | number | no | INITIAL, FINAL, ITERATIVE_INITIAL, ITERATIVE_FINAL, U_CURVE_SAMPLES, U_CURVE_STEP, BAHTINOV_SIGMA, BRACKETING_STEP, BACKLASH, BACKLASH_OVERSHOOT_FACTOR, STACK, REPEAT, DELAY | Autofocus settings. |
+| AGENT_IMAGER_FOCUS | number | no | INITIAL, FINAL, ITERATIVE_INITIAL, ITERATIVE_FINAL, U_CURVE_SAMPLES, U_CURVE_STEP, BAHTINOV_ANGLE, BRACKETING_STEP, BACKLASH, BACKLASH_OVERSHOOT_FACTOR, STACK, REPEAT, DELAY | Autofocus settings. |
 | AGENT_IMAGER_FOCUS_FAILURE | switch | no | STOP, RESTORE | Action on autofocus failure. |
 | AGENT_IMAGER_FOCUS_ESTIMATOR | switch | no | U_CURVE, HFD_PEAK, RMS_CONTRAST, BAHTINOV | Autofocus estimator selection. |
 | AGENT_IMAGER_CAPTURE | number | no | CAPTURE | Capture trigger/control value. |
@@ -644,6 +691,8 @@ Source: `indigo_drivers/agent_mount/indigo_agent_mount.c`.
 
 ### Plate solver agents
 
+For native solving, hints, WCS output and index setup, see the [native INDIGO solver reference](../indigo_drivers/agent_platesolver/doc/PLATESOLVER.md).
+
 | Property name | Type | RO | Items | Comments |
 | ----- | ----- | ----- | ----- | ----- |
 | FILTER_RELATED_AGENT_LIST | switch | no | agent name | Exposes the common related-agent selector. |
@@ -655,6 +704,7 @@ Source: `indigo_drivers/agent_mount/indigo_agent_mount.c`.
 | AGENT_ABORT_PROCESS | switch | no | ABORT | Abort active plate solving process. |
 | AGENT_PLATESOLVER_SOLVE_IMAGES | switch | no | ENABLED, DISABLED | Enable or disable solving incoming images. |
 | AGENT_PLATESOLVER_EXPOSURE | number | no | EXPOSURE | Exposure used by plate solver capture flows. |
+| AGENT_PLATESOLVER_FILTER | switch | no | CURRENT, dynamic filter slots | Filter for the frames the solver captures through the related Imager Agent: CURRENT (default) leaves the wheel alone, the other items mirror the slots of the Imager Agent's `AGENT_WHEEL_FILTER`. Each exposure of a process selects the filter and the wheel returns to the previous one when the frame arrives, on failure and on abort. |
 | AGENT_PLATESOLVER_PA_SETTINGS | number | no | EXPOSURE, HA_MOVE, COMPENSATE_REFRACTION | Polar-alignment settings. |
 | AGENT_PLATESOLVER_PA_STATE | number | yes | STATE, DEC_DRIFT_2, DEC_DRIFT_3, TARGET_RA, TARGET_DEC, CURRENT_RA, CURRENT_DEC, ALT_POLAR_ERROR, AZ_POLAR_ERROR, ALT_CORRECTION_UP, AZ_CORRECTION_CW, POLAR_ERROR, ACCURACY_WARNING | Polar-alignment state and correction values. |
 | AGENT_PLATESOLVER_GOTO_SETTINGS | number | no | RA, DEC | Target coordinates for solver-assisted goto. |
@@ -664,7 +714,47 @@ Source: `indigo_drivers/agent_mount/indigo_agent_mount.c`.
 | AGENT_PLATESOLVER_IMAGE_OUTPUT | blob | yes | IMAGE | Solver output image. |
 | CCD_PREVIEW, CCD_PREVIEW_IMAGE, CCD_JPEG_SETTINGS, CCD_JPEG_STRETCH_PRESETS | mixed | mixed | see CCD property sections | Reuses CCD preview and JPEG properties for plate-solver image preview. |
 
-Source: `indigo_libs/indigo_platesolver.c`; used by `indigo_drivers/agent_solver/indigo_agent_solver.c` and `indigo_drivers/agent_astrometry/indigo_agent_astrometry.c`.
+Source: `indigo_libs/indigo_platesolver.c`; used by `indigo_drivers/agent_platesolver/indigo_agent_platesolver.c` and `indigo_drivers/agent_astrometry/indigo_agent_astrometry.c`.
+
+### Platesolver Agent
+
+The [native INDIGO solver reference](../indigo_drivers/agent_platesolver/doc/PLATESOLVER.md) describes the native index format and management workflow.
+
+| Property name | Type | RO | Items | Comments |
+| ----- | ----- | ----- | ----- | ----- |
+| X_AGENT_SOLVER_INDEX | switch | no | INDEX_00_2DEG_GAIA, INDEX_00_5DEG_GAIA, INDEX_01DEG_TYC2, INDEX_02DEG_TYC2, INDEX_05DEG_TYC2, INDEX_10DEG_TYC2, INDEX_20DEG_TYC2 | Installed quad index management (Gaia DR3 for the 0.2° and 0.5° scales, Tycho-2 for the others), selecting an item downloads the `index-<scale>deg-gaia.isix` or `index-<scale>deg-tyc2.isix` file (scale zero padded, for example `index-05deg-tyc2.isix`), clearing it deletes the file. Also updates `AGENT_PLATESOLVER_USE_INDEX`. |
+
+Source: `indigo_drivers/agent_platesolver/indigo_agent_platesolver.c`.
+
+### Scheduler agent
+
+| Property name | Type | RO | Items | Comments |
+| ----- | ----- | ----- | ----- | ----- |
+| AGENT_SCHEDULER_ADD_TASK | text | no | TASK, STATUS | Upload a task: a `// @key value` header followed by a `Sequencer.js` body, at most 16 KiB. `STATUS` is used only when the configuration is restored. |
+| AGENT_SCHEDULER_TASK_%d | text | no | TASK | Dynamic property created for each stored task, labelled with the task name; writing it edits the task. |
+| AGENT_SCHEDULER_DELETE_TASK | text | no | NAME | Delete a stored or urgent task, aborting it when it runs. |
+| AGENT_SCHEDULER_URGENT_TASK | text | no | TASK | Submit a task as urgent; it is not stored. |
+| AGENT_SCHEDULER_TASK_STATE | light | yes | TASK_%d | One item per task in list order; the label has six columns joined by ` \| `: name, state, priority, runs, retries and duration; a task named as a hook or with `@priority hook` has the state `HOOK` (`DISABLED` while the task is disabled), an Idle light and the priority `hook startup` etc. (also `hook unsafe` and `hook safe`), or `hook` when no hook names it; a task whose target can never stand within the altitude limits of AGENT_SCHEDULER_SETTINGS has the state `UNREACHABLE` and an Alert light. |
+| AGENT_SCHEDULER_TASK_NAME | text | no | NAME | Task addressed by `AGENT_SCHEDULER_TASK_COMMAND`. |
+| AGENT_SCHEDULER_TASK_COMMAND | switch | no | RESET, ENABLE, DISABLE, MOVE_UP, MOVE_DOWN, RESET_ALL, DELETE_ALL | Command for the named task; RESET_ALL and DELETE_ALL (scheduler stopped, hook tasks and `@priority hook` tasks kept) apply to all tasks and carry `warn_on_set` hints. |
+| AGENT_SCHEDULER_CONTROL | switch | no | START, STOP, ABORT | Start scheduling, stop after the running task, or abort it. |
+| AGENT_SCHEDULER_STATE | number | yes | DONE, FAILED, URGENT_DONE, URGENT_FAILED, TOTAL | Task counters: DONE and FAILED count the tasks of the list, URGENT_DONE and URGENT_FAILED the one-off urgent tasks that finished and left it (kept with the history and reset by AGENT_SCHEDULER_CLEAR_HISTORY), TOTAL the tasks of the list; the state is Idle before the first start, Busy while scheduling (also during the unsafe hold and a postponed start), Ok after the scheduler stopped and Alert after an abort (also while stopped), a failed startup, night start, resume, unsafe, safe or shutdown hook, or a stop timeout. |
+| AGENT_SCHEDULER_CURRENT | text | yes | CURRENT, REASON | Running task and why nothing runs, including the unsafe hold (`unsafe conditions`, `no safety information, treated as unsafe`, `unsafe hold ends in <n> min`). |
+| AGENT_SCHEDULER_SETTINGS | number | no | IDLE_CHECK_INTERVAL, STOP_TIMEOUT, START_TIMEOUT, SETTING_WEIGHT, ALTITUDE_WEIGHT, VISIBILITY_FLIP_PENALTY, IDLE_HOOK_DELAY, FRAME_OVERHEAD, OPERATION_OVERHEAD, NIGHT_START_OFFSET, NIGHT_END_OFFSET, SAFE_DELAY, MIN_ALTITUDE, MAX_ALTITUDE | Check interval, stop and start timeouts in seconds, the score weights, both used by COMPACT and under VISIBILITY only for the starting plan and fallbacks (the altitude weight applies to the altitude relative to the target's culmination), the meridian flip penalty of the best visibility (VISIBILITY) plan only, in minutes of full-quality imaging given up to avoid one flip (0 to 120, default 10, 0 = off; ignored under COMPACT and while MERIDIAN_FLIP.ENABLED of the Scripting Agent is 0 or the property is missing), minutes without a task to start before the idle hook, the per-frame and per-operation overheads in seconds of the duration estimate, the shifts of the night start and end in minutes (−240 to 240, negative is earlier), the minutes the safety must have been OK without interruption before the unsafe hold ends or a postponed start begins (0 to 1440, step 0.1, default 10), and the global minimum and maximum altitude in degrees of every task with `@target` (0 to 90, defaults 20 and 90 = no ceiling; the effective minimum is the larger of `MIN_ALTITUDE` and the task's `@altitude`; a change with the minimum at or above the maximum is rejected with Alert; a task whose target can never stand within the limits is shown as `UNREACHABLE`). |
+| AGENT_SCHEDULER_DATA | switch | no | OBJECT, FITS, FOLDER | Relate the data to the task that produced it, any of many: `OBJECT` (default on) sets the Imager Agent `CCD_LOCAL_MODE.OBJECT` to the task name, `FITS` (default on) sets the FITS keywords `SCHTASK`, `SCHRUN` and `SCHNIGHT` (session night date) and, for the keys the task has, `OBSERVER`, `PI_NAME` and `PROPID` (`@observer`, `@pi`, `@project`), `FOLDER` (default off) saves each task in its own subfolder; applied before every task run and reverted after it. The `@folder` task header key overrides `FOLDER` for one task. A hook run is not labelled; only an explicit `@folder <name>` sets the folder for it. |
+| AGENT_SCHEDULER_DATA_DIR | text | no | BASE | Parent folder of the task folders; empty (default) is the Imager Agent `CCD_LOCAL_MODE.DIR` captured when the scheduler starts. |
+| AGENT_SCHEDULER_HOOKS | text | no | STARTUP, SHUTDOWN, NIGHT_START, NIGHT_END, IDLE, RESUME, UNSAFE, SAFE | Names of stored tasks run when the scheduler starts, when it stops, when a night with work starts, when that night ends, once per idle period, before a task that starts after the idle or night end hook, once per unsafe hold after everything that ran was aborted, and when the unsafe hold ends in the night with work. |
+| AGENT_SCHEDULER_NIGHT | switch | no | CIVIL, NAUTICAL, ASTRONOMICAL | Sun altitude that bounds the scheduler's night for the night hooks: below −6°, −12° (default) or −18°. Tasks keep their own `@twilight`. |
+| AGENT_SCHEDULER_STRATEGY | switch | no | COMPACT, VISIBILITY | Scheduling strategy, one of many, saved with the configuration: `COMPACT` (default) starts the best eligible task at once and never leaves the equipment idle while a task can run; `VISIBILITY` plans the night with never fewer task runs than the COMPACT plan, dropping no COMPACT run of a higher priority class, and places them, on whole UTC minutes, where their mean altitude relative to the culmination, weighted by the run duration, is highest, then starts the plan's first run at its planned time; urgent tasks never wait. |
+| AGENT_SCHEDULER_SAFETY_MISSING | switch | no | SAFE, UNSAFE | How missing safety information counts, one of many: the Auxiliary Agent or its `AGENT_AUX_SAFETY` is absent, or its `SAFE` light is Idle or Busy; `SAFE` (default) treats it as safe, `UNSAFE` holds the scheduler. Saved with the configuration. |
+| AGENT_SCHEDULER_PLAN | light | yes | PLAN_%d | Forecast of the runs until the end of the night, assuming every run takes its duration and succeeds; each label has six columns joined by ` \| `: when (UTC start and end), name, run, priority, state and reason (`-`, or `meridian flip` for a run expected to flip under the Scripting Agent's MERIDIAN_FLIP, under both strategies). Busy = running, Idle = planned; Alert items with the state `NOT TONIGHT` follow for tasks without a run tonight, with the reason, and for a day without night when night hooks are set; a task that can never run within the altitude limits has the state `UNREACHABLE` instead, with the reason and its numbers. |
+| AGENT_SCHEDULER_HISTORY | light | yes | RUN_%u | Finished runs, oldest first, newest last, at most 200; each label has six columns joined by ` \| `: when, name, run, kind, result and reason; Ok = succeeded, Alert = failed, Busy = preempted, aborted or unsafe (aborted by the unsafe hold). |
+| AGENT_SCHEDULER_CLEAR_HISTORY | switch | no | CLEAR | Remove all history entries. |
+| AGENT_SCHEDULER_RESTORE_HISTORY | text | no | ENTRIES | Used only to restore the history from the configuration; published empty, client changes are rejected. |
+
+The agent also makes the Scripting Agent define `SCHEDULER_RESULT` (text, read-only, items `TOKEN`, `RESULT`, `MESSAGE`), through which the script that runs a task reports whether its body ran or failed, and `SCHEDULER_ESTIMATE` (number, read-only, items `TOKEN`, `SUPPORTED`, `EXPOSURE`, `FRAMES`, `OPERATIONS`, `WAITS`, `UNKNOWN`), through which it reports the counts of `Sequence.prototype.estimate()`. It observes `AGENT_AUX_SAFETY` (light, item `SAFE`) of the Auxiliary Agent: an Alert light holds the scheduler, aborts what runs and runs the `UNSAFE` hook; the hold ends after `SAFE_DELAY` minutes of an Ok light. It takes the reason of a run whose sequence ended Alert from `SEQUENCE_FAILURE`, which `Sequencer.js` defines on the Scripting Agent, see below; a sequence aborted by hand has none.
+
+Source: `indigo_drivers/agent_scheduler/indigo_agent_scheduler.c`. The design is described in [SCHEDULER.md](../indigo_drivers/agent_scheduler/doc/SCHEDULER.md).
 
 ### Scripting agent
 
@@ -679,7 +769,9 @@ Source: `indigo_libs/indigo_platesolver.c`; used by `indigo_drivers/agent_solver
 | AGENT_SCRIPTING_SCRIPT_%d | text | no | NAME, SCRIPT | Dynamic property created for each saved script. |
 | dynamic cached script properties | text, number, switch, light | mixed | dynamic item names | Script-created or script-cached INDIGO properties. |
 
-Source: `indigo_drivers/agent_scripting/indigo_agent_scripting.c`.
+The `Sequencer.js` library defines its properties as script properties; they are listed in [Sequencer.md](../indigo_drivers/agent_scripting/library/Sequencer.md#properties-published-during-execution). Among them, `SEQUENCE_FAILURE` (text, read-only, item `MESSAGE`) holds the reason of the failure that ended a sequence Alert and is published before that `SEQUENCE_STATE` update; `start()` updates it, empty, before the `SEQUENCE_STATE` update that starts a sequence, and it is empty while a sequence runs, after it finished, after an abort by `AGENT_ABORT_PROCESS` and after `SEQUENCE_RESET`. `MERIDIAN_FLIP` (number, read-only, items `ENABLED`, `USE_SOLVER`, `OFFSET`) publishes the meridian flip settings of the last `enable_meridian_flip()` or `disable_meridian_flip()` step: `ENABLED` `0` or `1`, `USE_SOLVER` `0` without solver recentering, otherwise the solver exposure in seconds, limited to 0..60 like the solver agents' `AGENT_PLATESOLVER_EXPOSURE.EXPOSURE`, and `OFFSET` the time relative to the meridian in hours, negative before it, positive after it, limited to -2..2 like the Imager Agent's `AGENT_IMAGER_BATCH.PAUSE_AFTER_TRANSIT`.
+
+Source: `indigo_drivers/agent_scripting/indigo_agent_scripting.c`, `indigo_drivers/agent_scripting/library/Sequencer.js`.
 
 ## Driver specific properties
 
@@ -690,6 +782,12 @@ This section lists driver-level additions and driver-specific use of the common 
 Driver-specific use of existing properties: `AO_GUIDE_DEC`, `AO_GUIDE_RA`, `AO_RESET`, `GUIDER_GUIDE_DEC`, `GUIDER_GUIDE_RA`.
 
 Source: `indigo_drivers/ao_sx/indigo_ao_sx.c`.
+
+### aux_alto
+
+Custom properties: `AUX_COVER` (OPEN moves to 100 %, CLOSE to 0 %; neither item is on between the ends), `X_COVER_POSITION` (0–100 %, BUSY with the progress), `X_COVER_ABORT` (decelerated stop), `X_STATE` (read-only motor temperature, 12 V and USB supply), `X_PRESETS` (positions of presets 1–3 in %), `X_PRESET_NAMES` (an empty name deletes the preset), `X_PRESET_RECALL` (moves the cover to the preset), `X_CALIBRATION` (START, STORE, CANCEL; the cover position is hidden, IDLE, while a calibration runs, and the STORE of the open position stays BUSY until the cover reports its new travel), `X_CALIBRATION_MOTION` (CLOSE_FAST, CLOSE_SLOW, OPEN_FAST, OPEN_SLOW, STOP; during a calibration only), `X_LEDS`, `X_WIFI` (OFF, AP, STA; OFF is the access point mode with the access point switched off, and a change between STA and the access point restarts the cover, which is refused while the cover moves or a calibration runs), `X_WIFI_AP` (SSID of 1–32 characters, WPA2 password of 8–63; shows what the device stored, it keeps the SSID in access point mode), `X_WIFI_STA` (the network to join; SSID of at most 32 characters, password of at most 63, empty for an open network; shows what the device stored), `X_WIFI_STATUS` (read-only: IP_ADDRESS and PORT to use in an `http://` port, the address on the joined network in station mode or the access point address; CONNECTION, the network state in station mode, `access point` or `off`; IDLE while the device cannot be reached over WiFi (not joined in station mode, or WiFi off); refreshed after a mode change and with the cover state).
+
+Source: `indigo_drivers/aux_alto/indigo_aux_alto.c`.
 
 ### aux_arteskyflat
 
@@ -713,11 +811,15 @@ Sources: `indigo_linux_drivers/aux_asiair/indigo_aux_asiair.driver`, `indigo_lin
 
 ### aux_cloudwatcher
 
-Custom properties: `AUX_CLOUD`, `AUX_CLOUD_THRESHOLDS`, `AUX_DEW_THRESHOLD`, `AUX_DEW_WARNING`, `AUX_GPIO_OUTLETS`, `AUX_HUMIDITY`, `AUX_HUMIDITY_THRESHOLDS`, `AUX_OUTLET_NAMES`, `AUX_RAIN`, `AUX_RAIN_THRESHOLD`, `AUX_RAIN_THRESHOLDS`, `AUX_RAIN_WARNING`, `AUX_SKY`, `AUX_SKY_THRESHOLDS`, `AUX_WIND`, `AUX_WIND_THRESHOLD`, `AUX_WIND_THRESHOLDS`, `AUX_WIND_WARNING`, `X_AAG_CONSTANTS`, `X_ANEMOMETER_TYPE`, `X_HEATER_CONTROL_STATE`, `X_RAIN_SENSOR_HEATER_SETUP`, `X_SKY_CORRECTION`.
+Custom properties: `AUX_DEW_THRESHOLD`, `AUX_DEW_WARNING`, `AUX_GPIO_OUTLETS`, `AUX_OUTLET_NAMES`, `AUX_RAIN_THRESHOLD`, `AUX_RAIN_WARNING`, `AUX_WIND_THRESHOLD`, `AUX_WIND_WARNING`, `X_AAG_CONSTANTS`, `X_ANEMOMETER_TYPE`, `X_HEATER_CONTROL_STATE`, `X_RAIN_SENSOR_HEATER_SETUP`, `X_SKY_CORRECTION`.
 
-Driver-specific use of existing properties: `AUX_INFO`, `AUX_WEATHER`, `DEVICE_PORT` (serial port or a `cloudwatcher://`, `tcp://` or `udp://` URL).
+Driver-specific use of existing properties: `AUX_INFO`, `AUX_WEATHER`, `DEVICE_PORT` (serial port or a `cloudwatcher://`, `tcp://` or `udp://` URL), and the aux base class weather properties `AUX_HUMIDITY`, `AUX_WIND`, `AUX_RAIN`, `AUX_CLOUD`, `AUX_SKY`, `AUX_HUMIDITY_THRESHOLDS`, `AUX_WIND_THRESHOLDS`, `AUX_RAIN_THRESHOLDS`, `AUX_CLOUD_THRESHOLDS`, `AUX_SKY_THRESHOLDS` and `AUX_WEATHER_SAFETY`, all unhidden; the five threshold properties stay in the driver's `Tresholds` group.
 
-`AUX_INFO` carries the raw and converted sensor readings of one polling cycle. `AUX_OUTLET_NAMES`, `X_SKY_CORRECTION`, the five threshold properties, `X_ANEMOMETER_TYPE` and `X_RAIN_SENSOR_HEATER_SETUP` are always defined and saved by CONFIG; the outlet, constants, readings, weather, warning and condition properties are connection-dependent. The condition and warning properties go to `INDIGO_IDLE_STATE` when the sensor they classify is not installed.
+`AUX_INFO` carries the raw and converted sensor readings of one polling cycle. `AUX_OUTLET_NAMES`, `X_SKY_CORRECTION`, the five threshold properties, `X_ANEMOMETER_TYPE` and `X_RAIN_SENSOR_HEATER_SETUP` are always defined and saved by CONFIG; the outlet, constants, readings, weather, warning, condition and `AUX_WEATHER_SAFETY` properties are connection-dependent. The condition properties are light vectors with the item of the current level OK and the other items IDLE. Their property state is BUSY until the first poll, then OK while the sensor gives a valid reading, ALERT for a fitted sensor without a valid reading (including a poll that cannot be completed, and the anemometer or RH sensor while it is unknown whether it is fitted) and IDLE when the anemometer or the RH sensor is not fitted; without a valid reading all items are IDLE. The warning properties go to `INDIGO_IDLE_STATE` when the sensor they classify is not installed.
+
+The classifications are made on every poll (every 15 s): `AUX_CLOUD` on the corrected sky temperature [C], `CLEAR` at or below the `CLEAR` threshold (-15), `CLOUDY` at or below the `CLOUDY` threshold (0), `OVERCAST` above it; `AUX_RAIN` on the rain sensor reading (`RAIN_CYCLES` of `AUX_INFO`), `RAINING` at or below the `RAINING` threshold (400), `WET` at or below the `WET` threshold (1700); `AUX_WIND` [m/s], `STRONG` at or above 10, `MODERATE` at or above 1; `AUX_HUMIDITY` [%], `HUMID` at or above 95, `NORMAL` at or above 30. A threshold changed while connected takes effect with the next poll.
+
+`AUX_WEATHER_SAFETY` judges clouds at `OVERCAST`, rain at `RAINING`, wind at `STRONG` and humidity at `HUMID`, with the reason message units `C`, `m/s` and `%`; the raw rain sensor reading means nothing to the user, so the rain reason is just `rain` (or `rain sensor gives no valid reading`), e.g. `Unsafe: rain, wind 12.4 m/s above 10.0 m/s`. Clouds and rain are always fitted. Wind is fitted when the device reports an anemometer (`ANEMOMETER_STATUS` of `X_AAG_CONSTANTS`, read on connect); humidity is fitted when firmware 5.6 or later reports an RH sensor, and its condition is ALERT when the fitted sensor gives an invalid or unreadable reply. Until the device gives a definite answer whether the anemometer or the RH sensor is fitted (the reply is lost or unreadable), that sensor counts as fitted without a valid reading, so its condition and `SAFE` are ALERT; a failed anemometer detection is retried with one request per poll, and a definite "not fitted" makes the condition IDLE. Until the first poll completes the property is BUSY with all lights IDLE; a poll that cannot be completed leaves every fitted sensor without a valid reading.
 
 Source: `indigo_drivers/aux_cloudwatcher/indigo_aux_cloudwatcher.driver`.
 
@@ -767,6 +869,14 @@ Driver-specific use of existing properties: `AUX_LIGHT_INTENSITY`, `AUX_LIGHT_SW
 
 Source: `indigo_drivers/aux_geoptikflat/indigo_aux_geoptikflat.c`.
 
+### aux_giotto
+
+Custom properties: `X_STATE` (read-only panel temperature, 12 V and USB supply), `X_PRESETS` (brightness of presets 1–9), `X_PRESET_NAMES` (an empty name deletes the preset), `X_PRESET_RECALL` (sets the brightness of a preset, the light keeps its state), `X_FADING`, `X_POWER_ON_LIGHT`, `X_LEDS`, `X_WIFI` (OFF, AP, STA; OFF is the access point mode with the access point switched off, and a change between STA and the access point restarts the panel), `X_WIFI_AP` (SSID of 1–32 characters, WPA2 password of 8–63; shows what the device stored, it keeps the SSID in access point mode), `X_WIFI_STA` (the network to join; SSID of at most 32 characters, password of at most 63, empty for an open network; shows what the device stored), `X_WIFI_STATUS` (read-only: IP_ADDRESS and PORT to use in an `http://` port, the address on the joined network in station mode or the access point address; CONNECTION, the network state in station mode, `access point` or `off`; IDLE while the device cannot be reached over WiFi (not joined in station mode, or WiFi off); refreshed after a mode change and with the panel state).
+
+Driver-specific use of existing properties: `AUX_LIGHT_SWITCH`, `AUX_LIGHT_INTENSITY` (the panel's brightness level, 0 to the factory `MAX_BRIGHTNESS`, not a percentage; settable with the light off).
+
+Source: `indigo_drivers/aux_giotto/indigo_aux_giotto.c`.
+
 ### aux_joystick
 
 Custom properties: `JOYSTICK_AXES`, `JOYSTICK_BUTTONS`, `JOYSTICK_MAPPING`, `JOYSTICK_OPTIONS`.
@@ -809,11 +919,28 @@ Driver-specific use of existing properties: `CCD_ABORT_EXPOSURE`, `CCD_EXPOSURE`
 
 Source: `indigo_drivers/aux_rts/indigo_aux_rts.c`.
 
+### aux_simulator
+
+Four independent virtual devices, all with the read-only enabled `SIMULATION` property and standard connection lifecycle. Device-specific properties are visible only while connected.
+
+- PowerBox Simulator: `AUX_POWER_OUTLET`, `AUX_POWER_OUTLET_STATE`, `AUX_POWER_OUTLET_CURRENT` (`OUTLET_1`–`OUTLET_4`); `AUX_USB_PORT`, `AUX_USB_PORT_STATE` (`PORT_1`–`PORT_4`); `AUX_HEATER_OUTLET`, `AUX_HEATER_OUTLET_STATE`, `AUX_HEATER_OUTLET_CURRENT` (`OUTLET_1`–`OUTLET_2`); `AUX_DEW_CONTROL` (`MANUAL`, `AUTOMATIC`); `AUX_INFO` (`VOLTAGE`, `CURRENT`, `POWER`); `AUX_WEATHER` (`TEMPERATURE`, `HUMIDITY`, `DEWPOINT`). State/current/sensor properties are read-only. Automatic dew control sets heaters to 35%; a manual heater change selects MANUAL.
+- Weather Station Simulator: read-only `AUX_WEATHER` (`TEMPERATURE`, `HUMIDITY`, `WIND_SPEED`, `WIND_DIRECTION`, `ATMOSPHERIC_PRESSURE`, `RAIN`, `SKY_TEMPERATURE`, `DEWPOINT`) and the aux base class condition light properties `AUX_WIND` (`STRONG`, `MODERATE`, `CALM`), `AUX_RAIN` (`RAINING`, `WET`, `DRY`), `AUX_CLOUD` (`CLEAR`, `CLOUDY`, `OVERCAST`) and `AUX_HUMIDITY` (`HUMID`, `NORMAL`, `DRY`) in the `Weather` group, where the item of the selected level is OK, the other items IDLE and the property state OK. `AUX_SKY` and `AUX_SKY_THRESHOLDS` stay hidden. Custom writable number property `X_SIMULATION_PARAMETERS` has the seven measured items of `AUX_WEATHER` (all except the derived `DEWPOINT`), using the same names, units and ranges; editing it recomputes readings and lights. The writable threshold properties drive the classifications; for wind, rain and humidity a level is selected when the reading is at least its threshold: `AUX_WIND_THRESHOLDS` [m/s] (`STRONG` 10, `MODERATE` 3, range 0–1000), `AUX_RAIN_THRESHOLDS` [mm/h] (`RAINING` 1, `WET` 0.1, range 0–1000), `AUX_HUMIDITY_THRESHOLDS` [%] (`HUMID` 90, `NORMAL` 70, range 0–200); `AUX_CLOUD_THRESHOLDS` on the sky temperature [C] works as in aux_cloudwatcher, `CLEAR` below the `CLEAR` threshold (-10), `CLOUDY` below the `CLOUDY` threshold (0), `OVERCAST` otherwise (range -200–200). `AUX_WEATHER_SAFETY` judges all four conditions as fitted and is defined only while connected. The threshold properties are inherited from the aux base class, always defined and saved by CONFIG; a threshold change while connected reclassifies the current readings at once. The PowerBox, SQM and Flat Panel Simulators keep the base class weather properties hidden.
+- SQM Simulator: read-only `AUX_WEATHER` (`SKY_BRIGHTNESS`, `SKY_TEMPERATURE`, `SKY_BORTLE_CLASS`); custom writable number property `X_SIMULATION_PARAMETERS` (`SKY_BRIGHTNESS`, `SKY_TEMPERATURE`) updates readings and the derived Bortle class.
+- Flat Panel Simulator: `AUX_LIGHT_SWITCH` (`ON`, `OFF`), `AUX_LIGHT_INTENSITY` (`LIGHT_INTENSITY`, 0–100%), `AUX_COVER` (`OPEN`, `CLOSE`, one-of-many). Cover changes report BUSY for one second, then OK; disconnect cancels unfinished movement and retains the last completed position. Turning `OPEN` off selects `CLOSE` as well as explicitly selecting `CLOSE`.
+
+Source: `indigo_drivers/aux_simulator/indigo_aux_simulator.driver`, `indigo_drivers/aux_simulator/indigo_aux_simulator.c`.
+
 ### aux_skyalert
 
-Driver-specific use of existing properties: `AUX_INFO`, `AUX_WEATHER`.
+Driver-specific use of existing properties: `AUX_INFO` (`SKY_BRIGHTNESS` [raw], `POWER`), `AUX_WEATHER` (`TEMPERATURE`, `HUMIDITY`, `ATMOSPHERIC_PRESSURE`, `WIND_SPEED` [raw], `RAIN` [raw dampness], `SKY_TEMPERATURE`), and the aux base class weather properties `AUX_HUMIDITY`, `AUX_WIND`, `AUX_RAIN`, `AUX_CLOUD`, `AUX_SKY`, `AUX_HUMIDITY_THRESHOLDS`, `AUX_WIND_THRESHOLDS`, `AUX_RAIN_THRESHOLDS`, `AUX_CLOUD_THRESHOLDS`, `AUX_SKY_THRESHOLDS` and `AUX_WEATHER_SAFETY`, all unhidden in the base class groups.
 
-Source: `indigo_drivers/aux_skyalert/indigo_aux_skyalert.c`.
+The device answers every 10 s poll with one record of raw readings; no protocol document is published. The five threshold properties are always defined and saved by CONFIG; the condition properties and `AUX_WEATHER_SAFETY` are connection-dependent. A failed or missing sensor is reported as `nan`. A sensor that has not given a valid reading since the current connection was made counts as not fitted: its condition property is IDLE with all lights IDLE, and `AUX_WEATHER_SAFETY` shows its condition IDLE and ignores it in `SAFE`. Once the sensor has given a valid reading during the connection, a later reading that is not a finite number is a failure: its condition is ALERT with all lights IDLE and its safety condition is ALERT. A record that cannot be read as a whole makes every sensor seen valid in this connection ALERT, while the sensors never seen valid stay IDLE. Every new connection starts again with the sensors that are valid in its first record. The cloud condition needs valid readings of both the sky and the ambient temperature. Until the first poll after connecting, the condition properties and `AUX_WEATHER_SAFETY` are BUSY with all lights IDLE.
+
+The classifications are made on every poll, and a threshold changed while connected reclassifies the last reading at once: `AUX_CLOUD` on the sky temperature minus the ambient temperature [C], `CLEAR` at or below the `CLEAR` threshold (-20), `CLOUDY` at or below the `CLOUDY` threshold (-10), `OVERCAST` above it, and without a valid reading of either temperature the condition is ALERT; `AUX_RAIN` on the raw dampness reading (a wetter sensor reads lower), `RAINING` at or below 800, `WET` at or below 950; `AUX_SKY` on the raw sky brightness (a brighter sky reads higher), `DARK` at or below 250, `LIGHT` at or below 750; `AUX_HUMIDITY` [%], `HUMID` at or above 90, `NORMAL` at or above 70; `AUX_WIND` on the raw wind reading, `STRONG` and `MODERATE` at or above their thresholds. The rain, sky and wind thresholds range from 0 to 1024 (10-bit ADC counts), the cloud thresholds from -200 to 200 and the humidity thresholds from 0 to 100. The raw wind reading depends on the sensor, so both wind thresholds default to 1024, beyond the 10-bit range: the wind stays `CALM` and safe until thresholds are set for the unit.
+
+`AUX_WEATHER_SAFETY` judges clouds at `OVERCAST`, rain at `RAINING`, wind at `STRONG` and humidity at `HUMID`, each only while its sensor counts as fitted. The raw rain and wind readings mean nothing to the user, so their reasons name the condition only, e.g. `Unsafe: clouds -5.0 C above -10.0 C, rain, wind, humidity 95.0 % above 90.0 %`.
+
+Source: `indigo_drivers/aux_skyalert/indigo_aux_skyalert.driver`, `indigo_drivers/aux_skyalert/indigo_aux_skyalert.c`.
 
 ### aux_sqm
 
@@ -925,6 +1052,14 @@ Driver-specific use of existing properties: `CCD_GAIN`, `CCD_GAMMA`, `CCD_IMAGE_
 
 Source: `indigo_drivers/ccd_iidc/indigo_ccd_iidc.driver`.
 
+### ccd_libcamera
+
+Driver-specific use of existing properties: `CCD_EXPOSURE`, `CCD_FRAME`, `CCD_GAIN`, `CCD_IMAGE_FORMAT`, `CCD_INFO`, `CCD_MODE`, `CCD_STREAMING`, `CCD_STREAMING_SETTINGS`.
+
+`CCD_MODE` lists the RAW sensor modes the camera reports, largest first; `CCD_BIN` and `CCD_TEMPERATURE` are hidden. `CCD_EXPOSURE`, `CCD_STREAMING` exposure and `CCD_GAIN` take their limits from the camera, and `CCD_GAIN` is hidden on cameras without analogue gain. `CCD_FRAME` is a software subframe aligned to the 2x2 Bayer cell on colour sensors.
+
+Source: `indigo_linux_drivers/ccd_libcamera/indigo_ccd_libcamera.driver`.
+
 ### ccd_mi
 
 Driver-specific use of existing properties: `CCD_COOLER`, `CCD_COOLER_POWER`, `CCD_EGAIN`, `CCD_GAIN`, `CCD_MODE`, `CCD_READ_MODE`, `CCD_TEMPERATURE`, `WHEEL_SLOT_NAME`, `WHEEL_SLOT_OFFSET`.
@@ -935,7 +1070,9 @@ Source: `indigo_drivers/ccd_mi/indigo_ccd_mi.driver`.
 
 Driver-specific use of existing properties: `DSLR_APERTURE`, `DSLR_ISO`, `DSLR_PROGRAM`, `DSLR_SHUTTER`.
 
-`DSLR_PROGRAM`, `DSLR_APERTURE` and `DSLR_SHUTTER` are read-only and report the camera settings polled every 3 s; `DSLR_ISO` is read-write.
+For K-m and K-2000, `DSLR_PROGRAM`, `DSLR_APERTURE`, `DSLR_SHUTTER` and `DSLR_ISO` accept camera settings. Other models retain read-only program/aperture/shutter monitoring and existing ISO support. Status is polled every 3 s while idle.
+
+K-m/K-2000 expose `CCD_EXPOSURE` and `CCD_ABORT_EXPOSURE` with native JPEG/PEF/DNG output through the standard DSLR image pipeline. Exposure temporarily uses manual or bulb mode and restores the original program/shutter settings. Abort closes a held bulb shutter; timed captures have no documented mechanical cancel, so their new RAM frame is discarded without publication. Existing RAM buffers and SD-card images are preserved. Streaming remains hidden. Capture on other models is hidden until their protocol layouts are verified.
 
 Source: `indigo_drivers/ccd_pentax/indigo_ccd_pentax.c`.
 
@@ -949,9 +1086,11 @@ Source: `indigo_drivers/ccd_playerone/indigo_ccd_playerone.driver`, generated `i
 
 ### ccd_ptp
 
-Driver-specific use of existing properties: `CCD_JPEG_SETTINGS`, `CCD_MODE`, `CCD_PREVIEW_IMAGE`, `CCD_STREAMING`, `CCD_UPLOAD_MODE`, `DSLR_AF`, `DSLR_DELETE_IMAGE`, `DSLR_LOCK`, `DSLR_MIRROR_LOCKUP`, `DSLR_SET_HOST_TIME`, `DSLR_ZOOM_PREVIEW`, `FOCUSER_POSITION`, `FOCUSER_SPEED`.
+Driver-specific use of existing properties: `CCD_JPEG_SETTINGS`, `CCD_MODE`, `CCD_PREVIEW`, `CCD_PREVIEW_IMAGE`, `CCD_PREVIEW_HISTOGRAM`, `CCD_STREAMING`, `CCD_UPLOAD_MODE`, `DSLR_AF`, `DSLR_DELETE_IMAGE`, `DSLR_LOCK`, `DSLR_MIRROR_LOCKUP`, `DSLR_SET_HOST_TIME`, `DSLR_ZOOM_PREVIEW`, `FOCUSER_POSITION`, `FOCUSER_SPEED`.
 
-Source: `indigo_drivers/ccd_ptp/indigo_ccd_ptp.c`.
+Both enabled preview modes publish the camera JPEG in RAW+JPEG mode. `ENABLED_WITH_HISTOGRAM` additionally publishes a JPEG histogram; main-image upload and local saving remain independent of preview selection.
+
+Source: `indigo_drivers/ccd_ptp/indigo_ccd_ptp.c`, `indigo_drivers/ccd_ptp/indigo_ptp.c`, `indigo_libs/indigo_ccd_driver.c`.
 
 ### ccd_qhy / ccd_qhy2
 
@@ -1077,11 +1216,11 @@ Source: `indigo_drivers/dome_talon6ror/indigo_dome_talon6ror.driver`.
 
 ### focuser_asi
 
-Custom properties: `EAF_BATTERY_INFO`, `EAF_BEEP_ON_MOVE`, `EAF_CUSTOM_SUFFIX`.
+Custom properties: `X_BATTERY_INFO`, `X_BEEP_ON_MOVE`, `X_CUSTOM_SUFFIX`.
 
 Driver-specific use of existing properties: `FOCUSER_BACKLASH`, `FOCUSER_COMPENSATION`, `FOCUSER_LIMITS`, `FOCUSER_MODE`, `FOCUSER_ON_POSITION_SET`, `FOCUSER_REVERSE_MOTION`, `FOCUSER_SPEED`, `FOCUSER_TEMPERATURE`.
 
-`EAF_BEEP_ON_MOVE` is saved with the standard configuration. `FOCUSER_POSITION` and `FOCUSER_STEPS` report `BUSY` during motion and complete when polling confirms the motor has stopped. A polling error reports `ALERT` and stops that polling loop; a new movement request verifies the SDK motion state first. `FOCUSER_ABORT_MOTION` resets its momentary switch on success and failure and remains `BUSY` until stop is confirmed. Confirmed `FOCUSER_LIMITS` changes update the position and step ranges. `FOCUSER_COMPENSATION` accepts the coefficient and threshold; transient temperature errors preserve the last valid compensation baseline.
+`X_BEEP_ON_MOVE` is saved with the standard configuration. `FOCUSER_POSITION` and `FOCUSER_STEPS` report `BUSY` during motion and complete when polling confirms the motor has stopped. A polling error reports `ALERT` and stops that polling loop; a new movement request verifies the SDK motion state first. `FOCUSER_ABORT_MOTION` resets its momentary switch on success and failure and remains `BUSY` until stop is confirmed. Confirmed `FOCUSER_LIMITS` changes update the position and step ranges. `FOCUSER_COMPENSATION` accepts the coefficient and threshold; transient temperature errors preserve the last valid compensation baseline.
 
 Source: `indigo_drivers/focuser_asi/indigo_focuser_asi.driver` (generates `indigo_focuser_asi.c`).
 
@@ -1092,6 +1231,8 @@ Custom properties: `X_FOCUSER_MOTOR_MODE`.
 Driver-specific use of existing properties: `FOCUSER_BACKLASH`, `FOCUSER_COMPENSATION`, `FOCUSER_LIMITS`, `FOCUSER_MODE`, `FOCUSER_ON_POSITION_SET`, `FOCUSER_REVERSE_MOTION`, `FOCUSER_SPEED`, `FOCUSER_TEMPERATURE`.
 
 `FOCUSER_LIMITS`, `FOCUSER_ON_POSITION_SET`, `FOCUSER_BACKLASH` and `FOCUSER_REVERSE_MOTION` are visible and backed by the Askar CDC protocol. `FOCUSER_SPEED`, `FOCUSER_TEMPERATURE`, `FOCUSER_COMPENSATION` and `FOCUSER_MODE` are hidden because the protocol does not expose them. `FOCUSER_POSITION` and `FOCUSER_STEPS` report `BUSY` during motion and complete when polling confirms the motor has stopped. `FOCUSER_ABORT_MOTION` sends the stop command, refreshes the current position and resets its momentary switch.
+
+`DEVICE_PORTS` lists the Wi-Fi focusers found by UDP discovery as `askar://host:port` items after the serial ports. The discovery runs once per driver, at attach of the first device and on `REFRESH` of any device, and its items are shared by all Askar-WAF devices. `DEVICE_PORTS` stays BUSY until the discovery ends and a change requested meanwhile is refused.
 
 Source: `indigo_drivers/focuser_askar/indigo_focuser_askar.driver` (generates `indigo_focuser_askar.c`).
 
@@ -1131,7 +1272,7 @@ Source: `indigo_drivers/focuser_dsd/indigo_focuser_dsd.driver`.
 
 Custom properties: `X_FOCUSER_CALIBRATION` (Celestron, momentary `CALIBRATE`), `X_FOCUSER_FANS` (PlaneWave, `OFF`/`ON`). Both are connect-scoped and selected by detected model.
 
-Driver-specific use of existing properties: `FOCUSER_POSITION`, `FOCUSER_STEPS`, `FOCUSER_ABORT_MOTION`, `FOCUSER_LIMITS`, `FOCUSER_ON_POSITION_SET`, `FOCUSER_TEMPERATURE`. Speed, reversal, backlash and automatic compensation remain hidden. PlaneWave exposes integer travel within local software limits (default 0–3799422), coordinate SYNC, fans and temperature. Both local limit endpoints are writable and update motion metadata; limits do not program undocumented hardware minimum commands. Celestron limits are read-only calibrated device values, updated after calibration; SYNC/fan/temperature are hidden. Position and steps report measured motion, with scheduled completion and abort. Temperature accepts address plus big-endian signed sixteenths or the legacy two-byte little-endian form; 7F7F/no sensor and invalid responses report ALERT without replacing the last valid value.
+Driver-specific use of existing properties: `FOCUSER_POSITION`, `FOCUSER_STEPS`, `FOCUSER_ABORT_MOTION`, `FOCUSER_LIMITS`, `FOCUSER_ON_POSITION_SET`, `FOCUSER_TEMPERATURE`. Speed, reversal, backlash and automatic compensation remain hidden. PlaneWave exposes integer travel within local software limits (default 0–3799422), coordinate SYNC, fans and temperature. Both local limit endpoints are writable and update motion metadata; limits do not program undocumented hardware minimum commands. Celestron limits are read-only calibrated device values, updated after calibration; SYNC/fan/temperature are hidden. Position and steps report measured motion, with scheduled completion and abort. Temperature accepts address plus big-endian signed sixteenths or the legacy two-byte little-endian form; 7F7F (no sensor) reports IDLE and invalid responses report ALERT, both without replacing the last valid value. PlaneWave limits that exclude the current position or arrive during motion are refused. An aborted move ends `FOCUSER_POSITION` and `FOCUSER_STEPS` ALERT at the stopped position; motion the driver did not command is published BUSY until it settles.
 
 Source: `indigo_drivers/focuser_efa/indigo_focuser_efa.driver`.
 
@@ -1179,7 +1320,7 @@ Source: `indigo_drivers/focuser_ioptron/indigo_focuser_ioptron.driver`.
 
 Driver-specific use of existing properties: `FOCUSER_POSITION`, `FOCUSER_STEPS`, `FOCUSER_ABORT_MOTION`, `FOCUSER_BACKLASH`, `FOCUSER_LIMITS`, `FOCUSER_ON_POSITION_SET`, `FOCUSER_REVERSE_MOTION`, `FOCUSER_TEMPERATURE`. Focuser controls are defined after connection. `FOCUSER_SPEED`, `FOCUSER_MODE` and `FOCUSER_COMPENSATION` remain hidden.
 
-Backlash is 0–255 integer steps. Minimum position is fixed at zero; the configurable maximum is 300–65535 for firmware v1 and 300–250000 for v2/v3. Position and relative-step ranges follow the device maximum. SYNC updates coordinates without movement. Temperature NC (99.9) reports ALERT without replacing the last valid reading. Motion completion and abort publish measured position and final state; failed setting readback preserves the last confirmed value.
+Backlash is 0–255 integer steps. Minimum position is fixed at zero; the configurable maximum is 300–65535 for firmware v1 and 300–250000 for v2/v3. Position and relative-step ranges follow the device maximum. SYNC updates coordinates without movement. Temperature NC (99.9) reports IDLE without replacing the last valid reading. An aborted move ends `FOCUSER_POSITION` and `FOCUSER_STEPS` ALERT at the stopped position; motion the driver did not command is published BUSY until it settles. Motion completion and abort publish measured position and final state; failed setting readback preserves the last confirmed value.
 
 Source: `indigo_drivers/focuser_lacerta/indigo_focuser_lacerta.driver`.
 
@@ -1203,7 +1344,7 @@ Each driver exposes seven logical devices: the Main port in the driver's own cla
 
 The motor settings are per port and are therefore published by every stepper device, qualified by class: step mode (full or half), coil current for moving and for standing still as a percentage the driver scales into the controller's 0...1023 range, motor wiring (Lunatico or RF/Moonlite, combined with `FOCUSER_REVERSE_MOTION` or `ROTATOR_DIRECTION` into one controller value) and motor type (unipolar, bipolar, DC or step-dir). `X_FOCUSER_TEMPERATURE_SENSOR` selects the internal or the external probe and exists on focuser devices only.
 
-`FOCUSER_SPEED` is a step rate in kHz that the driver sends as a microsecond range. `FOCUSER_LIMITS` and `ROTATOR_LIMITS` are the controller's software limits; a range spanning the full travel deletes them instead of writing a degenerate one. `FOCUSER_BACKLASH` and `ROTATOR_BACKLASH` are passed to the controller with each absolute move and are not applied to relative steps. Rotator angles are converted to steps against `ROTATOR_STEPS_PER_REVOLUTION` with `ROTATOR_LIMITS.MIN_POSITION` as the zero offset, and changing either of those re-syncs the controller's counter so the reported angle does not move. The powerbox outlets and GPIO sensors are addressed with horizontally flipped DB9 pins, so outlet 1 drives pin 4 and sensor 1 reads pin 8.
+`FOCUSER_SPEED` is a step rate in kHz that the driver sends as a microsecond range. `FOCUSER_LIMITS` and `ROTATOR_LIMITS` are the controller's software limits; a range spanning the full travel deletes them instead of writing a degenerate one. `FOCUSER_LIMITS` is also the range of `FOCUSER_POSITION` and `FOCUSER_STEPS`, and a change that is inverted, excludes the current position or arrives during a move is refused without a command. `FOCUSER_BACKLASH` and `ROTATOR_BACKLASH` are passed to the controller with each absolute move and are not applied to relative steps. Rotator angles are converted to steps against `ROTATOR_STEPS_PER_REVOLUTION` with `ROTATOR_LIMITS.MIN_POSITION` as the zero offset, and changing either of those re-syncs the controller's counter so the reported angle does not move. The powerbox outlets and GPIO sensors are addressed with horizontally flipped DB9 pins, so outlet 1 drives pin 4 and sensor 1 reads pin 8.
 
 Source: `indigo_drivers/focuser_lunatico/indigo_focuser_lunatico.driver`, `indigo_drivers/rotator_lunatico/indigo_rotator_lunatico.driver`, `indigo_drivers/focuser_lunatico/shared/lunatico_shared.c`.
 
@@ -1261,7 +1402,7 @@ Custom properties: `X_FOCUSER_TYPE`.
 
 Driver-specific use of existing properties: `FOCUSER_LIMITS`, `FOCUSER_ON_POSITION_SET`, `FOCUSER_REVERSE_MOTION`, `FOCUSER_SPEED`, `FOCUSER_TEMPERATURE`.
 
-`FOCUSER_LIMITS` is read-only in effect: the maximum position is reported by the controller and follows the configured device type. `FOCUSER_REVERSE_MOTION` is resolved by the driver because the FocusLynx protocol has no reverse command. `FOCUSER_SPEED` is hidden. Sync through `FOCUSER_ON_POSITION_SET` is refused for device types that must home. `FOCUSER_COMPENSATION` and `FOCUSER_MODE` are not implemented.
+`FOCUSER_LIMITS` is read-only: the maximum position is reported by the controller, follows the configured device type and is also the range of `FOCUSER_POSITION` and `FOCUSER_STEPS`. `FOCUSER_REVERSE_MOTION` is resolved by the driver because the FocusLynx protocol has no reverse command. `FOCUSER_SPEED` is hidden. Sync through `FOCUSER_ON_POSITION_SET` is refused for device types that must home. `FOCUSER_COMPENSATION` and `FOCUSER_MODE` are not implemented.
 
 The driver exposes the hub's two logical focusers as `Optec FocusLynx #1` and `Optec FocusLynx #2`. They share one serial connection, so only the first device publishes `DEVICE_PORT` and `DEVICE_PORTS`; the second one opens the hub through it. Both publish their own `X_FOCUSER_TYPE`.
 
@@ -1269,9 +1410,9 @@ Source: `indigo_drivers/focuser_optecfl/indigo_focuser_optecfl.driver`.
 
 ### focuser_primaluce
 
-Custom properties: `X_CALIBRATE`, `X_CALIBRATE_A`, `X_CONFIG`, `X_HOLD_CURR`, `X_LEDS`, `X_RUNPRESET`, `X_RUNPRESET_1`, `X_RUNPRESET_2`, `X_RUNPRESET_3`, `X_RUNPRESET_L`, `X_RUNPRESET_M`, `X_RUNPRESET_S`, `X_STATE`, `X_WIFI`, `X_WIFI_AP`, `X_WIFI_STA`.
+Custom properties: `X_CALIBRATE`, `X_CALIBRATE_A`, `X_CONFIG`, `X_HOLD_CURR`, `X_LEDS`, `X_RUNPRESET`, `X_RUNPRESET_1`, `X_RUNPRESET_2`, `X_RUNPRESET_3`, `X_RUNPRESET_L`, `X_RUNPRESET_M`, `X_RUNPRESET_S`, `X_STATE`, `X_WIFI` (OFF, AP, STA; OFF is the access point mode with the access point switched off, and a change between STA and the access point restarts the controller, which is refused while the rotator is connected), `X_WIFI_AP` (SSID of 1–32 characters, WPA2 password of 8–63; shows what the device stored, it keeps the SSID in access point mode), `X_WIFI_STA` (the network to join; SSID of at most 32 characters, password of at most 63, empty for an open network; shows what the device stored), `X_WIFI_STATUS` (read-only: IP_ADDRESS and PORT to use in an `http://` port, the address on the joined network in station mode or the access point address; CONNECTION, the network state in station mode, `access point` or `off`; IDLE while the device cannot be reached over WiFi (not joined in station mode, or WiFi off); refreshed after a mode change and with the controller state).
 
-Driver-specific use of existing properties: `FOCUSER_ABORT_MOTION`, `FOCUSER_BACKLASH`, `FOCUSER_POSITION`, `FOCUSER_SPEED`, `FOCUSER_STEPS`, `FOCUSER_TEMPERATURE`, `ROTATOR_ABORT_MOTION`, `ROTATOR_ON_POSITION_SET`, `ROTATOR_POSITION`.
+Driver-specific use of existing properties: `FOCUSER_ABORT_MOTION`, `FOCUSER_BACKLASH`, `FOCUSER_POSITION`, `FOCUSER_SPEED`, `FOCUSER_STEPS`, `FOCUSER_TEMPERATURE`, `ROTATOR_ABORT_MOTION`, `ROTATOR_ON_POSITION_SET`, `ROTATOR_POSITION`, `ROTATOR_RELATIVE_MOVE` (shown; a move by the offset from the current angle, refused outside the `ROTATOR_POSITION` range, using the absolute move on every model).
 
 Source: `indigo_drivers/focuser_primaluce/indigo_focuser_primaluce.c`.
 
@@ -1285,7 +1426,7 @@ Source: `indigo_drivers/focuser_prodigy/indigo_focuser_prodigy.driver`.
 
 ### focuser_qhy
 
-Driver-specific use of existing properties: `FOCUSER_BACKLASH` remains hidden; `FOCUSER_COMPENSATION` exposes coefficient and threshold; `FOCUSER_LIMITS` provides local 0–2,000,000-step clamping; `FOCUSER_MODE` switches between manual controls and automatic temperature compensation; `FOCUSER_ON_POSITION_SET` selects GOTO or SYNC; `FOCUSER_REVERSE_MOTION` and `FOCUSER_SPEED` configure firmware; `FOCUSER_TEMPERATURE` publishes a five-sample mean using the outside probe with chip-temperature fallback.
+Driver-specific use of existing properties: `FOCUSER_BACKLASH` remains hidden; `FOCUSER_COMPENSATION` exposes coefficient and threshold; `FOCUSER_LIMITS` provides local 0–2,000,000-step clamping and is the range of `FOCUSER_POSITION` and `FOCUSER_STEPS`, a change that excludes the current position or arrives during motion is refused; `FOCUSER_MODE` switches between manual controls and automatic temperature compensation; `FOCUSER_ON_POSITION_SET` selects GOTO or SYNC; `FOCUSER_REVERSE_MOTION` and `FOCUSER_SPEED` configure firmware; `FOCUSER_TEMPERATURE` publishes a five-sample mean using the outside probe with chip-temperature fallback.
 
 Source: `indigo_drivers/focuser_qhy/indigo_focuser_qhy.driver`.
 
@@ -1301,7 +1442,9 @@ Source: `indigo_drivers/focuser_robofocus/indigo_focuser_robofocus.driver`.
 
 Custom properties: `X_NAME`, `X_PID_SETTINGS`, `X_RESET`, `X_SAVED_VALUES`, `X_SELECT_AMB_SENSOR`, `X_SELECT_PID_SENSOR`, `X_SELECT_TC_SENSOR`, `X_START_ZEROING`, `X_STATUS`, `X_USE_AUTO_DEW`, `X_USE_ENDSTOP`, `X_USE_PID`.
 
-Driver-specific use of existing properties: `AUX_HEATER_OUTLET`, `FOCUSER_COMPENSATION`, `FOCUSER_LIMITS`, `FOCUSER_MODE`, `FOCUSER_ON_POSITION_SET`, `FOCUSER_REVERSE_MOTION`, `FOCUSER_SPEED`, `FOCUSER_TEMPERATURE`.
+Driver-specific use of existing properties: `AUX_HEATER_OUTLET`, `FOCUSER_COMPENSATION`, `FOCUSER_LIMITS`, `FOCUSER_MODE`, `FOCUSER_ON_POSITION_SET`, `FOCUSER_POSITION`, `FOCUSER_REVERSE_MOTION`, `FOCUSER_SPEED`, `FOCUSER_TEMPERATURE`.
+
+`FOCUSER_MODE` automatic is the controller's temperature compensation, which moves the focuser itself, so `FOCUSER_POSITION` is read-only there and relative moves and zeroing are refused. `FOCUSER_TEMPERATURE` is IDLE while the averaged sensors report -128 (no sensor).
 
 Source: `indigo_drivers/focuser_steeldrive2/indigo_focuser_steeldrive2.driver`.
 
@@ -1357,13 +1500,13 @@ Source: `indigo_drivers/guider_gpusb/indigo_guider_gpusb.c`.
 
 Custom properties: `X_BUZZER`, `X_MAX_SLEW_SPEED`, `X_MERIDIAN`, `X_MERIDIAN_LIMIT`, `X_MOUNT_MODE`.
 
-Driver-specific use of existing properties: `MOUNT_ALIGNMENT_RESET`, `MOUNT_GUIDE_RATE`, `MOUNT_HOME`, `MOUNT_INFO`, `MOUNT_MOTION_DEC`, `MOUNT_MOTION_RA`, `MOUNT_ON_COORDINATES_SET`, `MOUNT_PARK`, `MOUNT_SET_HOST_TIME`, `MOUNT_SIDE_OF_PIER`, `MOUNT_SLEW_RATE`, `MOUNT_TRACKING`, `MOUNT_TRACK_RATE`, `UTC_TIME`.
+Driver-specific use of existing properties: `MOUNT_ALIGNMENT_RESET`, `MOUNT_GUIDE_RATE`, `MOUNT_HOME`, `MOUNT_INFO`, `MOUNT_MOTION_DEC`, `MOUNT_MOTION_RA`, `MOUNT_ON_COORDINATES_SET`, `MOUNT_PARK`, `MOUNT_PARK_SET`, `MOUNT_SET_HOST_TIME`, `MOUNT_SIDE_OF_PIER`, `MOUNT_SLEW_RATE`, `MOUNT_TRACKING`, `MOUNT_TRACK_RATE`, `UTC_TIME`.
 
 Source: `indigo_drivers/mount_asi/indigo_mount_asi.c`.
 
 ### mount_ioptron
 
-Custom properties: `MOUNT_MERIDIAN_HANDLING`, `MOUNT_MERIDIAN_LIMIT`, `PROTOCOL_VERSION`.
+Custom properties: `X_MOUNT_MERIDIAN_HANDLING`, `X_MOUNT_MERIDIAN_LIMIT`, `X_PROTOCOL_VERSION`.
 
 Driver-specific use of existing properties: `GEOGRAPHIC_COORDINATES`, `GUIDER_GUIDE_DEC`, `GUIDER_GUIDE_RA`, `GUIDER_RATE`, `MOUNT_ABORT_MOTION`, `MOUNT_CUSTOM_TRACKING_RATE`, `MOUNT_EQUATORIAL_COORDINATES`, `MOUNT_GUIDE_RATE`, `MOUNT_HOME`, `MOUNT_INFO`, `MOUNT_MOTION_DEC`, `MOUNT_MOTION_RA`, `MOUNT_ON_COORDINATES_SET`, `MOUNT_PARK`, `MOUNT_PARK_SET`, `MOUNT_PEC`, `MOUNT_PEC_TRAINING`, `MOUNT_SET_HOST_TIME`, `MOUNT_SIDE_OF_PIER`, `MOUNT_SLEW_RATE`, `MOUNT_STATE`, `MOUNT_TRACKING`, `MOUNT_TRACK_RATE`, `UTC_TIME`.
 
@@ -1371,15 +1514,29 @@ Source: `indigo_drivers/mount_ioptron/indigo_mount_ioptron.c`.
 
 ### mount_lx200
 
-Custom properties: `X_ALTITUDE_LIMITS`, `X_AP_PARK_POSITION`, `X_AP_SYNC_MODE`, `X_MOUNT_MODE`, `X_MOUNT_TYPE`, `X_NYX_LEVELER`, `X_NYX_WIFI_AP`, `X_NYX_WIFI_CL`, `X_NYX_WIFI_RESET`, `X_ONSTEP_AUTOMATIC_MERIDIAN_FLIP`, `X_ONSTEP_MERIDIAN_LIMITS`, `X_ONSTEP_PREFERRED_PIER_SIDE`, `X_ZWO_BUZZER`.
+Custom properties: `X_ALTITUDE_LIMITS`, `X_AP_PARK_POSITION`, `X_AP_SYNC_MODE`, `X_GEMINI_PARK_POSITION`, `X_GEMINI_STARTUP`, `X_MOUNT_MODE`, `X_MOUNT_TYPE`, `X_NYX_LEVELER`, `X_NYX_WIFI_AP`, `X_NYX_WIFI_CL`, `X_NYX_WIFI_RESET`, `X_ONSTEP_AUTOMATIC_MERIDIAN_FLIP`, `X_ONSTEP_MERIDIAN_LIMITS`, `X_ONSTEP_PREFERRED_PIER_SIDE`, `X_TOUPTEK_BUZZER`, `X_TOUPTEK_MERIDIAN`, `X_ZWO_BUZZER`, `X_ZWO_MAX_SLEW_SPEED`, `X_ZWO_MERIDIAN`, `X_ZWO_MERIDIAN_LIMIT`.
 
-Driver-specific use of existing properties: `AUX_HEATER_OUTLET`, `AUX_INFO`, `AUX_POWER_OUTLET`, `AUX_WEATHER`, `FOCUSER_POSITION`, `FOCUSER_REVERSE_MOTION`, `MOUNT_GUIDE_RATE`, `MOUNT_HOME`, `MOUNT_HOME_SET`, `MOUNT_INFO`, `MOUNT_MOTION_DEC`, `MOUNT_MOTION_RA`, `MOUNT_ON_COORDINATES_SET`, `MOUNT_PARK`, `MOUNT_PARK_SET`, `MOUNT_PEC`, `MOUNT_SET_HOST_TIME`, `MOUNT_SIDE_OF_PIER`, `MOUNT_SLEW_RATE`, `MOUNT_STATE`, `MOUNT_TRACKING`, `MOUNT_TRACK_RATE`, `UTC_TIME`.
+Driver-specific use of existing properties: `AUX_HEATER_OUTLET`, `AUX_INFO`, `AUX_POWER_OUTLET`, `AUX_WEATHER`, `FOCUSER_POSITION`, `FOCUSER_REVERSE_MOTION`, `GUIDER_RATE`, `MOUNT_ALIGNMENT_RESET`, `MOUNT_GUIDE_RATE`, `MOUNT_HOME`, `MOUNT_HOME_SET`, `MOUNT_INFO`, `MOUNT_MOTION_DEC`, `MOUNT_MOTION_RA`, `MOUNT_ON_COORDINATES_SET`, `MOUNT_PARK`, `MOUNT_PARK_SET`, `MOUNT_PEC`, `MOUNT_SET_HOST_TIME`, `MOUNT_SIDE_OF_PIER`, `MOUNT_SLEW_RATE`, `MOUNT_STATE`, `MOUNT_TRACKING`, `MOUNT_TRACK_RATE`, `UTC_TIME`.
 
 `X_MOUNT_TYPE.CLASSIC` explicitly selects the original Meade LX200 Classic. It uses the documented quartz/manual tracking-frequency commands, exposes time/location and motion, and hides unsupported adjustable guide-rate, tracking-switch, park and home properties. Its guider uses host-timed `RG` plus directional `M`/`Q` commands at the fixed controller guide speed, with independent axes and replacement/zero-stop semantics. Guiding conflicts with manual motion or a driver GOTO are rejected. `GENERIC` retains its existing compatibility behavior.
 
 `X_AP_SYNC_MODE` (Astro-Physics GTO only, persistent) chooses how a sync reaches the servo controller: `RCAL` (default) recalibrates with `:CMR#` and keeps the side of the pier the controller knows, `SYNC` sends `:CM#`, which also redefines the side of the pier and is meant for the first calibration after the mount was moved through the clutches.
 
 `X_AP_PARK_POSITION` (Astro-Physics GTO only, persistent, shown when the controller has firmware park positions: every GTOCP5/6, and a GTOCP3/4 that reports them) chooses where a park ends: `CURRENT` (default) parks where the mount stands with `:KA#`, `PARK1` to `PARK5` stop the tracking and let the controller slew to that park position itself with `$K1#` to `$K5#`; `MOUNT_PARK` stays busy until `:GOS#` reports the mount parked.
+
+`X_GEMINI_STARTUP` (Losmandy Gemini, persistent, defined also while the mount is not connected) selects the startup mode the driver chooses when a Gemini that was just switched on waits for it: `COLD` (default) cold start with `bC#`, `WARM` warm start with `bW#`, `WARM_RESTART` warm restart with `bR#`. The connection waits until the controller reports it is ready.
+
+`X_GEMINI_PARK_POSITION` (Losmandy Gemini only, persistent) chooses where `MOUNT_PARK` parks: `STARTUP` (default) the counterweight-down startup position with `:hC#`, `HOME` the home position with `:hP#`, `ZENITH` the zenith with `:hZ#`, which Level 4 refuses.
+
+On a Gemini, `MOUNT_GUIDE_RATE` and the guider's `GUIDER_RATE` show and set the one guiding speed of both axes (20 % to 80 % of the sidereal rate), and `MOUNT_TRACK_RATE` is read from the mount at connect.
+
+`X_ZWO_MERIDIAN` (ZWO AM, firmware 1.2.4 and later) sets what the mount does at the meridian: `AUTO_FLIP_AT_LIMIT` flips automatically at the limit, `TRACK_PASSED_MERIDIAN` keeps tracking past the meridian up to the limit. `X_ZWO_MERIDIAN_LIMIT.LIMIT` is that limit in degrees past the meridian (−15 to 15, negative before it). Both are read from the mount at connect.
+
+`X_ZWO_MAX_SLEW_SPEED` (ZWO AM) chooses the highest slew speed: `LOW` 720 times and `HIGH` 1440 times the sidereal rate.
+
+`X_MOUNT_TYPE.TOUPTEK` selects the ToupTek SH20, which autodetection recognises from its `:GVP#` product name. `X_MOUNT_MODE` shows its equatorial or alt-az mode, read only because a change needs a restart of the mount. `MOUNT_HOME` has two items: `HOME` slews to the home position, `AWAY` is the status alone. `MOUNT_PARK` shows the park state the mount reports. `X_TOUPTEK_BUZZER` sets the buzzer volume, `OFF`, `LOW` or `HIGH`. `X_TOUPTEK_MERIDIAN` (equatorial mode only) sets what the mount does at the meridian: `AUTO_FLIP` flips automatically, `RESUME_TRACKING` resumes tracking after the flip; the mount takes no meridian offset. Both are read from the mount at connect.
+
+On a ZWO AM with firmware 1.2.4 and later, `MOUNT_ALIGNMENT_RESET` also clears the multi-star calibration of the mount with `:NSC#`. From firmware 1.1.1 the driver reads why tracking stopped and sends it as a message, for example when the mount reaches the meridian limit without an automatic flip.
 
 Source: `indigo_drivers/mount_lx200/indigo_mount_lx200.c`.
 
@@ -1391,11 +1548,11 @@ Source: `indigo_drivers/mount_mxhd/indigo_mount_mxhd.c`.
 
 ### mount_nexstar
 
-Custom properties: `COMMAND_GUIDE_RATE`, `TRACKING_MODE`.
+Custom properties: `X_COMMAND_GUIDE_RATE`, `X_TRACKING_MODE`.
 
-On Advanced VX, `COMMAND_GUIDE_RATE` retains its legacy `GUIDE_50` and `GUIDE_100` item names for client compatibility, while its displayed item labels describe the actual fixed hand-control indices 1 and 2 (manual nominal 2x and 4x sidereal). These command rates are separate from `MOUNT_GUIDE_RATE`, which configures the ST4 autoguide percentage.
+On Advanced VX, `X_COMMAND_GUIDE_RATE` retains its legacy `GUIDE_50` and `GUIDE_100` item names for client compatibility, while its displayed item labels describe the actual fixed hand-control indices 1 and 2 (manual nominal 2x and 4x sidereal). These command rates are separate from `MOUNT_GUIDE_RATE`, which configures the ST4 autoguide percentage.
 
-On SynScan V4 hand controllers, `COMMAND_GUIDE_RATE` selects fixed HC motion indices 1 and 2 (manual nominal 1x and 8x sidereal). `MOUNT_GUIDE_RATE` is hidden because SynScan serial protocol 3.3 does not define the Celestron ST4-rate read/write commands used by that property.
+On SynScan V4 hand controllers, `X_COMMAND_GUIDE_RATE` selects fixed HC motion indices 1 and 2 (manual nominal 1x and 8x sidereal). `MOUNT_GUIDE_RATE` is hidden because SynScan serial protocol 3.3 does not define the Celestron ST4-rate read/write commands used by that property.
 
 Driver-specific use of existing properties: `GEOGRAPHIC_COORDINATES`, `GUIDER_GUIDE_DEC`, `GUIDER_GUIDE_RA`, `MOUNT_ABORT_MOTION`, `MOUNT_EQUATORIAL_COORDINATES`, `MOUNT_GUIDE_RATE`, `MOUNT_MOTION_DEC`, `MOUNT_MOTION_RA`, `MOUNT_ON_COORDINATES_SET`, `MOUNT_PARK`, `MOUNT_PARK_POSITION`, `MOUNT_PARK_SET` (CURRENT reads mechanical axes from the HC and stores the inverse park-command encoding, including signed DEC), `MOUNT_SET_HOST_TIME`, `MOUNT_SIDE_OF_PIER`, `MOUNT_SLEW_RATE`, `MOUNT_TRACKING`, `MOUNT_TRACK_RATE`, `UTC_TIME`.
 
@@ -1417,7 +1574,15 @@ Source: `indigo_drivers/mount_pmc8/indigo_mount_pmc8.driver`; generated output i
 
 ### mount_rainbow
 
-Driver-specific use of existing properties: `MOUNT_GUIDE_RATE`, `MOUNT_ON_COORDINATES_SET`, `MOUNT_PARK`, `MOUNT_SET_HOST_TIME`, `UTC_TIME`.
+Custom properties: `X_RAINBOW_POWER`, `X_RAINBOW_STATUS`, `X_RAINBOW_TEMPERATURE`.
+
+Driver-specific use of existing properties: `GUIDER_GUIDE_DEC`, `GUIDER_GUIDE_RA`, `MOUNT_GUIDE_RATE`, `MOUNT_HOME`, `MOUNT_ON_COORDINATES_SET`, `MOUNT_PARK`, `MOUNT_PARK_POSITION`, `MOUNT_PARK_SET`, `MOUNT_SET_HOST_TIME`, `MOUNT_SIDE_OF_PIER`, `MOUNT_TRACK_RATE`, `UTC_TIME`.
+
+`MOUNT_PARK` slews to `MOUNT_PARK_POSITION` by its altitude and azimuth and stops tracking there; unparking starts tracking. `MOUNT_HOME` finds the mechanical origin of the mount. `MOUNT_TRACK_RATE` offers sidereal, solar and lunar, `MOUNT_GUIDE_RATE` 10 to 100 %. The guider device pulses at the guide rate.
+
+While the mount searches for home, a GOTO, sync, park and manual move are refused; while a guiding pulse runs, a GOTO, park, homing and manual move are refused (a sync is accepted); a GOTO or park refuses a manual move and homing, a manual move refuses homing. The guider refuses a pulse during a slew, a manual move, a search for home and while parked.
+
+The following are read-only and defined only on a mount that answers their queries at connect. `MOUNT_SIDE_OF_PIER` is read from the axis angles (`:CG3#`, `:CY#`). `X_RAINBOW_POWER` has the input voltage `VOLTAGE` [V] and the motor power `RA_MOTOR`, `DEC_MOTOR` [%]. `X_RAINBOW_TEMPERATURE` has the temperatures `BOARD`, `RA_MOTOR` and `DEC_MOTOR` [°C]. `X_RAINBOW_STATUS` is a light property: `TCS` (telescope control system), `RA_MOTOR` and `DEC_MOTOR` are OK, or ALERT when the mount asks for a check; `HOME`, shown when the mount reports its home sensor, is OK once home was found.
 
 Source: `indigo_drivers/mount_rainbow/indigo_mount_rainbow.c`.
 
@@ -1431,11 +1596,15 @@ Source: `indigo_drivers/mount_starbook/indigo_mount_starbook.driver`.
 
 ### mount_synscan
 
-Custom properties: `MOUNT_AUTOHOME`, `MOUNT_AUTOHOME_SETTINGS`, `MOUNT_OPERATING_MODE`, `MOUNT_USE_ENCODERS`, `POLARSCOPE`.
+Custom properties: `X_MOUNT_AUTOHOME`, `X_MOUNT_AUTOHOME_SETTINGS`, `X_MOUNT_ENCODER_POSITION`, `X_MOUNT_OPERATING_MODE`, `X_MOUNT_USE_ENCODERS`, `X_POLARSCOPE`.
 
 Driver-specific use of existing properties: `CCD_ABORT_EXPOSURE`, `CCD_EXPOSURE`, `GUIDER_GUIDE_DEC`, `GUIDER_GUIDE_RA`, `GUIDER_RATE`, `MOUNT_ABORT_MOTION`, `MOUNT_ALIGNMENT_DELETE_POINTS`, `MOUNT_ALIGNMENT_MODE`, `MOUNT_ALIGNMENT_SELECT_POINTS`, `MOUNT_EPOCH`, `MOUNT_EQUATORIAL_COORDINATES`, `MOUNT_GUIDE_RATE`, `MOUNT_HOME`, `MOUNT_HOME_POSITION`, `MOUNT_HOME_SET`, `MOUNT_MOTION_DEC`, `MOUNT_MOTION_RA`, `MOUNT_PARK`, `MOUNT_PARK_POSITION`, `MOUNT_PARK_SET`, `MOUNT_PEC`, `MOUNT_PEC_TRAINING`, `MOUNT_RAW_COORDINATES`, `MOUNT_SIDE_OF_PIER`, `MOUNT_STATE`, `MOUNT_TRACKING`, `MOUNT_TRACK_RATE`.
 
-Source: `indigo_drivers/mount_synscan/indigo_mount_synscan.c`.
+`X_MOUNT_ENCODER_POSITION` is a read-only number property in the alignment group with the items `RA` and `DEC`: the signed counts of the encoders of the axes exactly as the motor controller reports them with `:d1` and `:d2` (the 24-bit reply minus 0x800000), without scaling, zero position or conversion to angles. Their resolution depends on the mount model (an AZ-GTi counts 1068 per revolution against 2073600 motor steps), so the driver does not interpret them. The position poll reads them in every state of `X_MOUNT_USE_ENCODERS`. It is defined only when the mount reports an encoder on at least one axis, the condition that also defines `X_MOUNT_USE_ENCODERS`; an axis without an encoder shows 0, and a failed reading publishes ALERT with the last values.
+
+`X_MOUNT_USE_ENCODERS` (items `RA` and `DEC`) switches the dual encoders of the motor controller on or off (`:W..04` / `:W..05`) and nothing else: the coordinates, the side of pier and the saved park position always come from the step counters (`:j`). Switching an encoder on lets the controller correct the step counter of that axis from its encoder; an AZ-GTi re-bases the counter at once when the two disagree, which the driver publishes right away and which can shift the pointing until the next sync. The driver sends the selection when it connects, before reading the axes, so the controller and the item agree: a new driver starts with both off.
+
+Source: `indigo_drivers/mount_synscan/indigo_mount_synscan.driver`.
 
 ### mount_temma
 

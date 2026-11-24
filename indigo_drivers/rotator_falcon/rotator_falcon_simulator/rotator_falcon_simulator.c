@@ -61,6 +61,8 @@ static void usage(const char *name) {
 	printf("                          Select simulated model, default is falcon2\n");
 	printf("  --device-id <id>        Override Falcon2 device id\n");
 	printf("  --firmware <version>    Override firmware version\n");
+	printf("  --fault-direction <err|silent>\n");
+	printf("                          Refuse every FN:<n> with ERR or no reply, keeping the direction\n");
 	printf("  -h, --help              Show this help and exit\n");
 }
 
@@ -76,6 +78,8 @@ static double target = 0.0;
 static int direction = 0;
 static char id[32] = "AA000000";
 static char fw[32] = "1.5";
+static const char *direction_fault = NULL;
+static bool stalled;
 
 static void signal_handler(int sig) {
 	(void)sig;
@@ -90,7 +94,9 @@ static void *background(void *arg) {
 	(void)arg;
 	while (running) {
 		pthread_mutex_lock(&state_mutex);
-		if (fabs(target - position) <= 0.01) {
+		if (stalled) {
+			// Keep the motor active until an explicit halt.
+		} else if (fabs(target - position) <= 0.01) {
 			position = target;
 		} else if (target < position) {
 			position -= 0.01;
@@ -140,6 +146,14 @@ static bool parse_args(int argc, char *argv[]) {
 				return false;
 			}
 			snprintf(id, sizeof(id), "%s", argv[i]);
+		} else if (!strcmp(argv[i], "--stalled")) {
+			stalled = true;
+		} else if (!strcmp(argv[i], "--fault-direction")) {
+			if (++i == argc || (strcmp(argv[i], "err") && strcmp(argv[i], "silent"))) {
+				fprintf(stderr, "--fault-direction requires err or silent\n");
+				return false;
+			}
+			direction_fault = argv[i];
 		} else if (!strcmp(argv[i], "--firmware")) {
 			if (++i == argc) {
 				fprintf(stderr, "--firmware requires a value\n");
@@ -263,6 +277,10 @@ static void dispatch_command(int fd, const char *command) {
 		sim_printf(fd, "FV:%s\n", fw);
 	} else if (!strcmp(command, "DR:0")) {
 		sim_printf(fd, "DR:0\n");
+	} else if (!strncmp(command, "FN:", 3) && direction_fault != NULL) {
+		if (!strcmp(direction_fault, "err")) {
+			sim_printf(fd, "ERR\n");
+		}
 	} else if (!strncmp(command, "FN:", 3)) {
 		pthread_mutex_lock(&state_mutex);
 		direction = atoi(command + 3);

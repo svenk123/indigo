@@ -32,7 +32,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x0300000B
+#define DRIVER_VERSION       0x0300000E
 #define DRIVER_NAME          "indigo_aux_flatmaster"
 #define DRIVER_LABEL         "PegasusAstro FlatMaster"
 #define AUX_DEVICE_NAME      "PegasusAstro FlatMaster"
@@ -40,7 +40,9 @@
 
 //+ define
 
-#define INTENSITY(val)       ((int)floor((100 - (int)(val) - 0) * (220 - 20) / (100 - 0) + 20))
+// L takes 20 (brightest) to the lowest brightness value; firmware 2.1 and later documents 255,
+// older firmware is driven with 220 as before. The mapping is the vendor's Math.Floor formula.
+#define INTENSITY(val)       ((int)floor((100 - (int)(val) - 0) * (PRIVATE_DATA->lowest - 20) / (100 - 0) + 20))
 
 //- define
 
@@ -61,6 +63,7 @@ typedef struct {
 	indigo_property *aux_light_intensity_property;
 	//+ data
 	char response[12];
+	int lowest;
 	//- data
 } flatmaster_private_data;
 
@@ -82,13 +85,18 @@ static bool flatmaster_command(indigo_device *device, char *command, ...) {
 	return result > 0;
 }
 
-static bool flatmaster_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG);
+static bool flatmaster_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial2(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG, error_message);
 	if (PRIVATE_DATA->handle != NULL) {
 		if (flatmaster_command(device, "#") && !strcmp("OK_FM", PRIVATE_DATA->response)) {
 			if (flatmaster_command(device, "V")) {
+				// Firmware 2.1 and later answer "V:2.x".
+				char *version = strncmp(PRIVATE_DATA->response, "V:", 2) ? PRIVATE_DATA->response : PRIVATE_DATA->response + 2;
+				int major = 0, minor = 0;
+				sscanf(version, "%d.%d", &major, &minor);
+				PRIVATE_DATA->lowest = major > 2 || (major == 2 && minor >= 1) ? 255 : 220;
 				INDIGO_COPY_VALUE(INFO_DEVICE_MODEL_ITEM->text.value, DRIVER_LABEL);
-				INDIGO_COPY_VALUE(INFO_DEVICE_FW_REVISION_ITEM->text.value, PRIVATE_DATA->response);
+				INDIGO_COPY_VALUE(INFO_DEVICE_FW_REVISION_ITEM->text.value, version);
 				indigo_update_property(device, INFO_PROPERTY, NULL);
 				return true;
 			}
@@ -113,7 +121,8 @@ static void flatmaster_close(indigo_device *device) {
 static void aux_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = flatmaster_open(device);
+		const char *error_message = NULL;
+		connection_result = flatmaster_open(device, &error_message);
 		if (connection_result) {
 			//+ aux.on_connect
 			/* FlatMaster does not report intensity and ON/OFF state, so we set it to be consistent */
@@ -135,7 +144,11 @@ static void aux_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -293,10 +306,14 @@ indigo_result indigo_aux_flatmaster(indigo_driver_action action, indigo_driver_i
 	switch (action) {
 		case INDIGO_DRIVER_INIT: {
 			last_action = action;
-			static indigo_device_match_pattern patterns[1] = { 0 };
-			patterns[0].vendor_id = 0x0403;
-			patterns[0].product_id = 0x6015;
-			INDIGO_REGISER_MATCH_PATTERNS(aux_template, patterns, 1);
+			static indigo_device_match_pattern patterns[3] = { 0 };
+			patterns[0].vendor_id = 0x303a;
+			patterns[0].product_id = 0x9008;
+			patterns[1].vendor_id = 0x303a;
+			patterns[1].product_id = 0x9009;
+			patterns[2].vendor_id = 0x0403;
+			patterns[2].product_id = 0x6015;
+			INDIGO_REGISER_MATCH_PATTERNS(aux_template, patterns, 3);
 			private_data = (flatmaster_private_data *)indigo_safe_malloc(sizeof(flatmaster_private_data));
 			aux = (indigo_device *)indigo_safe_malloc_copy(sizeof(indigo_device), &aux_template);
 			aux->private_data = private_data;

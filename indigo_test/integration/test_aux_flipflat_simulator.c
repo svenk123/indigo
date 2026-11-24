@@ -63,8 +63,8 @@ static bool set_intensity(double percent) {
 
 // -------------------------------------------------------------------------------- model gating
 
-// The default simulator reports a Flip-Flap, which has both a cover and a light.
-static void flip_flap_exposes_cover_light_and_intensity(void) {
+// The default simulator reports a Flip-Flat (id 99), which has both a cover and a light.
+static void flip_flat_exposes_cover_light_and_intensity(void) {
 	external_serial_simulator simulator = { 0 };
 	bool online = false;
 	SERIAL_CHECK_TRUE(start_flipflat(&simulator, NULL));
@@ -84,7 +84,8 @@ static void flip_flap_exposes_cover_light_and_intensity(void) {
 	assert_property_has_item(AUX_LIGHT_SWITCH_PROPERTY_NAME, AUX_LIGHT_SWITCH_OFF_ITEM_NAME);
 	assert_property_has_item(AUX_LIGHT_INTENSITY_PROPERTY_NAME, AUX_LIGHT_INTENSITY_ITEM_NAME);
 	printf("Model '%s' firmware '%s'\n", info_text(INFO_DEVICE_MODEL_ITEM_NAME), info_text(INFO_DEVICE_FW_REVISION_ITEM_NAME));
-	SERIAL_CHECK_TRUE(!strcmp(info_text(INFO_DEVICE_MODEL_ITEM_NAME), "Flip-Flap"));
+	// 3.0.0.10 published the misspelt "Flip-Flap".
+	SERIAL_CHECK_TRUE(!strcmp(info_text(INFO_DEVICE_MODEL_ITEM_NAME), "Flip-Flat"));
 cleanup:
 	if (online) { stop_serial_driver(&flipflat); }
 	stop_external_serial_simulator(&simulator);
@@ -117,6 +118,116 @@ static void dust_cover_hides_the_light(void) {
 	assert_not_defined_property(AUX_LIGHT_SWITCH_PROPERTY_NAME);
 	assert_not_defined_property(AUX_LIGHT_INTENSITY_PROPERTY_NAME);
 	SERIAL_CHECK_TRUE(!strcmp(info_text(INFO_DEVICE_MODEL_ITEM_NAME), "Flip-Mask/Remote Dust Cover"));
+cleanup:
+	if (online) { stop_serial_driver(&flipflat); }
+	stop_external_serial_simulator(&simulator);
+}
+
+// A dust cover has no light, and the status that tells whether its cover is open has to be read at
+// connect all the same; 3.0.0.10 read it only when the light was published.
+static void dust_cover_state_is_read_at_connect(void) {
+	external_serial_simulator simulator = { 0 };
+	bool online = false;
+	const char *arguments[] = { "--device-id", "98", "--cover", "2", NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, AUX_FLIPFLAT_SIMULATOR_EXECUTABLE, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&flipflat, simulator.port));
+	online = true;
+	SERIAL_CHECK_TRUE(find_cached_property(AUX_COVER_PROPERTY_NAME)->state == INDIGO_OK_STATE);
+	assert_switch_item_value(AUX_COVER_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, true);
+cleanup:
+	if (online) { stop_serial_driver(&flipflat); }
+	stop_external_serial_simulator(&simulator);
+}
+
+// A cover that takes longer than 10 s still ends OK; the driver waits 30 s, as the INDI driver does.
+// 3.0.0.10 gave up after 10 s and ended ALERT.
+static void a_slow_cover_is_waited_for(void) {
+	external_serial_simulator simulator = { 0 };
+	bool online = false;
+	const char *arguments[] = { "--cover-time", "12000", NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, AUX_FLIPFLAT_SIMULATOR_EXECUTABLE, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&flipflat, simulator.port));
+	online = true;
+	SERIAL_CHECK_TRUE(switch_on(AUX_COVER_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_COVER_PROPERTY_NAME, INDIGO_BUSY_STATE));
+	for (int i = 0; i < 200 && find_cached_property(AUX_COVER_PROPERTY_NAME)->state == INDIGO_BUSY_STATE; i++) {
+		indigo_usleep(100000);
+	}
+	SERIAL_CHECK_EQ_INT(INDIGO_OK_STATE, find_cached_property(AUX_COVER_PROPERTY_NAME)->state);
+cleanup:
+	if (online) { stop_serial_driver(&flipflat); }
+	stop_external_serial_simulator(&simulator);
+}
+
+// The cover is polled by a finalizer, so the device queue serves other requests while it moves.
+static void light_is_served_while_the_cover_moves(void) {
+	external_serial_simulator simulator = { 0 };
+	bool online = false;
+	const char *arguments[] = { "--cover-time", "8000", NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, AUX_FLIPFLAT_SIMULATOR_EXECUTABLE, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&flipflat, simulator.port));
+	online = true;
+	SERIAL_CHECK_TRUE(switch_on(AUX_COVER_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_COVER_PROPERTY_NAME, INDIGO_BUSY_STATE));
+	unsigned int revision = property_revision(AUX_LIGHT_SWITCH_PROPERTY_NAME);
+	double start = indigo_monotonic_time();
+	SERIAL_CHECK_TRUE(switch_on(AUX_LIGHT_SWITCH_PROPERTY_NAME, AUX_LIGHT_SWITCH_ON_ITEM_NAME));
+	SERIAL_CHECK_TRUE(wait_for_property_state_after(AUX_LIGHT_SWITCH_PROPERTY_NAME, INDIGO_OK_STATE, revision));
+	double elapsed = indigo_monotonic_time() - start;
+	printf("Light served %.2f s into the cover motion\n", elapsed);
+	SERIAL_CHECK_TRUE(elapsed < 3);
+	SERIAL_CHECK_EQ_INT(INDIGO_BUSY_STATE, find_cached_property(AUX_COVER_PROPERTY_NAME)->state);
+	for (int i = 0; i < 150 && find_cached_property(AUX_COVER_PROPERTY_NAME)->state == INDIGO_BUSY_STATE; i++) {
+		indigo_usleep(100000);
+	}
+	SERIAL_CHECK_EQ_INT(INDIGO_OK_STATE, find_cached_property(AUX_COVER_PROPERTY_NAME)->state);
+	assert_switch_item_value(AUX_COVER_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME, true);
+cleanup:
+	if (online) { stop_serial_driver(&flipflat); }
+	stop_external_serial_simulator(&simulator);
+}
+
+// A disconnect requested while the cover moves is served at once, and the next session starts idle.
+static void disconnect_while_the_cover_moves_is_prompt(void) {
+	external_serial_simulator simulator = { 0 };
+	bool online = false;
+	const char *arguments[] = { "--cover-time", "20000", NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, AUX_FLIPFLAT_SIMULATOR_EXECUTABLE, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&flipflat, simulator.port));
+	online = true;
+	SERIAL_CHECK_TRUE(switch_on(AUX_COVER_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_COVER_PROPERTY_NAME, INDIGO_BUSY_STATE));
+	double start = indigo_monotonic_time();
+	disconnect_serial_device(&flipflat);
+	double elapsed = indigo_monotonic_time() - start;
+	printf("Disconnected %.2f s into the cover motion\n", elapsed);
+	SERIAL_CHECK_TRUE(!context.connected);
+	SERIAL_CHECK_TRUE(elapsed < 3);
+	SERIAL_CHECK_TRUE(connect_serial_device(&flipflat, simulator.port));
+	SERIAL_CHECK_TRUE(find_cached_property(AUX_COVER_PROPERTY_NAME)->state != INDIGO_BUSY_STATE);
+cleanup:
+	if (online) { stop_serial_driver(&flipflat); }
+	stop_external_serial_simulator(&simulator);
+}
+
+// A cover that never reports its end position ends ALERT at the 30 s deadline.
+static void a_stuck_cover_times_out(void) {
+	external_serial_simulator simulator = { 0 };
+	bool online = false;
+	const char *arguments[] = { "--cover-time", "60000", NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, AUX_FLIPFLAT_SIMULATOR_EXECUTABLE, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&flipflat, simulator.port));
+	online = true;
+	double start = indigo_monotonic_time();
+	SERIAL_CHECK_TRUE(switch_on(AUX_COVER_PROPERTY_NAME, AUX_COVER_OPEN_ITEM_NAME));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_COVER_PROPERTY_NAME, INDIGO_BUSY_STATE));
+	for (int i = 0; i < 400 && find_cached_property(AUX_COVER_PROPERTY_NAME)->state == INDIGO_BUSY_STATE; i++) {
+		indigo_usleep(100000);
+	}
+	double elapsed = indigo_monotonic_time() - start;
+	printf("Cover gave up after %.2f s\n", elapsed);
+	SERIAL_CHECK_EQ_INT(INDIGO_ALERT_STATE, find_cached_property(AUX_COVER_PROPERTY_NAME)->state);
+	SERIAL_CHECK_TRUE(elapsed > 29 && elapsed < 34);
 cleanup:
 	if (online) { stop_serial_driver(&flipflat); }
 	stop_external_serial_simulator(&simulator);
@@ -270,14 +381,34 @@ cleanup:
 	tear_down_serial_driver(&flipflat);
 }
 
+static void foreign_acknowledgements_are_rejected(void) {
+	external_serial_simulator simulator = { 0 };
+	const char *arguments[] = { "--foreign-ack", NULL };
+	SERIAL_CHECK_TRUE(start_external_serial_simulator_with_args(&simulator, AUX_FLIPFLAT_SIMULATOR_EXECUTABLE, arguments));
+	SERIAL_CHECK_TRUE(start_serial_driver(&flipflat, simulator.port));
+	SERIAL_CHECK_TRUE(switch_on(AUX_LIGHT_SWITCH_PROPERTY_NAME, AUX_LIGHT_SWITCH_ON_ITEM_NAME));
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_LIGHT_SWITCH_PROPERTY_NAME, INDIGO_ALERT_STATE));
+	SERIAL_CHECK_TRUE(indigo_change_number_property_1(&simulator_test_client, flipflat.device_name, AUX_LIGHT_INTENSITY_PROPERTY_NAME, AUX_LIGHT_INTENSITY_ITEM_NAME, 25) == INDIGO_OK);
+	SERIAL_CHECK_TRUE(wait_for_property_state(AUX_LIGHT_INTENSITY_PROPERTY_NAME, INDIGO_ALERT_STATE));
+cleanup:
+	stop_serial_driver(&flipflat);
+	stop_external_serial_simulator(&simulator);
+}
+
 int main(void) {
 	const indigo_test_case tests[] = {
-		{ "flip_flap_exposes_cover_light_and_intensity", flip_flap_exposes_cover_light_and_intensity },
+		{ "foreign_acknowledgements_are_rejected", foreign_acknowledgements_are_rejected },
+		{ "flip_flat_exposes_cover_light_and_intensity", flip_flat_exposes_cover_light_and_intensity },
 		{ "flat_man_hides_the_cover", flat_man_hides_the_cover },
 		{ "dust_cover_hides_the_light", dust_cover_hides_the_light },
+		{ "dust_cover_state_is_read_at_connect", dust_cover_state_is_read_at_connect },
+		{ "a_slow_cover_is_waited_for", a_slow_cover_is_waited_for },
 		{ "unknown_model_exposes_every_control", unknown_model_exposes_every_control },
 		{ "flat_man_xl_and_l_are_recognised", flat_man_xl_and_l_are_recognised },
 		{ "cover_opens_and_closes", cover_opens_and_closes },
+		{ "light_is_served_while_the_cover_moves", light_is_served_while_the_cover_moves },
+		{ "disconnect_while_the_cover_moves_is_prompt", disconnect_while_the_cover_moves_is_prompt },
+		{ "a_stuck_cover_times_out", a_stuck_cover_times_out },
 		{ "light_switches_on_and_off", light_switches_on_and_off },
 		{ "intensity_round_trips_through_the_device_scale", intensity_round_trips_through_the_device_scale },
 		{ "connect_reads_back_the_device_state", connect_reads_back_the_device_state },

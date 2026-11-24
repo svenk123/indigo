@@ -6,10 +6,9 @@ Author: **Rumen G. Bogdanovski**
 e-mail: *rumenastro@gmail.com*
 
 ## The INDIGO server: **indigo_server**
-This is the help message of the indigo_server:
-```
-rumen@sirius:~ $ indigo_server -h
-INDIGO server v.2.0-141 built on Jan 11 2021 01:06:15.
+Run `indigo_server -h` for the help provided by your installed build. The option list below reflects [the current server source](../indigo_server/indigo_server.c), including conditional options. The version, platform and build timestamp banner is omitted.
+
+```text
 usage: indigo_server [-h | --help]
        indigo_server [options] indigo_driver_name indigo_driver_name ...
 options:
@@ -17,22 +16,27 @@ options:
        -l  | --use-syslog
        -p  | --port port                     (default: 7624)
        -b  | --bonjour name                  (default: hostname)
-       -T  | --master-token token            (master token for devce access default: 0 = none)
+       -T  | --master-token token            (master token for device access default: 0 = none)
        -a  | --acl-file file
        -b- | --disable-bonjour
        -u- | --disable-blob-urls
+       -d- | --disable-blob-buffering
+       -C  | --enable-blob-compression
        -w- | --disable-web-apps
        -c- | --disable-control-panel
+       -f  | --enable-rpi-management
        -v  | --enable-info
        -vv | --enable-debug
+       -vvb| --enable-trace-bus
        -vvv| --enable-trace
        -r  | --remote-server host[:port]     (default port: 7624)
        -x  | --enable-blob-proxy
        -i  | --indi-driver driver_executable
-rumen@sirius:~ $
 ```
 
-The **indigo_server** is highly configurable trough command line options at start and also when already started:
+The options `--`, `-l`, `-w-`, `-c-` and `-i` are available on Linux and macOS. The `-f` option additionally requires a build with `RPI_MANAGEMENT` enabled.
+
+The **indigo_server** is highly configurable through command line options at start and also when already started:
 
 ### -- | --do-not-fork
 By default **indigo_server** will start a child process called **indigo_worker**, and the drivers will be run in the boundaries of this process. This is done for a reason, if a single driver crashes this will crash **indigo_worker** process indigo server will detect it and start **indigo_worker** again. This switch prevents this behavior and if a driver fails the whole server will crash without an attempt to recover. This is is used for faulty driver debugging.
@@ -66,17 +70,29 @@ Do not announce the service with Bonjour. The client should enter host and port 
 ### -u- | --disable-blob-urls
 INDIGO provides 2 ways of BLOB (image) transfer. One is the legacy INDI style where the image is base64 encoded and sent to the client in plain text and the client decodes the data on its end. This makes the data volume approx. 30% larger and the encoding and decoding is CPU intensive. The second INDIGO style is to use binary image transfer over HTTP protocol avoiding encoding, decoding and data size overhead. By default the client can request any type of BLOB transfer. With this switch you can force the server to accept only legacy INDI style blob transfer.
 
+### -d- | --disable-blob-buffering
+Disable optional HTTP BLOB buffering features, including gzip compression. Downloads always use a private snapshot so a slow client does not retain a cache lock or access a retired property. This switch no longer removes that safety copy.
+
+### -C | --enable-blob-compression
+Enable gzip compression for HTTP BLOB downloads when the client accepts gzip. Compression requires BLOB buffering and is disabled by default; JPEG BLOBs are not compressed.
+
 ### -w- | --disable-web-apps
 This switch will disable INDIGO web applications like *Imager*, *Telescope control* etc.
 
 ### -c- | --disable-control-panel
 This switch will disable the web based control panel.
 
+### -f | --enable-rpi-management
+Enable Raspberry Pi management in builds compiled with `RPI_MANAGEMENT`. The server requires `s_rpi_ctrl.sh` to be available on its executable search path.
+
 ### -v | --enable-info
 Shows some information messages in the log.
 
 ### -vv | --enable-debug
 Shows more verbose messages. Useful for debugging and troubleshooting.
+
+### -vvb | --enable-trace-bus
+Trace INDIGO bus messages in addition to debug messages.
 
 ### -vvv | --enable-trace
 Shows a lot of messages, like low level driver-device communication and full INDIGO protocol chatter.
@@ -222,7 +238,9 @@ However, many devices will not report their specific information but instead pro
 ```
 In this case the device can not be identified as the information is too generic.
 
-For devices that can be identified, a new auto-selection algorithm has been introduced. This algorithm allows drivers to automatically select the appropriate port when it is prefixed with *auto://*. For example (see the list above), in the *indigo_gps_nmea* driver, if the selected port is *auto:///dev/ttyACM1* (which is an Arduino and not a GPS), issuing a *Rescan* will change the selected device to *auto:///dev/ttyACM0* (which is a GPS device). However, if the selected port is */dev/ttyACM1* (without the *auto://* prefix), it will not change upon *Rescan*, preserving the old behavior.
+For devices that can be identified, a new auto-selection algorithm has been introduced. This algorithm allows drivers to automatically select the appropriate port when it is prefixed with *auto://*. For example (see the list above), in the *indigo_gps_nmea* driver, if the selected port is *auto:///dev/ttyACM1* (which is an Arduino and not a GPS), issuing a *Rescan* will change the selected device to *auto:///dev/ttyACM0* (which is a GPS device). However, if the selected port is */dev/ttyACM1* (without the *auto://* prefix), it will not change upon *Rescan*, preserving the old behavior. The auto-selection skips ports already opened or being opened by another driver, so two identical devices, e.g. two focusers of the same type, are assigned different ports: when one connects, the other one moves to the next matching port.
+
+The *Serial Ports* list is updated automatically within a few seconds when a USB to serial device is plugged in or removed, and a disconnected driver with an *auto://* port selects its device again at that moment, so a *Rescan* is only needed for ports without a USB connection, such as Bluetooth serial ports on MacOS or a link created in /dev by hand. On Linux, Bluetooth (rfcomm) and virtual (pseudo-terminal) serial ports are not listed; type their path into the port field. The port of a connected driver is never changed: when its USB to serial device is removed, the driver disconnects within a few seconds and its connection shows the alert state with "Connection to <port> lost"; connect it again once the device is back.
 
 Not all identifiable devices are auto-selected because we do not have a comprehensive list of these devices. To help us complete this list and make your devices auto-selectable, we have created a helper program called *indigo_list_usbserial*. Please run this program and send us the output. This will enable us to determine if and how we can match your devices, and update corresponding drivers.
 

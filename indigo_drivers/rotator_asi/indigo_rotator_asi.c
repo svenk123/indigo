@@ -28,6 +28,7 @@
 //+ include
 
 #include <stdbool.h>
+#include <float.h>
 #include <CAA_API.h>
 
 //- include
@@ -41,7 +42,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000008
+#define DRIVER_VERSION       0x0300000B
 #define DRIVER_NAME          "indigo_rotator_asi"
 #define DRIVER_LABEL         "ZWO CAA Rotator"
 #define ROTATOR_DEVICE_NAME  "%s"
@@ -52,6 +53,8 @@
 
 #define ASI_VENDOR_ID        0x03c3
 #define NO_DEVICE            (-1000)
+// ZWO CAA documented angular resolution: 0.02 degrees per motor step.
+#define CAA_POSITION_RESOLUTION 0.02f
 
 //- define
 
@@ -81,7 +84,9 @@ typedef struct {
 	int dev_id;
 	bool sdk_open;
 	bool moving;
+	bool commanded_move;
 	bool abort_pending;
+	bool aborted_move;
 	CAA_INFO info;
 	char model[64];
 	char custom_suffix[9];
@@ -173,7 +178,8 @@ static void asi_close(indigo_device *device) {
 	}
 	PRIVATE_DATA->sdk_open = false;
 	PRIVATE_DATA->moving = false;
-	PRIVATE_DATA->abort_pending = false;
+	PRIVATE_DATA->commanded_move = false;
+	PRIVATE_DATA->abort_pending = PRIVATE_DATA->aborted_move = false;
 }
 
 //- code
@@ -199,6 +205,12 @@ static bool rotator_read_position(indigo_device *device) {
 	return true;
 }
 
+static bool rotator_target_reached(indigo_device *device) {
+	float difference = fabsf(PRIVATE_DATA->current_position - PRIVATE_DATA->target_position);
+	float rounding = FLT_EPSILON * fmaxf(fabsf(PRIVATE_DATA->current_position), fabsf(PRIVATE_DATA->target_position));
+	return difference <= CAA_POSITION_RESOLUTION + rounding;
+}
+
 static void rotator_move_finalizer(indigo_device *device);
 
 static bool rotator_motion_ready(indigo_device *device) {
@@ -217,6 +229,7 @@ static bool rotator_motion_ready(indigo_device *device) {
 		indigo_execute_handler_in(device, 0.5, rotator_move_finalizer);
 		return false;
 	}
+	PRIVATE_DATA->commanded_move = false;
 	return true;
 }
 
@@ -238,17 +251,28 @@ static void rotator_move_finalizer(indigo_device *device) {
 		return;
 	}
 	PRIVATE_DATA->moving = moving || hand_control;
-	rotator_update_motion(device, PRIVATE_DATA->moving ? INDIGO_BUSY_STATE : INDIGO_OK_STATE, NULL);
+	if (PRIVATE_DATA->moving) {
+		rotator_update_motion(device, INDIGO_BUSY_STATE, NULL);
+	} else if (PRIVATE_DATA->aborted_move) {
+		// an aborted move ends ALERT where it stopped, never OK
+		PRIVATE_DATA->aborted_move = false;
+		rotator_update_motion(device, INDIGO_ALERT_STATE, "Rotator motion aborted");
+	} else if (PRIVATE_DATA->commanded_move && !rotator_target_reached(device)) {
+		rotator_update_motion(device, INDIGO_ALERT_STATE, "Rotator stopped before reaching target");
+	} else {
+		// confirmed arrival or external motion is OK; idle abort preserves the last state
+		rotator_update_motion(device, ROTATOR_POSITION_PROPERTY->state == INDIGO_BUSY_STATE ? INDIGO_OK_STATE : ROTATOR_POSITION_PROPERTY->state, NULL);
+	}
+	if (!PRIVATE_DATA->moving) {
+		PRIVATE_DATA->commanded_move = false;
+	}
 	if (PRIVATE_DATA->abort_pending) {
 		if (hand_control) {
 			PRIVATE_DATA->abort_pending = false;
 			ROTATOR_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
 		} else if (!moving) {
 			PRIVATE_DATA->abort_pending = false;
-			PRIVATE_DATA->target_position = PRIVATE_DATA->current_position;
-			ROTATOR_POSITION_ITEM->number.target = PRIVATE_DATA->current_position;
 			ROTATOR_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
-			indigo_update_property(device, ROTATOR_POSITION_PROPERTY, NULL);
 		}
 		indigo_update_property(device, ROTATOR_ABORT_MOTION_PROPERTY, hand_control ? "Release the hand controller to stop motion" : NULL);
 	}
@@ -270,12 +294,15 @@ static void rotator_start_move(indigo_device *device, double target) {
 	int res = CAAMoveTo(PRIVATE_DATA->dev_id, (float)target);
 	if (res != CAA_SUCCESS) {
 		INDIGO_DRIVER_ERROR(DRIVER_NAME, "CAAMoveTo(%d, %f) = %d", PRIVATE_DATA->dev_id, target, res);
+		PRIVATE_DATA->commanded_move = false;
 		rotator_update_motion(device, INDIGO_ALERT_STATE, "Failed to start motion");
 		return;
 	}
+	PRIVATE_DATA->commanded_move = true;
 	PRIVATE_DATA->target_position = (float)target;
 	ROTATOR_POSITION_ITEM->number.target = target;
 	PRIVATE_DATA->moving = true;
+	PRIVATE_DATA->aborted_move = false;
 	rotator_update_motion(device, INDIGO_BUSY_STATE, NULL);
 	indigo_execute_handler_in(device, 0.5, rotator_move_finalizer);
 }
@@ -314,7 +341,8 @@ static void rotator_connection_handler(indigo_device *device) {
 			}
 			if (connection_result) {
 				PRIVATE_DATA->moving = false;
-				PRIVATE_DATA->abort_pending = false;
+				PRIVATE_DATA->commanded_move = false;
+				PRIVATE_DATA->abort_pending = PRIVATE_DATA->aborted_move = false;
 				ROTATOR_ABORT_MOTION_ITEM->sw.value = false;
 				ROTATOR_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
 				PRIVATE_DATA->min_position = 0;
@@ -409,6 +437,7 @@ static void rotator_position_handler(indigo_device *device) {
 			INDIGO_DRIVER_ERROR(DRIVER_NAME, "CAACurDegree(%d, %f) = %d", PRIVATE_DATA->dev_id, target, res);
 			rotator_update_motion(device, INDIGO_ALERT_STATE, "Failed to sync position");
 		} else {
+			PRIVATE_DATA->commanded_move = false;
 			PRIVATE_DATA->target_position = PRIVATE_DATA->current_position;
 			ROTATOR_POSITION_ITEM->number.target = PRIVATE_DATA->current_position;
 			rotator_update_motion(device, INDIGO_OK_STATE, NULL);
@@ -457,6 +486,8 @@ static void rotator_relative_move_handler(indigo_device *device) {
 
 static void rotator_abort_motion_handler(indigo_device *device) {
 	//+ rotator.ROTATOR_ABORT_MOTION.on_change
+	// a running move, or one still queued, ends ALERT; an abort while idle leaves the position OK
+	PRIVATE_DATA->aborted_move = PRIVATE_DATA->moving || ROTATOR_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || ROTATOR_RELATIVE_MOVE_PROPERTY->state == INDIGO_BUSY_STATE;
 	indigo_cancel_pending_handler(device, rotator_position_handler);
 	indigo_cancel_pending_handler(device, rotator_relative_move_handler);
 	ROTATOR_ABORT_MOTION_ITEM->sw.value = false;

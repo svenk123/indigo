@@ -88,7 +88,7 @@ typedef enum {
 	ptp_property_sony_AFTrackingSensitivity = 0xD255,
 	ptp_property_sony_D256 = 0xD256,
 	ptp_property_sony_D259 = 0xD259,
-	ptp_property_sony_D25A = 0xD25A,
+	ptp_property_sony_PriorityMode = 0xD25A,
 	ptp_property_sony_D25B = 0xD25B,
 	ptp_property_sony_ZoomSetting = 0xD25F,
 	ptp_property_sony_D260 = 0xD260,
@@ -146,6 +146,13 @@ typedef struct {
 	uint64_t shutter_speed;
 	bool is_dual_compression;
 	unsigned downloaded_objects;
+	int shot_retries;
+	double shot_deadline;
+	double liveview_deadline;
+	int stale_objects;
+	double stale_until;
+	int64_t spent_memory;
+	double spent_at;
 	int steps;
 	uint32_t api_version;
 	bool needs_pre_capture_delay;
@@ -159,9 +166,11 @@ extern char *ptp_property_sony_code_name(uint16_t code);
 extern char *ptp_property_sony_code_label(uint16_t code);
 extern char *ptp_property_sony_value_code_label(indigo_device *device, uint16_t property, uint64_t code);
 
+extern uint8_t *ptp_sony_decode_property(uint8_t *source, uint8_t *end, indigo_device *device);
 extern bool ptp_sony_initialise(indigo_device *device);
 extern bool ptp_sony_handle_event(indigo_device *device, ptp_event_code code, uint32_t *params);
 extern bool ptp_sony_set_property(indigo_device *device, ptp_property *property);
+extern bool ptp_sony_refresh_properties(indigo_device *device);
 extern bool ptp_sony_exposure(indigo_device *device);
 extern bool ptp_sony_liveview(indigo_device *device);
 extern bool ptp_sony_af(indigo_device *device);

@@ -18,7 +18,7 @@ It builds on the following documents and does not repeat them:
 * [Timers and Handler Queues](TIMERS_AND_QUEUES.md) — queue semantics, priorities, cancellation and the `INDIGO_COPY_*_PROCESS_*` macros.
 * [Driver Generator Migration Guide](DRIVER_GENERATOR_MIGRATION.md) — converting an existing hand-written driver, `sdk` hot-plug details, C++ output and architecture restrictions.
 * [Serial Device Simulators](SERIAL_DEVICE_SIMULATORS.md) and [indigo_test/AGENTS.md](../indigo_test/AGENTS.md) — simulators and automated tests.
-* Repository rules in [AGENTS.md](../AGENTS.md) (section *Generated Drivers*) and [indigo_drivers/AGENTS.override.md](../indigo_drivers/AGENTS.override.md). Where this document and those rules differ, the rules win.
+* Repository rules in [AGENTS.md](../AGENTS.md) (section *Generated Drivers*) and [indigo_drivers/AGENTS.md](../indigo_drivers/AGENTS.md). Where this document and those rules differ, the rules win.
 
 The authoritative reference for what the generator accepts is the generator itself. [indigo_tools/template.driver](../indigo_tools/template.driver) is a catalogue of every block and attribute with a one-line description, and [indigo_tools/driver_editor](../indigo_tools/driver_editor/README.md) is a local browser editor that edits `.driver` files and previews the generated source.
 
@@ -55,7 +55,6 @@ indigo_drivers/<type>_<name>/
     indigo_<type>_<name>.h          generated, checked in
     indigo_<type>_<name>_main.c     generated standalone executable wrapper, checked in
     README.md                       driver documentation and the ## Testing record
-    REFACTOR.md                     audit, plan, coverage and evidence (see AGENTS.override.md)
     <type>_<name>_simulator/        host-side protocol simulator, if the driver has one
     *.rules, bin_externals/, ...    optional udev rules, vendor SDK, firmware
 ```
@@ -66,7 +65,7 @@ The names are derived mechanically and must agree:
 * `<type>` is the type of the **first** device block. The generator writes `indigo_<type>_<name>.{c,h}` and `indigo_<type>_<name>_main.c`, defines `DRIVER_NAME` as `"indigo_<type>_<name>"` and exports the entry point `indigo_<type>_<name>(indigo_driver_action action, indigo_driver_info *info)`.
 * `Makefile.drv` names the archive, shared library and executable `indigo_$(notdir $(pwd))`, so the directory must be called `<type>_<name>`.
 * The private data type is `<name>_private_data`, accessed through `PRIVATE_DATA`.
-* The low-level connection helpers must be called exactly `<name>_open(indigo_device *device)` and `<name>_close(indigo_device *device)`; the generated connection handler calls them. A `libusb` driver must also provide `<name>_match(libusb_device *dev, const char **name)`.
+* The low-level connection helpers must be called exactly `<name>_open(indigo_device *device)` and `<name>_close(indigo_device *device)`; the generated connection handler calls them. In a `serial` driver the open helper is `<name>_open(indigo_device *device, const char **error_message)`: pass `error_message` to *indigo_uni_open_serial2()*, *indigo_uni_open_serial_with_speed2()* or *indigo_uni_open_serial_with_config2()*, and the generated handler appends the message to the "Failed to connect" alert when opening the port fails. A `libusb` driver must also provide `<name>_match(libusb_device *dev, const char **name)`.
 
 Driver-specific properties must use the `X_` prefix (for example `X_FOCUSER_STEPPING_MODE`). Every property added to a driver must also be documented in [PROPERTIES.md](PROPERTIES.md).
 
@@ -250,6 +249,7 @@ For every property with a change branch, in declaration order, the generator emi
 } else if (indigo_property_match_changeable(FOCUSER_POSITION_PROPERTY, property)) {
 	/* mount only: parked-mount admission check, see below */
 	INDIGO_REJECT_CHANGE_IF(<reject_change condition>, FOCUSER_POSITION_PROPERTY, "<message>");
+	/* MOUNT_EQUATORIAL_COORDINATES: INDIGO_REJECT_COORDINATES_CHANGE_IF(<reject_change condition>, "<message>"); */
 	//+ focuser.FOCUSER_POSITION.on_change_request
 	...
 	//- focuser.FOCUSER_POSITION.on_change_request
@@ -264,12 +264,13 @@ The dispatch macro is chosen as follows:
 | `on_change { }` empty | copy, `state = OK`, `indigo_update_property()` | none | no handler |
 | `asynchronous_change = false` | `INDIGO_COPY_VALUES_PROCESS_SYNC_CHANGE` / `..._TARGETS_...` with `preserve_values` | yes | runs inline |
 | `CCD_ABORT_EXPOSURE`, `FOCUSER_ABORT_MOTION`, `ROTATOR_ABORT_MOTION`, `MOUNT_ABORT_MOTION`, `DOME_ABORT_MOTION`, `POLARALIGN_ABORT_MOTION` | `INDIGO_COPY_VALUES_PROCESS_URGENT_CHANGE` | yes | `URGENT` |
+| `MOUNT_EQUATORIAL_COORDINATES` | `INDIGO_COPY_TARGETS_PROCESS_COORDINATES_CHANGE` with `preserve_values`, `INDIGO_COPY_VALUES_PROCESS_COORDINATES_CHANGE` otherwise; BUSY is published through `indigo_update_coordinates()` | yes | `NORMAL` |
 | `preserve_values = true` | `INDIGO_COPY_TARGETS_PROCESS_CHANGE` | yes | `NORMAL` |
 | `MOUNT_MOTION_*` | `INDIGO_COPY_VALUES_PROCESS_CHANGE_ANYTIME` | **no** | `NORMAL` |
 | `GUIDER_GUIDE_RA`, `GUIDER_GUIDE_DEC` | `INDIGO_COPY_VALUES_PROCESS_PRIORITY_CHANGE` (`..._ANYTIME` with `accept_while_busy`) | yes (no) | `TIME` |
 | anything else | `INDIGO_COPY_VALUES_PROCESS_CHANGE` | yes | `NORMAL` |
 
-The rows are tested top to bottom ([issue 13](#ki-13)). All asynchronous macros copy the request into the property, set it BUSY, publish it and queue the handler (see [Property Change Macros](TIMERS_AND_QUEUES.md#property-change-macros)). The busy guard silently ignores a request for a property that is already BUSY; do not duplicate it in `reject_change` or `on_change_request`.
+The rows are tested top to bottom ([issue 13](#ki-13)). All asynchronous macros copy the request into the property, set it BUSY, publish it and queue the handler (see [Property Change Macros](TIMERS_AND_QUEUES.md#property-change-macros)). The busy guard silently ignores a request for a property that is already BUSY, except for `MOUNT_EQUATORIAL_COORDINATES`: its macros answer such a request through `indigo_reject_change()` with a BUSY message ("Sync refused, the mount is busy" when `MOUNT_ON_COORDINATES_SET` is `SYNC`, "Mount is busy, the new coordinates are ignored" otherwise) and leave the running operation's state, values and targets alone. Do not duplicate the guard in `reject_change` or `on_change_request`.
 
 After all branches, if any property is `persistent`, a `CONFIG` branch saves those properties when `CONFIG.SAVE` is requested and then falls through; the function always ends with `indigo_<type>_change_property(device, client, property)`.
 
@@ -287,7 +288,7 @@ static void focuser_position_handler(indigo_device *device) {
 }
 ```
 
-* The **OK prologue** is omitted when the `on_change` text begins with `<PROPERTY>->state = ` or contains `_finalizer` anywhere ([issue 12](#ki-12)).
+* The **OK prologue** is omitted when the `on_change` text begins with `<PROPERTY>->state = ` or contains `_finalizer` anywhere ([issue 12](#ki-12)), and always for `MOUNT_EQUATORIAL_COORDINATES`: its change branch refuses a request while the coordinates are BUSY, so they stay BUSY from the admission of the request until `on_change` sets the result. Every path of that `on_change` therefore sets the state itself: `INDIGO_OK_STATE` where the request is complete (an accepted sync), BUSY where a finalizer or the poll completes it, ALERT on failure.
 * The **epilogue** is `indigo_update_coordinates(device, NULL)` for `MOUNT_EQUATORIAL_COORDINATES`, nothing when the `on_change` text contains `_finalizer`, and `indigo_update_property()` otherwise.
 * The mount properties listed in [Mount](#mount) get a parked-mount guard in front of the code, and the manual motion handlers get the motion commit after it.
 
@@ -406,9 +407,9 @@ inherited FOCUSER_POSITION {
 }
 ```
 
-The generator emits `INDIGO_REJECT_CHANGE_IF(condition, PROPERTY, "message")` at the top of the change branch, before `on_change_request` and before anything is copied. On a match `indigo_reject_change()` marks every item for update (so the client sees the driver's real values again), sets ALERT, publishes the message and returns. Several `reject_change` blocks are tested in declaration order. Do not use it for the property's own BUSY state; the dispatch macro handles that without overwriting the running operation's state.
+The generator emits `INDIGO_REJECT_CHANGE_IF(condition, PROPERTY, "message")` at the top of the change branch, before `on_change_request` and before anything is copied. On a match `indigo_reject_change()` answers and returns: a property that is not BUSY is published in ALERT with every item marked for update (so the client sees the driver's real values again) and the message; a BUSY property belongs to a running operation, so it is left untouched and the message is sent as a BUSY message, which cannot race with the updates of that operation. Several `reject_change` blocks are tested in declaration order. The condition may include the property's own BUSY state, which turns the silent drop of the dispatch macro into an answered request. For `MOUNT_EQUATORIAL_COORDINATES` the generator emits `INDIGO_REJECT_COORDINATES_CHANGE_IF(condition, "message")` instead: a property that is not BUSY is refused through `indigo_reject_coordinates_change()`, which publishes the ALERT through the state machine of `indigo_update_coordinates()`, so it is kept until the next BUSY (see Coordinates below); a BUSY property gets the message only, as above.
 
-Use `on_change_request` only for request-scoped bookkeeping that `reject_change` cannot express, such as zeroing items before a guide pulse is copied, or delegating a request to the base class (`mount_simulator` forwards a plain SYNC to `indigo_mount_change_property()`). It has no generated epilogue; if it returns early, it must publish any rejection itself.
+Use `on_change_request` only for request-scoped bookkeeping that `reject_change` cannot express, such as zeroing items before a guide pulse is copied, or claiming an operation before a position poll could publish over the BUSY state of the request (`mount_synscan` claims a slew or a sync). It has no generated epilogue; if it returns early, it must publish any rejection itself.
 
 ---
 
@@ -420,14 +421,14 @@ The six abort properties listed in the dispatch table are queued at `INDIGO_TASK
 
 ### Guider pulses
 
-`GUIDER_GUIDE_RA` and `GUIDER_GUIDE_DEC` are dispatched at `INDIGO_TASK_PRIORITY_TIME`. By default a pulse arriving while the previous one on the same axis is BUSY is ignored by the busy guard. With `accept_while_busy = true;` the request is taken anyway and the driver owns the replacement: clear the stale items in `on_change_request`, cancel the running pulse's finalizer, start the new pulse and schedule `guider_guide_<axis>_finalizer` (see the guider device of `mount_simulator`). Every exposed guider interface needs the pulse-duration accuracy measurement required by [indigo_drivers/AGENTS.override.md](../indigo_drivers/AGENTS.override.md).
+`GUIDER_GUIDE_RA` and `GUIDER_GUIDE_DEC` are dispatched at `INDIGO_TASK_PRIORITY_TIME`. By default a pulse arriving while the previous one on the same axis is BUSY is ignored by the busy guard. With `accept_while_busy = true;` the request is taken anyway and the driver owns the replacement: clear the stale items in `on_change_request`, cancel the running pulse's finalizer, start the new pulse and schedule `guider_guide_<axis>_finalizer` (see the guider device of `mount_simulator`). Every exposed guider interface needs the pulse-duration accuracy measurement required by [indigo_drivers/AGENTS.md](../indigo_drivers/AGENTS.md).
 
 ### Mount
 
-* **Parked-mount admission.** For `MOUNT_EQUATORIAL_COORDINATES`, `MOUNT_MOTION_DEC`, `MOUNT_MOTION_RA` and `MOUNT_TRACKING` the change branch starts with `INDIGO_REJECT_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, ..., "Mount is parked!")`, before any `reject_change` or `on_change_request`, so a refused request never reaches the property values. The handler repeats the check before the `on_change` code, for a request admitted just before a park request was accepted: it sends "Mount is parked!", publishes ALERT and returns. Do not duplicate either check in the `.driver` file.
+* **Parked-mount admission.** For `MOUNT_EQUATORIAL_COORDINATES`, `MOUNT_MOTION_DEC`, `MOUNT_MOTION_RA` and `MOUNT_TRACKING` the change branch starts with `INDIGO_REJECT_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, ..., "Mount is parked!")` (`INDIGO_REJECT_COORDINATES_CHANGE_IF(..., "Mount is parked!")` for `MOUNT_EQUATORIAL_COORDINATES`), before any `reject_change` or `on_change_request`, so a refused request never reaches the property values. The handler repeats the check before the `on_change` code, for a request admitted just before a park request was accepted: it sends "Mount is parked!", publishes ALERT and returns; for `MOUNT_EQUATORIAL_COORDINATES` it calls `indigo_reject_coordinates_change(device, "Mount is parked!")` instead. Do not duplicate either check in the `.driver` file.
 * **Manual motion is processed anytime.** `MOUNT_MOTION_DEC` and `MOUNT_MOTION_RA` use `INDIGO_COPY_VALUES_PROCESS_CHANGE_ANYTIME`, because the release (all items off) or a change of direction must be accepted while the motion is BUSY. The handler therefore has to cope with any combination of items at any time.
 * **Motion ownership.** The generator records the requesting client and commits the motion ownership, see the next section.
-* **Coordinates.** The `MOUNT_EQUATORIAL_COORDINATES` handler ends with `indigo_update_coordinates()` instead of `indigo_update_property()`; do not call it yourself at the end of `on_change`. Use `preserve_values = true;` so the request lands in the targets.
+* **Coordinates.** The `MOUNT_EQUATORIAL_COORDINATES` change branch publishes the BUSY of the request, the handler has no OK prologue, so the coordinates stay BUSY until `on_change` sets the result on each of its paths (see [Change handlers](#change-handlers)), and it ends with `indigo_update_coordinates()` instead of `indigo_update_property()`; do not call it yourself at the end of `on_change`. Use `preserve_values = true;` so the request lands in the targets. `indigo_update_coordinates()` keeps an ALERT that ends a BUSY state (a refused sync, a failed GoTo) until the next BUSY, so the position poll, which also publishes through it, cannot turn the failure into OK. A refusal published through `indigo_reject_coordinates_change()` is kept the same way, also when no BUSY preceded it (the parked-mount and `reject_change` checks of the change branch). Publish every ALERT of the coordinates through `indigo_update_coordinates()` or, for a refusal of the request, `indigo_reject_coordinates_change(device, "reason")`, never through `indigo_update_property()`: an ALERT the state machine does not see is not kept. A driver whose controller has no sync of its own calls `indigo_mount_sync(device, ra, dec)` with the requested targets in its handler; it adds the alignment point or sets ALERT and sends the reason, and the generated epilogue publishes the result once (see `mount_simulator` and `mount_synscan`).
 * **Abort.** `MOUNT_ABORT_MOTION` is urgent. It has to stop slews, park, home and manual motion, cancel their pending handlers and finalizers, switch all `MOUNT_MOTION_*` items off and publish the affected properties (see `mount_simulator`).
 
 ---
@@ -553,7 +554,7 @@ This section lists known generator bugs, limitations and open design questions. 
 
 <a id="ki-3"></a>
 **3. `accept_while_busy` only affects `GUIDER_GUIDE_RA`/`GUIDER_GUIDE_DEC`.** The attribute is parsed for every property (line 720) but used only in the guider row of the dispatch in `write_c_change_property()` (line 2004).
-*Impact:* on any other property it is accepted and silently ignored; the busy guard still drops requests while the property is BUSY.
+*Impact:* on any other property it is accepted and silently ignored; the busy guard still drops requests while the property is BUSY (on `MOUNT_EQUATORIAL_COORDINATES` it refuses them through `indigo_reject_change()` with a BUSY message).
 *Workaround:* none in the generator. Use it only on the two guider properties; for other properties that must accept requests while BUSY, ask for a generator change.
 
 <a id="ki-4"></a>
@@ -600,7 +601,7 @@ This section lists known generator bugs, limitations and open design questions. 
 *Workaround:* write `perm = INDIGO_RO_PERM;` exactly.
 
 <a id="ki-12"></a>
-**12. Handler prologue and epilogue are chosen by text search.** `write_c_property_change_handler()` (lines 1771–1779) drops both the OK prologue and the final `indigo_update_property()` when the `on_change` text contains `_finalizer` anywhere, including a comment or an `indigo_cancel_pending_handler(device, x_finalizer)` call; the prologue is also dropped only when the text *begins* with `<PROPERTY>->state = `. For virtual drivers, `connection_result` handling is enabled when the `on_connect` text contains that word (line 1625).
+**12. Handler prologue and epilogue are chosen by text search.** `write_c_property_change_handler()` (lines 1771–1779) drops both the OK prologue and the final `indigo_update_property()` when the `on_change` text contains `_finalizer` anywhere, including a comment or an `indigo_cancel_pending_handler(device, x_finalizer)` call; the prologue is also dropped only when the text *begins* with `<PROPERTY>->state = ` (and always for `MOUNT_EQUATORIAL_COORDINATES`). For virtual drivers, `connection_result` handling is enabled when the `on_connect` text contains that word (line 1625).
 *Impact:* a handler that only cancels a finalizer publishes nothing unless it does so itself; a handler that sets the state later in the code still gets the OK prologue.
 *Workaround:* when `_finalizer` appears in `on_change`, publish the property explicitly on every path.
 

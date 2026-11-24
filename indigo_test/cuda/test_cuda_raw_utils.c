@@ -9,6 +9,7 @@
 
 #include <indigo/indigo_bus.h>
 #include <indigo/indigo_raw_utils.h>
+#include <indigo/indigo_bahtinov.h>
 
 #include "indigo_cuda.h"
 #include "test_image.h"

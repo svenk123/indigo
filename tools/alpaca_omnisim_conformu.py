@@ -11,8 +11,9 @@
 # results and report.md go to --outdir.
 #
 # Prerequisites, none of them part of the repository:
-# - OmniSim unpacked in 'omnisim/' next to the working tree (system_alpaca
-#   REFACTOR.md 4.1) or named by INDIGO_TEST_OMNISIM;
+# - OmniSim unpacked in 'omnisim/' next to the working tree (section 4.1 of
+#   3dedba4cb:.factory/tasks/archive/20261027203747-a8d5-archive-refactor-notes/refactor/system_alpaca.md)
+#   or named by INDIGO_TEST_OMNISIM;
 # - ConformU, by default /Applications/ConformU.app (CONFORMU overrides it);
 # - a build with build/bin/indigo_server and both Alpaca drivers.
 #
@@ -108,9 +109,21 @@ def start_omnisim(executable, port, outdir):
 	env.pop('XDG_CONFIG_HOME', None)
 	env.pop('XDG_DATA_HOME', None)
 	env.update(HOME=home, CFFIXED_USER_HOME=home, ASCOM_LOGPATH=os.path.join(home, 'logs'))
-	output = open(os.path.join(outdir, 'omnisim.out'), 'w')
-	process = subprocess.Popen([executable, '--urls=http://127.0.0.1:%d' % port], cwd=home, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
-	wait_for(lambda: get_json('http://127.0.0.1:%d/management/apiversions' % port), 60, 'OmniSim')
+	process = None
+	try:
+		with open(os.path.join(outdir, 'omnisim.out'), 'w') as output:
+			process = subprocess.Popen([executable, '--urls=http://127.0.0.1:%d' % port], cwd=home, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+		wait_for(lambda: get_json('http://127.0.0.1:%d/management/apiversions' % port), 60, 'OmniSim')
+		if process.poll() is not None:
+			raise RuntimeError('OmniSim exited before startup completed')
+	except BaseException:
+		if process is not None:
+			try:
+				stop(process)
+			except BaseException:
+				# Preserve the startup failure even if cleanup fails or is interrupted.
+				pass
+		raise
 	return process
 
 

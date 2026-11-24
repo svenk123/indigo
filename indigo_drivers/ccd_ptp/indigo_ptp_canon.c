@@ -146,7 +146,8 @@ char *ptp_event_canon_code_label(uint16_t code) {
 		case ptp_event_canon_RequestGetEvent: return "RequestGetEvent_Canon";
 		case ptp_event_canon_ObjectAddedEx: return "ObjectAddedEx_Canon";
 		case ptp_event_canon_ObjectAddedEx2: return "ObjectAddedEx2_Canon";
-		case ptp_event_canon_ObjectAddedEx3: return "ObjectAddedEx3_Canon";
+		case ptp_event_canon_RequestObjectTransfer64: return "RequestObjectTransfer64_Canon";
+		case ptp_event_canon_RequestObjectTransfer64LFN: return "RequestObjectTransfer64LFN_Canon";
 		case ptp_event_canon_ObjectRemoved: return "ObjectRemoved_Canon";
 		case ptp_event_canon_RequestGetObjectInfoEx: return "RequestGetObjectInfoEx_Canon";
 		case ptp_event_canon_StorageStatusChanged: return "StorageStatusChanged_Canon";
@@ -803,8 +804,15 @@ char *ptp_property_canon_value_code_label(indigo_device *device, uint16_t proper
 	return ptp_property_value_code_label(device, property, code);
 }
 
-static uint8_t *ptp_copy_image_format(uint8_t *source, uint64_t *target) {
+static uint8_t *ptp_copy_image_format(uint8_t *source, uint8_t *end, uint64_t *target) {
+	if (source == NULL || source > end || end - source < 4) {
+		return NULL;
+	}
 	uint32_t count, size, format, quality, compression;
+	ptp_decode_uint32(source, &count);
+	if (end - source < (count == 2 ? 36 : 20)) {
+		return NULL;
+	}
 	source = ptp_decode_uint32(source, &count);
 	source = ptp_decode_uint32(source, &size);
 	source = ptp_decode_uint32(source, &format);
@@ -1014,8 +1022,10 @@ static void ptp_canon_get_event(indigo_device *device) {
 							break;
 						}
 						case ptp_str_type: {
-							strncpy((char *)property->value.text.value, (char *)source, PTP_MAX_CHARS);
-							property->value.text.value[PTP_MAX_CHARS - 1] = '\0';
+							// The value is NUL-terminated within the record, if at all.
+							size_t length = strnlen((char *)source, size - 12 < PTP_MAX_CHARS - 1 ? size - 12 : PTP_MAX_CHARS - 1);
+							memcpy(property->value.text.value, source, length);
+							property->value.text.value[length] = '\0';
 							break;
 						}
 						case ptp_undef_type: {
@@ -1025,22 +1035,50 @@ static void ptp_canon_get_event(indigo_device *device) {
 								case ptp_property_canon_ImageFormatSD:
 								case ptp_property_canon_ImageFormatExtHD: {
 									uint64_t value = 0;
-									source = ptp_copy_image_format(source, &value);
+									source = ptp_copy_image_format(source, record + size, &value);
+									if (source == NULL) {
+										PRIVATE_DATA->last_error = ptp_response_GeneralError;
+										property = NULL;
+										break;
+									}
 									property->value.number.value = value;
 									CANON_PRIVATE_DATA->image_format = value;
 									break;
 								}
 								case ptp_property_canon_CustomFuncEx: {
 									property = NULL;
+									// Record payload after its event header and property code: total size, group count, then groups of
+									// { id, size in bytes from the size field, item count, items of { code, value size in words, value } }.
+									// The whole record is validated before anything is stored; a malformed one is rejected.
 									source += sizeof(uint32_t);
 									unsigned int *source_uint32 = (unsigned int *)source;
-									int offset = 0;
-									unsigned int group_count = source_uint32[offset++];
-									assert(group_count <= 16);
+									uint32_t available = size > 16 ? (size - 16) / sizeof(uint32_t) : 0;
+									uint32_t offset = 0;
+									bool valid = available >= 1 && source_uint32[0] <= 16;
+									unsigned int group_count = valid ? source_uint32[offset++] : 0;
+									for (int i = 0; valid && i < group_count; i++) {
+										valid = offset + 2 <= available;
+										unsigned int group = valid ? source_uint32[offset] - 1 : 0;
+										unsigned int group_size = valid ? source_uint32[offset + 1] : 0;
+										valid = valid && group < 16 && group_size >= 8 && group_size <= 1024 && group_size % sizeof(uint32_t) == 0 && (group_size - 4) / sizeof(uint32_t) <= available - offset - 2;
+										uint32_t group_end = offset + 2 + (group_size - 4) / sizeof(uint32_t);
+										offset += 2;
+										unsigned int item_count = valid ? source_uint32[offset++] : 0;
+										// Items must lie within the stored group copy, the value word included.
+										for (int j = 0; valid && j < item_count; j++) {
+											valid = offset + 2 < group_end && source_uint32[offset + 1] <= group_end - offset - 2;
+											offset += valid ? 2 + source_uint32[offset + 1] : 0;
+										}
+									}
+									if (!valid) {
+										INDIGO_DRIVER_ERROR(DRIVER_NAME, "Malformed CustomFuncEx record (%u bytes)", size);
+										PRIVATE_DATA->last_error = ptp_response_GeneralError;
+										break;
+									}
+									offset = 1;
 									for (int i = 0; i < group_count; i++) {
 										unsigned int group = source_uint32[offset++] - 1;
 										unsigned int group_size = source_uint32[offset++];
-										assert(group_size <= 1024);
 										CANON_PRIVATE_DATA->ex_func_group[group][0] = group_size + 12; // total size
 										CANON_PRIVATE_DATA->ex_func_group[group][1] = 1; // group count
 										CANON_PRIVATE_DATA->ex_func_group[group][2] = group + 1; // group
@@ -1057,6 +1095,10 @@ static void ptp_canon_get_event(indigo_device *device) {
 												}
 											}
 											if (PRIVATE_DATA->info_properties_supported[index] == 0) {
+												if (index >= PTP_MAX_ELEMENTS - 1) {
+													offset += value_size;
+													continue;
+												}
 												PRIVATE_DATA->info_properties_supported[index] = item_code;
 												PRIVATE_DATA->info_properties_supported[index + 1] = 0;
 											}
@@ -1067,7 +1109,9 @@ static void ptp_canon_get_event(indigo_device *device) {
 											ex_property->writable = true;
 											ex_property->value.sw.value = source_uint32[offset];
 											offset += value_size;
-											*next_updated++ = ex_property;
+											if (next_updated < updated + PTP_MAX_ELEMENTS - 1) {
+												*next_updated++ = ex_property;
+											}
 											INDIGO_DRIVER_DEBUG(DRIVER_NAME, "ex-property = %s (%04x), value = %0x", PRIVATE_DATA->property_code_label(item_code), item_code, ex_property->value.sw.value);
 										}
 									}
@@ -1146,11 +1190,22 @@ static void ptp_canon_get_event(indigo_device *device) {
 					if (count >= PTP_MAX_ELEMENTS || count > (size - 20) / (type == 1 ? 2 : 4)) {
 						break;
 					}
+					if (code == ptp_property_canon_ImageFormat || code == ptp_property_canon_ImageFormatCF || code == ptp_property_canon_ImageFormatSD || code == ptp_property_canon_ImageFormatExtHD) {
+						uint8_t *check = source;
+						uint64_t value;
+						for (uint32_t i = 0; i < count && check != NULL; i++) {
+							check = ptp_copy_image_format(check, record + size, &value);
+						}
+						if (check == NULL) {
+							PRIVATE_DATA->last_error = ptp_response_GeneralError;
+							break;
+						}
+					}
 					if (count > 0) {
 						property->count = count;
 						if (code == ptp_property_canon_ImageFormat || code == ptp_property_canon_ImageFormatCF || code == ptp_property_canon_ImageFormatSD || code == ptp_property_canon_ImageFormatExtHD) {
 							for (int i = 0; i < count; i++) {
-								source = ptp_copy_image_format(source, (uint64_t *)&property->value.sw.values[i]);
+								source = ptp_copy_image_format(source, record + size, (uint64_t *)&property->value.sw.values[i]);
 							}
 						} else {
 							if (type == 1) {
@@ -1172,51 +1227,58 @@ static void ptp_canon_get_event(indigo_device *device) {
 					} else {
 						property->count = count;
 					}
-					*next_updated++ = property;
+					if (next_updated < updated + PTP_MAX_ELEMENTS - 1) {
+						*next_updated++ = property;
+					}
 					INDIGO_DRIVER_DEBUG(DRIVER_NAME, "count = %d", property->count);
 					break;
 				}
 				case ptp_event_canon_ObjectAddedEx:
 				case ptp_event_canon_ObjectAddedEx2:
-				case ptp_event_canon_ObjectAddedEx3:
-				case ptp_event_canon_RequestObjectTransfer: {
+				case ptp_event_canon_RequestObjectTransfer:
+				case ptp_event_canon_RequestObjectTransfer64:
+				case ptp_event_canon_RequestObjectTransfer64LFN: {
+					bool transfer = event == ptp_event_canon_RequestObjectTransfer || event == ptp_event_canon_RequestObjectTransfer64 || event == ptp_event_canon_RequestObjectTransfer64LFN;
+					uint32_t filename_offset = event == ptp_event_canon_ObjectAddedEx ? 0x28 : event == ptp_event_canon_ObjectAddedEx2 ? 0x2C : event == ptp_event_canon_RequestObjectTransfer64LFN ? 0 : 0x1C;
+					if (size < (filename_offset ? filename_offset + 1 : 0x25)) {
+						PRIVATE_DATA->last_error = ptp_response_GeneralError;
+						break;
+					}
 					uint32_t handle = 0, length = 0;
-					char filename[PTP_MAX_CHARS];
-					filename[0] = '\0';
+					char filename[PTP_MAX_CHARS] = { 0 };
 					ptp_decode_uint32(source, &handle);
-					if (event == ptp_event_canon_ObjectAddedEx || event == ptp_event_canon_ObjectAddedEx2) {
-						ptp_decode_uint32(source + 0x14, &length);
-					} else if (event == ptp_event_canon_ObjectAddedEx3 || event == ptp_event_canon_RequestObjectTransfer) {
-						ptp_decode_uint32(source + 0x0C, &length);
-					}
-					if (event == ptp_event_canon_ObjectAddedEx) {
-						strncpy(filename, (char *)source + 0x20, PTP_MAX_CHARS);
-						filename[PTP_MAX_CHARS - 1] = '\0';
-					} else if (event == ptp_event_canon_ObjectAddedEx2) {
-						strncpy(filename, (char *)source + 0x24, PTP_MAX_CHARS);
-						filename[PTP_MAX_CHARS - 1] = '\0';
-					} else if (event == ptp_event_canon_ObjectAddedEx3 || event == ptp_event_canon_RequestObjectTransfer) {
-						ptp_decode_string(source + 0x1c, filename);
-						if (source[0x1c] == 0 || source[0x1c] == 1) {
-							// empty or "\0" string
-							//   => no filename
-							uint32_t content_type = 0;
-							ptp_decode_uint32(source + 0x04, &content_type);
-							INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Type: 0x%x", content_type);
-							if (content_type == 0x3801) {
-								strncpy(filename, "RAM.JPG", PTP_MAX_CHARS);
-							} else if (content_type == 0xB103) {
-								strncpy(filename, "RAM.CR2", PTP_MAX_CHARS);
-							} else if (content_type == 0xB108) {
-								strncpy(filename, "RAM.CR3", PTP_MAX_CHARS);
-							} else {
-								INDIGO_DRIVER_LOG(DRIVER_NAME, "Unknown content type: 0x%x", content_type);
-							}
-						}
-					}
-					if (event == ptp_event_canon_RequestObjectTransfer && !CANON_PRIVATE_DATA->use_ram) {
+					ptp_decode_uint32(source + (transfer ? 0x0C : 0x14), &length);
+					if (transfer && !CANON_PRIVATE_DATA->use_ram) {
 						// Release the host-transfer reservation before waiting for ObjectAddedEx.
 						ptp_transaction_1_0(device, ptp_operation_canon_TransferComplete, handle);
+						break;
+					}
+					if (filename_offset) {
+						// Offsets include the record header; these names are NUL-terminated bytes, not PTP strings.
+						uint8_t *name = record + filename_offset;
+						uint8_t *end = memchr(name, 0, size - filename_offset);
+						if (end == NULL || (size_t)(end - name) >= sizeof(filename)) {
+							PRIVATE_DATA->last_error = ptp_response_GeneralError;
+							break;
+						}
+						memcpy(filename, name, end - name + 1);
+					}
+					if (transfer && filename[0] == 0) {
+						// The LFN event carries no filename; derive a local name from its 16-bit format.
+						uint16_t content_type = 0;
+						ptp_decode_uint16(source + 0x04, &content_type);
+						if (content_type == 0x3801) {
+							strcpy(filename, "RAM.JPG");
+						} else if (content_type == 0xB101 || content_type == 0xB103) {
+							strcpy(filename, "RAM.CR2");
+						} else if (content_type == 0xB108) {
+							strcpy(filename, "RAM.CR3");
+						} else {
+							INDIGO_DRIVER_LOG(DRIVER_NAME, "Unknown content type: 0x%x", content_type);
+						}
+					}
+					if (transfer && length == 0) {
+						PRIVATE_DATA->last_error = ptp_response_GeneralError;
 						break;
 					}
 					if (!strchr(filename, '.')) {
@@ -1232,7 +1294,7 @@ static void ptp_canon_get_event(indigo_device *device) {
 							if (ptp_transaction_1_0_i(device, ptp_operation_canon_GetObject, handle, &buffer, &length)) {
 								const char *ext = strchr(filename, '.');
 								if (ptp_check_jpeg_ext(ext) && ptp_canon_check_dual_compression(device)) {
-									if (CCD_PREVIEW_ENABLED_ITEM->sw.value) {
+									if (CCD_PREVIEW_ENABLED_ITEM->sw.value || CCD_PREVIEW_ENABLED_WITH_HISTOGRAM_ITEM->sw.value) {
 										indigo_process_dslr_preview_image(device, buffer, (int)length);
 									}
 								} else {
@@ -1249,8 +1311,7 @@ static void ptp_canon_get_event(indigo_device *device) {
 							if (buffer) {
 								free(buffer);
 							}
-						} else if (event == ptp_event_canon_ObjectAddedEx3 || event == ptp_event_canon_RequestObjectTransfer) {
-							// R1, R5m2 later?
+						} else if (transfer) {
 							void *image_buffer = indigo_safe_malloc(length);
 							void *buffer = NULL;
 							uint32_t size = 0;
@@ -1278,7 +1339,7 @@ static void ptp_canon_get_event(indigo_device *device) {
 							if (read_size == length && transfer_complete) {
 								const char *ext = strchr(filename, '.');
 								if (ext && ptp_check_jpeg_ext(ext) && ptp_canon_check_dual_compression(device)) {
-									if (CCD_PREVIEW_ENABLED_ITEM->sw.value) {
+									if (CCD_PREVIEW_ENABLED_ITEM->sw.value || CCD_PREVIEW_ENABLED_WITH_HISTOGRAM_ITEM->sw.value) {
 										indigo_process_dslr_preview_image(device, image_buffer, (int)length);
 									}
 								} else {
@@ -1421,17 +1482,18 @@ bool ptp_canon_initialise(indigo_device *device) {
 	if (!ptp_initialise(device))
 		return false;
 	void *buffer = NULL;
-	if (!ptp_transaction_0_0_i(device, ptp_operation_canon_GetDeviceInfoEx, &buffer, NULL)) {
+	uint32_t size = 0;
+	if (!ptp_transaction_0_0_i(device, ptp_operation_canon_GetDeviceInfoEx, &buffer, &size)) {
 		if (buffer) {
 			free(buffer);
 		}
 		return false;
 	}
-	uint8_t *source = buffer + sizeof(uint32_t);
+	uint8_t *source = size >= sizeof(uint32_t) ? (uint8_t *)buffer + sizeof(uint32_t) : NULL, *end = (uint8_t *)buffer + size;
 	uint32_t events[PTP_MAX_ELEMENTS], properties[PTP_MAX_ELEMENTS];
-	source = ptp_decode_uint32_array(source, events, NULL);
+	source = ptp_decode_uint32_array(source, end, events, NULL);
 	ptp_append_uint16_32_array(PRIVATE_DATA->info_events_supported, events);
-	source = ptp_decode_uint32_array(source, properties, NULL);
+	source = ptp_decode_uint32_array(source, end, properties, NULL);
 	ptp_append_uint16_32_array(PRIVATE_DATA->info_properties_supported, properties);
 	if (buffer) {
 		free(buffer);
@@ -1480,7 +1542,7 @@ static bool set_number_property(indigo_device *device, uint16_t code, uint64_t v
 		target = ptp_encode_uint32((uint32_t)((i2 >> 8) & 0xFF), target);
 		target = ptp_encode_uint32((uint32_t)(i2 & 0xFF), target);
 	} else if ((code & 0xF000) == 0x8000) {
-		for (int i = 0; CANON_PRIVATE_DATA->ex_func_group[i][0]; i++) {
+		for (int i = 0; i < 16 && CANON_PRIVATE_DATA->ex_func_group[i][0]; i++) {
 			uint32_t *group = CANON_PRIVATE_DATA->ex_func_group[i];
 			int offset = 4;
 			unsigned int item_count = group[offset++];
@@ -1488,6 +1550,9 @@ static bool set_number_property(indigo_device *device, uint16_t code, uint64_t v
 				unsigned int item = group[offset++];
 				unsigned int value_size = group[offset++];
 				if ((item | 0x8000) == code) {
+					if (group[0] > sizeof(buffer) - (target - buffer)) {
+						return false;
+					}
 					group[offset++] = (uint32_t)value;
 					memcpy(target, group, group[0]);
 					target += group[0];
@@ -1526,10 +1591,13 @@ static bool set_number_property(indigo_device *device, uint16_t code, uint64_t v
 	return result;
 }
 
+// Values longer than PTP_MAX_CHARS - 1 bytes are sent truncated, always with the terminator.
 static bool set_string_property(indigo_device *device, uint16_t code, char *value) {
 	uint8_t buffer[PTP_MAX_CHARS + 2 * sizeof(uint32_t)], *target = buffer + 2 * sizeof(uint32_t);
-	strncpy((char *)target, value, PTP_MAX_CHARS);
-	target += strlen((char *)target) + 1;
+	size_t length = strnlen(value, PTP_MAX_CHARS - 1);
+	memcpy(target, value, length);
+	target[length] = 0;
+	target += length + 1;
 	uint32_t size = *((uint32_t *)buffer) = (uint32_t)(target - buffer);
 	*((uint32_t *)buffer + 1) = code;
 	return ptp_transaction_0_0_o(device, ptp_operation_canon_SetDevicePropValueEx, buffer, size);
@@ -1681,12 +1749,29 @@ bool ptp_canon_exposure(indigo_device *device) {
 		double delay = 0;
 		if (ptp_operation_supported(device, ptp_operation_canon_RemoteReleaseOn)) {
 			uint16_t mirror = ptp_property_supported(device, ptp_property_canon_MirrorUpSetting) ? ptp_property_canon_MirrorUpSetting : ptp_property_canon_ExMirrorLockup;
-			bool mirror_supported = ptp_property_supported(device, mirror) != NULL;
-			if (mirror_supported && !set_number_property(device, mirror, DSLR_MIRROR_LOCKUP_LOCK_ITEM->sw.value ? 1 : 0)) {
-				return false;
+			ptp_property *mirror_property = ptp_property_supported(device, mirror);
+			bool mirror_supported = mirror_property != NULL;
+			int64_t mirror_value = DSLR_MIRROR_LOCKUP_LOCK_ITEM->sw.value ? 1 : 0;
+			// Some EOS bodies reject even an Off write when the setting is already Off, and some (EOS R6 Mark II)
+			// list the setting without ever reporting it and reject any write, so Off is written only over a reported On.
+			if (mirror_supported && (mirror_property->code == mirror ? mirror_property->value.number.value != mirror_value : mirror_value != 0)) {
+				if (!set_number_property(device, mirror, mirror_value)) {
+					return false;
+				}
+				// GetEvent may delay the readback; retain successful writes for the next exposure.
+				mirror_property->code = mirror;
+				mirror_property->value.number.value = mirror_value;
 			}
-			if (ptp_property_supported(device, ptp_property_canon_DriveMode) && !set_number_property(device, ptp_property_canon_DriveMode, mirror_supported && DSLR_MIRROR_LOCKUP_LOCK_ITEM->sw.value ? 0x11 : 0)) {
-				return false;
+			ptp_property *drive_property = ptp_property_supported(device, ptp_property_canon_DriveMode);
+			int64_t drive_value = mirror_supported && DSLR_MIRROR_LOCKUP_LOCK_ITEM->sw.value ? 0x11 : 0;
+			// DriveMode is written only when the reported value differs, for the same reason.
+			if (drive_property && (drive_property->code != ptp_property_canon_DriveMode || drive_property->value.number.value != drive_value)) {
+				if (!set_number_property(device, ptp_property_canon_DriveMode, drive_value)) {
+					return false;
+				}
+				if (drive_property->code == ptp_property_canon_DriveMode) {
+					drive_property->value.number.value = drive_value;
+				}
 			}
 			delay = mirror_supported && DSLR_MIRROR_LOCKUP_LOCK_ITEM->sw.value ? 2 : 0;
 			ptp_canon_get_event(device);

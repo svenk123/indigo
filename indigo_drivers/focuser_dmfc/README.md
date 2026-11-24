@@ -25,4 +25,5 @@ indigo_server indigo_focuser_dmfc
 
 ## Testing
 
-2026-09-27 23:11 3.0.0.19 mac arm64 simulator 26/26 OK
+- 2026-10-09 20:19 3.0.0.21 linux arm64 PegasusAstro DMFC Arduino simulator (ESP32-S3) 9/9 OK
+- 2026-10-24 20:45 3.0.0.24 mac arm64 simulator 40/40 OK

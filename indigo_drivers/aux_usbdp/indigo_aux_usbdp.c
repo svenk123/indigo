@@ -32,7 +32,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x0300000E
+#define DRIVER_VERSION       0x03000010
 #define DRIVER_NAME          "indigo_aux_usbdp"
 #define DRIVER_LABEL         "USB Dewpoint"
 #define AUX_DEVICE_NAME      "USB Dewpoint"
@@ -201,8 +201,8 @@ static indigo_item *usbdp_aggressivity_item(indigo_device *device, int aggressiv
 	return NULL;
 }
 
-static bool usbdp_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 19200, INDIGO_LOG_DEBUG);
+static bool usbdp_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 19200, INDIGO_LOG_DEBUG, error_message);
 	if (PRIVATE_DATA->handle != NULL) {
 		if (usbdp_command(device, UDP_IDENTIFY_CMD)) {
 			if (!strcmp(PRIVATE_DATA->response, UDP1_IDENTIFY_RESPONSE)) {
@@ -244,8 +244,9 @@ static bool usbdp_open(indigo_device *device) {
 				}
 				return true;
 			}
-			indigo_uni_close(&PRIVATE_DATA->handle);
 		}
+		// Every failed identification releases the port opened by this attempt.
+		indigo_uni_close(&PRIVATE_DATA->handle);
 	}
 	return false;
 }
@@ -446,7 +447,8 @@ static void aux_timer_callback(indigo_device *device) {
 static void aux_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = usbdp_open(device);
+		const char *error_message = NULL;
+		connection_result = usbdp_open(device, &error_message);
 		if (connection_result) {
 			indigo_define_property(device, AUX_HEATER_OUTLET_PROPERTY, NULL);
 			indigo_define_property(device, AUX_HEATER_OUTLET_STATE_PROPERTY, NULL);
@@ -461,7 +463,11 @@ static void aux_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}

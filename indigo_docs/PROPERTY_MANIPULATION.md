@@ -86,7 +86,8 @@ options:
        -h  | --help
        -b  | --save-blobs
        -l  | --use_legacy_blobs
-       -e  | --extended-info
+       -e  | --extended-info               print property details, item labels ("  # label")
+                                           and light states (IDLE, OK, BUSY, ALERT)
        -v  | --enable-log
        -vv | --enable-debug
        -vvv| --enable-trace
@@ -156,7 +157,7 @@ State: OK
 Group: Camera
 Label: Start exposure
 Items:
-CCD Imager Simulator.CCD_EXPOSURE.EXPOSURE = 0.000000
+CCD Imager Simulator.CCD_EXPOSURE.EXPOSURE = 0.000000 [0.000000, 10000.000000]  # Start exposure
 
 indigo@indigosky:~ $ indigo_prop_tool list_state -e "CCD Imager Simulator.CCD_EXPOSURE"
 Protocol version = 2.0
@@ -166,6 +167,26 @@ Group: Camera
 Label: Start exposure
 CCD Imager Simulator.CCD_EXPOSURE = OK
 ```
+
+With **-e**, **list** also prints the label of each item after `  # ` at the end of the item line;
+an item with an empty label has no `  # ` part. Number items show their range in brackets.
+Without **-e**, light items are shown as `ON` for any state other than Idle and `OFF` for Idle.
+With **-e**, **list** and **get** show the state of a light item instead: `IDLE`, `OK`, `BUSY` or `ALERT`.
+Agents that keep their information in item labels, such as the history of the Scheduler Agent,
+can be read this way:
+```
+indigo@indigosky:~ $ indigo_prop_tool list -e "Scheduler Agent.AGENT_SCHEDULER_HISTORY"
+Protocol version = 3.0
+
+Name : Scheduler Agent.AGENT_SCHEDULER_HISTORY (RO, LIGHT_VECTOR)
+State: OK
+Group: Scheduler
+Label: Run history
+Items:
+Scheduler Agent.AGENT_SCHEDULER_HISTORY.RUN_1 = OK  # 2026-11-20 20:02-20:02 | Test | run 1 | task | SUCCEEDED | -
+```
+
+The output without **-e** does not change, so scripts that parse it keep working.
 
 ### Setting Item Values
 
@@ -183,6 +204,18 @@ CCD Imager Simulator.CONNECTION.DISCONNECTED = OFF
 indigo@indigosky:~ $ indigo_prop_tool set "CCD Imager Simulator.CCD_SET_FITS_HEADER.NAME=\"MYKEY\";VALUE=\"5\""
 CCD Imager Simulator.CCD_SET_FITS_HEADER.NAME = "MYKEY"
 CCD Imager Simulator.CCD_SET_FITS_HEADER.VALUE = "5"
+```
+
+- Clearing a **TEXT_VECTOR** item with an empty value, written as `ITEM=` or `ITEM=""`; the other items keep their values. Number and switch items always need a value. In scripts, note that `"Device.PROPERTY.ITEM=$VALUE"` with an empty or unset variable now clears a text item instead of failing. The tool prints the property as it was and then as it is after the change:
+```
+indigo@indigosky:~ $ indigo_prop_tool set "Scheduler Agent.AGENT_SCHEDULER_HOOKS.IDLE="
+...
+Scheduler Agent.AGENT_SCHEDULER_HOOKS.STARTUP = ""
+Scheduler Agent.AGENT_SCHEDULER_HOOKS.SHUTDOWN = ""
+Scheduler Agent.AGENT_SCHEDULER_HOOKS.NIGHT_START = ""
+Scheduler Agent.AGENT_SCHEDULER_HOOKS.NIGHT_END = ""
+Scheduler Agent.AGENT_SCHEDULER_HOOKS.IDLE = ""
+Scheduler Agent.AGENT_SCHEDULER_HOOKS.RESUME = ""
 ```
 
 - Setting **NUMBER_VECTOR**:
@@ -220,6 +253,8 @@ If **-e** switch is specified to the **discover** command each service will be l
 ## A Working Example 1 - Loading and Unloading a Driver in indigo_server
 
 There are two ways to achieve this goal. The easiest way is to set the driver's switch to **ON** or **OFF** in the **Server.DRIVERS** property, and the second way is to provide driver's name to **Server.LOAD** or **Server.UNLOAD** respectively.
+
+The server loads and unloads drivers in the background, one request after another. The changed property turns **BUSY** first and is updated again when the request is done; **Server.DRIVERS** stays **BUSY** until every queued request is applied, so a client that waits for **OK** sees the final selection.
 
 Let us assume we need **indigo_ccd_simulator** loaded and **indigo_wheel_asi** unloaded.
 

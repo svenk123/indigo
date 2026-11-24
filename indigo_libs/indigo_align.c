@@ -30,6 +30,7 @@
 #include <indigo/indigo_bus.h>
 #endif
 #include <indigo/indigo_align.h>
+#include <float.h>
 
 const double TWO_PI = 2 * M_PI;
 const double DEG2RAD = M_PI / 180.0;
@@ -449,6 +450,11 @@ void indigo_radec_to_altaz(const double ra, const double dec, const time_t *utc,
 	indigo_ra_dec_to_point(ra, dec, lst, &eq_point);
 	indigo_equatorial_to_hotizontal(&eq_point, latitude * DEG2RAD, &h_point);
 	*az = h_point.a * RAD2DEG;
+	/* due north is exactly 0, never -0, 360 or a rounding error: azimuths are published as "%.10g", which resolves
+	   1e-7 degree at 360, so an azimuth within half of that of north, on either side, is north */
+	if (*az < 5e-8 || *az >= 360 - 5e-8) {
+		*az = 0;
+	}
 	*alt = h_point.d * RAD2DEG;
 }
 
@@ -469,13 +475,18 @@ indigo_spherical_point_t indigo_cartesian_to_spherical(const indigo_cartesian_po
 	indigo_spherical_point_t spoint = {0, M_PI / 2.0 , 1};
 
 	if (cpoint->y == 0.0 && cpoint->x == 0.0) {
-		/* Zenith */
+		/* Zenith or nadir, the longitude is undefined */
+		if (cpoint->z < 0) {
+			spoint.d = -M_PI / 2.0;
+		}
 		return spoint;
 	}
 
-	spoint.a = (cpoint->y == 0) ? 0.0 : -atan2(cpoint->y, cpoint->x);
+	/* atan2() places every quadrant, including the negative x axis */
+	spoint.a = -atan2(cpoint->y, cpoint->x);
 	if (spoint.a < 0) spoint.a += TWO_PI;
-	spoint.d = (M_PI / 2.0) - acos(cpoint->z);
+	/* unlike acos(z), this stays defined when rounding pushes the length of a unit vector past 1 */
+	spoint.d = atan2(cpoint->z, hypot(cpoint->x, cpoint->y));
 	return spoint;
 }
 
@@ -685,7 +696,7 @@ bool indigo_polar_alignment_error_3p(
 	double *u,
 	double *v
 ) {
-	if (u == NULL || v == NULL || d2 == NULL || d3 == NULL) {
+	if (p1 == NULL || p2 == NULL || p3 == NULL || u == NULL || v == NULL || d2 == NULL || d3 == NULL) {
 		return false;
 	}
 
@@ -704,8 +715,18 @@ bool indigo_polar_alignment_error_3p(
 	double k3 = cos_a3 - cos_a1;
 	double k4 = sin_a3 - sin_a1;
 
-	*v = (*d3 * k1 - *d2 * k3) / (k4 * k1 - k2 * k3);
-	*u = (*d2 - *v * k2) / k1;
+	double determinant = k1 * k4 - k2 * k3;
+	double scale = fabs(k1 * k4) + fabs(k2 * k3);
+	if (!isfinite(determinant) || fabs(determinant) <= DBL_EPSILON * scale || determinant == 0) {
+		return false;
+	}
+	double result_u = (*d2 * k4 - *d3 * k2) / determinant;
+	double result_v = (*d3 * k1 - *d2 * k3) / determinant;
+	if (!isfinite(result_u) || !isfinite(result_v)) {
+		return false;
+	}
+	*u = result_u;
+	*v = result_v;
 
 	return true;
 }

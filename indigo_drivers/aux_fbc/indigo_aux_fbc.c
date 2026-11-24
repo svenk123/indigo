@@ -32,17 +32,11 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000009
+#define DRIVER_VERSION       0x0300000B
 #define DRIVER_NAME          "indigo_aux_fbc"
 #define DRIVER_LABEL         "Lacerta FBC"
 #define AUX_DEVICE_NAME      "Lacerta FBC"
 #define PRIVATE_DATA         ((fbc_private_data *)device->private_data)
-
-//+ define
-
-#define INTENSITY(val)       ((int)floor((100 - (int)(val) - 0) * (220 - 20) / (100 - 0) + 20))
-
-//- define
 
 #pragma mark - Property definitions
 
@@ -64,6 +58,8 @@ typedef struct {
 	indigo_property *ccd_exposure_property;
 	//+ data
 	char response[80];
+	double impulse_end_time;
+	double exposure_end_time;
 	//- data
 } fbc_private_data;
 
@@ -92,8 +88,8 @@ static bool fbc_command(indigo_device *device, char *command, int response, ...)
 	return result > 0;
 }
 
-static bool fbc_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG);
+static bool fbc_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial2(DEVICE_PORT_ITEM->text.value, INDIGO_LOG_DEBUG, error_message);
 	if (PRIVATE_DATA->handle != NULL) {
 		indigo_uni_set_rts(PRIVATE_DATA->handle, false);
 		INDIGO_DRIVER_LOG(DRIVER_NAME, "Connected on %s", DEVICE_PORT_ITEM->text.value);
@@ -126,12 +122,39 @@ static void fbc_close(indigo_device *device) {
 
 //- code
 
+//+ aux.code
+
+// The FBC times the impulse and the exposure itself, so only the countdown is published: the
+// remaining time rounded up to whole seconds, refreshed whenever that value changes.
+static void fbc_countdown(indigo_device *device, indigo_property *property, double end_time, indigo_timer_callback finalizer) {
+	double remaining = end_time - indigo_monotonic_time();
+	if (remaining <= 0) {
+		property->items[0].number.value = 0;
+		property->state = INDIGO_OK_STATE;
+	} else {
+		property->items[0].number.value = ceil(remaining);
+		indigo_execute_handler_in(device, remaining - (property->items[0].number.value - 1), finalizer);
+	}
+	indigo_update_property(device, property, NULL);
+}
+
+static void aux_light_impulse_finalizer(indigo_device *device) {
+	fbc_countdown(device, AUX_LIGHT_IMPULSE_PROPERTY, PRIVATE_DATA->impulse_end_time, aux_light_impulse_finalizer);
+}
+
+static void ccd_exposure_finalizer(indigo_device *device) {
+	fbc_countdown(device, CCD_EXPOSURE_PROPERTY, PRIVATE_DATA->exposure_end_time, ccd_exposure_finalizer);
+}
+
+//- aux.code
+
 #pragma mark - High level code (aux)
 
 static void aux_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = fbc_open(device);
+		const char *error_message = NULL;
+		connection_result = fbc_open(device, &error_message);
 		if (connection_result) {
 			//+ aux.on_connect
 			fbc_command(device, ": E 0 #", false);
@@ -146,7 +169,11 @@ static void aux_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", AUX_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -184,49 +211,29 @@ static void aux_light_intensity_handler(indigo_device *device) {
 }
 
 static void aux_light_impulse_handler(indigo_device *device) {
-	AUX_LIGHT_IMPULSE_PROPERTY->state = INDIGO_OK_STATE;
 	//+ aux.AUX_LIGHT_IMPULSE.on_change
-	if (fbc_command(device, ": F %d #", false, (int)(AUX_LIGHT_IMPULSE_DURATION_ITEM->number.value * 1000))) {
+	if (fbc_command(device, ": F %d #", false, (int)(AUX_LIGHT_IMPULSE_DURATION_ITEM->number.target * 1000))) {
+		PRIVATE_DATA->impulse_end_time = indigo_monotonic_time() + AUX_LIGHT_IMPULSE_DURATION_ITEM->number.target;
 		AUX_LIGHT_IMPULSE_PROPERTY->state = INDIGO_BUSY_STATE;
-		while (AUX_LIGHT_IMPULSE_DURATION_ITEM->number.value > 0) {
-			indigo_update_property(device, AUX_LIGHT_IMPULSE_PROPERTY, NULL);
-			if (AUX_LIGHT_IMPULSE_DURATION_ITEM->number.value > 1) {
-				indigo_usleep(INDIGO_DELAY(1));
-				AUX_LIGHT_IMPULSE_DURATION_ITEM->number.value -= 1;
-			} else if (AUX_LIGHT_IMPULSE_DURATION_ITEM->number.value >= 0) {
-				indigo_usleep(INDIGO_DELAY(AUX_LIGHT_IMPULSE_DURATION_ITEM->number.value));
-				AUX_LIGHT_IMPULSE_DURATION_ITEM->number.value = 0;
-			}
-		}
-		AUX_LIGHT_IMPULSE_PROPERTY->state = INDIGO_OK_STATE;
+		aux_light_impulse_finalizer(device);
 	} else {
 		AUX_LIGHT_IMPULSE_PROPERTY->state = INDIGO_ALERT_STATE;
+		indigo_update_property(device, AUX_LIGHT_IMPULSE_PROPERTY, NULL);
 	}
 	//- aux.AUX_LIGHT_IMPULSE.on_change
-	indigo_update_property(device, AUX_LIGHT_IMPULSE_PROPERTY, NULL);
 }
 
 static void aux_ccd_exposure_handler(indigo_device *device) {
-	CCD_EXPOSURE_PROPERTY->state = INDIGO_OK_STATE;
 	//+ aux.CCD_EXPOSURE.on_change
-	if (fbc_command(device, ": E %d #", false, (int)(CCD_EXPOSURE_ITEM->number.value * 1000))) {
+	if (fbc_command(device, ": E %d #", false, (int)(CCD_EXPOSURE_ITEM->number.target * 1000))) {
+		PRIVATE_DATA->exposure_end_time = indigo_monotonic_time() + CCD_EXPOSURE_ITEM->number.target;
 		CCD_EXPOSURE_PROPERTY->state = INDIGO_BUSY_STATE;
-		while (CCD_EXPOSURE_ITEM->number.value > 0) {
-			indigo_update_property(device, CCD_EXPOSURE_PROPERTY, NULL);
-			if (CCD_EXPOSURE_ITEM->number.value > 1) {
-				indigo_usleep(INDIGO_DELAY(1));
-				CCD_EXPOSURE_ITEM->number.value -= 1;
-			} else if (CCD_EXPOSURE_ITEM->number.value >= 0) {
-				indigo_usleep(INDIGO_DELAY(CCD_EXPOSURE_ITEM->number.value));
-				CCD_EXPOSURE_ITEM->number.value = 0;
-			}
-		}
-		CCD_EXPOSURE_PROPERTY->state = INDIGO_OK_STATE;
+		ccd_exposure_finalizer(device);
 	} else {
 		CCD_EXPOSURE_PROPERTY->state = INDIGO_ALERT_STATE;
+		indigo_update_property(device, CCD_EXPOSURE_PROPERTY, NULL);
 	}
 	//- aux.CCD_EXPOSURE.on_change
-	indigo_update_property(device, CCD_EXPOSURE_PROPERTY, NULL);
 }
 
 #pragma mark - Device API (aux)

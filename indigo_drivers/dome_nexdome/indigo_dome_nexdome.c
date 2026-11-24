@@ -40,7 +40,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x0300000E
+#define DRIVER_VERSION       0x03000010
 #define DRIVER_NAME          "indigo_dome_nexdome"
 #define DRIVER_LABEL         "NexDome"
 #define DOME_DEVICE_NAME     "NexDome"
@@ -218,10 +218,10 @@ static bool nexdome_get_azimuth(indigo_device *device, double *azimuth, char rep
 	return true;
 }
 
-static bool nexdome_open(indigo_device *device) {
+static bool nexdome_open(indigo_device *device, const char **error_message) {
 	char *name = DEVICE_PORT_ITEM->text.value;
 	if (!indigo_uni_is_url(name, "nexdome")) {
-		PRIVATE_DATA->handle = indigo_uni_open_serial(name, INDIGO_LOG_DEBUG);
+		PRIVATE_DATA->handle = indigo_uni_open_serial2(name, INDIGO_LOG_DEBUG, error_message);
 		if (PRIVATE_DATA->handle != NULL) {
 			// the controller resets when the serial port opens
 			indigo_sleep(NEXDOME_RESET_DELAY);
@@ -448,7 +448,8 @@ static void dome_status_poll(indigo_device *device) {
 static void dome_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = nexdome_open(device);
+		const char *error_message = NULL;
+		connection_result = nexdome_open(device, &error_message);
 		if (connection_result) {
 			//+ dome.on_connect
 			double value;
@@ -495,7 +496,11 @@ static void dome_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", DOME_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -641,7 +646,8 @@ static void dome_abort_motion_handler(indigo_device *device) {
 	indigo_cancel_pending_handler(device, dome_x_find_home_handler);
 	indigo_cancel_pending_handler(device, dome_x_calibrate_handler);
 	if (!PRIVATE_DATA->rotation_active && !PRIVATE_DATA->rotation_observed && (DOME_HORIZONTAL_COORDINATES_PROPERTY->state == INDIGO_BUSY_STATE || DOME_STEPS_PROPERTY->state == INDIGO_BUSY_STATE)) {
-		DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.value = DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.target = PRIVATE_DATA->current_position;
+		// the cancelled request was never sent: the dome stays where it is and the target keeps the request
+		DOME_HORIZONTAL_COORDINATES_AZ_ITEM->number.value = PRIVATE_DATA->current_position;
 		INDIGO_UPDATE_PROPERTY_STATE(DOME_HORIZONTAL_COORDINATES_PROPERTY, INDIGO_OK_STATE, NULL);
 		INDIGO_UPDATE_PROPERTY_STATE(DOME_STEPS_PROPERTY, INDIGO_OK_STATE, NULL);
 	}

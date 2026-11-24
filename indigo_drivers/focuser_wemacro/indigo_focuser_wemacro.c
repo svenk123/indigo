@@ -32,7 +32,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000008
+#define DRIVER_VERSION       0x0300000B
 #define DRIVER_NAME          "indigo_focuser_wemacro"
 #define DRIVER_LABEL         "WeMacro Rail Focuser"
 #define FOCUSER_DEVICE_NAME  "WeMacro Rail"
@@ -47,6 +47,13 @@
 #define WEMACRO_STATUS_FORWARD 0xF5
 #define WEMACRO_STATUS_BACKWARD 0xF6
 #define WEMACRO_STATUS_BATCH 0xF7
+// The controller ignores a frame that follows a configuration frame within about 30 ms.
+#define WEMACRO_CONFIG_SETTLE 0.1
+// A stop reports the stopped move about 10 ms later, a stopped batch its last step up to a second later.
+#define WEMACRO_MOVE_STOP_STATUS 0.5
+#define WEMACRO_BATCH_STOP_STATUS 1.5
+// The shutter reports the end of its pulse about 0.3 s later.
+#define WEMACRO_SHUTTER_STATUS 1.0
 
 //- define
 
@@ -92,10 +99,10 @@ typedef struct {
 	uint8_t response[WEMACRO_STATUS_SIZE + 1];
 	uint8_t expected_status;
 	uint32_t batch_remaining;
-	uint8_t batch_command, batch_settle, batch_per_step, batch_interval;
+	uint8_t batch_command, batch_settle, batch_per_step, batch_interval, batch_shots;
 	uint32_t batch_length, batch_count;
-	double deadline;
-	bool motion_active, batch_active, batch_start_pending, uncertain;
+	double deadline, config_time, owed_deadline;
+	bool motion_active, batch_active, batch_start_pending, uncertain, reversed, back, beep;
 	//- data
 } wemacro_private_data;
 
@@ -118,6 +125,10 @@ static uint16_t wemacro_crc(const uint8_t *buffer, size_t length) {
 }
 
 static bool wemacro_write(indigo_device *device, uint8_t command, uint8_t a, uint8_t b, uint8_t c, uint32_t value) {
+	double settle = PRIVATE_DATA->config_time + WEMACRO_CONFIG_SETTLE - indigo_monotonic_time();
+	if (settle > 0) {
+		indigo_usleep((unsigned)(settle * 1000000));
+	}
 	uint8_t *frame = PRIVATE_DATA->command;
 	frame[0] = 0xA5;
 	frame[1] = 0x5A;
@@ -132,7 +143,11 @@ static bool wemacro_write(indigo_device *device, uint8_t command, uint8_t a, uin
 	uint16_t crc = wemacro_crc(frame, 10);
 	frame[10] = (uint8_t)crc;
 	frame[11] = (uint8_t)(crc >> 8);
-	return indigo_uni_write(PRIVATE_DATA->handle, (const char *)frame, WEMACRO_FRAME_SIZE) == WEMACRO_FRAME_SIZE;
+	bool result = indigo_uni_write(PRIVATE_DATA->handle, (const char *)frame, WEMACRO_FRAME_SIZE) == WEMACRO_FRAME_SIZE;
+	if ((command & 0xF0) == 0x80) {
+		PRIVATE_DATA->config_time = indigo_monotonic_time();
+	}
+	return result;
 }
 
 static int wemacro_read_status(indigo_device *device, double timeout, uint8_t *status) {
@@ -140,7 +155,8 @@ static int wemacro_read_status(indigo_device *device, double timeout, uint8_t *s
 	if (count == 0) {
 		return 0;
 	}
-	if (count != WEMACRO_STATUS_SIZE || PRIVATE_DATA->response[0] != 0xA5 || PRIVATE_DATA->response[1] != 0x5A) {
+	// The controller answers with the two header bytes of a command frame swapped.
+	if (count != WEMACRO_STATUS_SIZE || PRIVATE_DATA->response[0] != 0x5A || PRIVATE_DATA->response[1] != 0xA5) {
 		return -1;
 	}
 	*status = PRIVATE_DATA->response[2];
@@ -172,8 +188,21 @@ static void wemacro_batch_state(indigo_device *device, indigo_property_state sta
 	indigo_update_property(device, X_RAIL_EXECUTE_PROPERTY, NULL);
 }
 
-static bool wemacro_stop(indigo_device *device) {
+static bool wemacro_stop(indigo_device *device, bool batch) {
+	PRIVATE_DATA->owed_deadline = indigo_monotonic_time() + (batch ? WEMACRO_BATCH_STOP_STATUS : WEMACRO_MOVE_STOP_STATUS);
 	return wemacro_write(device, 0x20, 0, 0, 0, 0);
+}
+
+// Consumes the status the controller still owes for a stop or the shutter, so the next operation does not take it for its own.
+static bool wemacro_settle(indigo_device *device) {
+	while (indigo_monotonic_time() < PRIVATE_DATA->owed_deadline) {
+		uint8_t status = 0;
+		if (wemacro_read_status(device, 0.1, &status) != 0) {
+			break;
+		}
+	}
+	PRIVATE_DATA->owed_deadline = 0;
+	return indigo_uni_discard(PRIVATE_DATA->handle) >= 0;
 }
 
 static bool wemacro_wait_status(indigo_device *device, uint8_t expected_status, double timeout) {
@@ -204,7 +233,7 @@ static void motion_finalizer(indigo_device *device) {
 			wemacro_motion_state(device, INDIGO_OK_STATE);
 		} else {
 			PRIVATE_DATA->uncertain = true;
-			wemacro_stop(device);
+			wemacro_stop(device, false);
 			wemacro_motion_state(device, INDIGO_ALERT_STATE);
 		}
 	} else if (result == 0 && indigo_monotonic_time() < PRIVATE_DATA->deadline) {
@@ -212,7 +241,7 @@ static void motion_finalizer(indigo_device *device) {
 	} else {
 		PRIVATE_DATA->motion_active = false;
 		PRIVATE_DATA->uncertain = true;
-		wemacro_stop(device);
+		wemacro_stop(device, false);
 		wemacro_motion_state(device, INDIGO_ALERT_STATE);
 	}
 }
@@ -224,10 +253,17 @@ static void batch_finalizer(indigo_device *device) {
 	uint8_t status = 0;
 	int result = wemacro_read_status(device, 0.1, &status);
 	if (result > 0) {
-		if (status == WEMACRO_STATUS_BATCH && PRIVATE_DATA->batch_remaining > 0) {
-			PRIVATE_DATA->batch_remaining--;
-			X_RAIL_EXECUTE_COUNT_ITEM->number.value = PRIVATE_DATA->batch_remaining;
-			wemacro_batch_state(device, INDIGO_BUSY_STATE);
+		if (status == WEMACRO_STATUS_FORWARD && PRIVATE_DATA->batch_remaining > 0) {
+			// The controller reports every step between two positions.
+			indigo_execute_handler_in(device, 0.1, batch_finalizer);
+		} else if (status == WEMACRO_STATUS_BATCH && PRIVATE_DATA->batch_remaining > 0) {
+			// The controller reports every shot, a position is done after the last of its shots.
+			if (--PRIVATE_DATA->batch_shots == 0) {
+				PRIVATE_DATA->batch_shots = PRIVATE_DATA->batch_per_step;
+				PRIVATE_DATA->batch_remaining--;
+				X_RAIL_EXECUTE_COUNT_ITEM->number.value = PRIVATE_DATA->batch_remaining;
+				wemacro_batch_state(device, INDIGO_BUSY_STATE);
+			}
 			if (PRIVATE_DATA->batch_remaining == 0 && !X_RAIL_CONFIG_BACK_ITEM->sw.value) {
 				PRIVATE_DATA->batch_active = PRIVATE_DATA->uncertain = false;
 				wemacro_batch_state(device, INDIGO_OK_STATE);
@@ -240,7 +276,7 @@ static void batch_finalizer(indigo_device *device) {
 		} else {
 			PRIVATE_DATA->batch_active = false;
 			PRIVATE_DATA->uncertain = true;
-			wemacro_stop(device);
+			wemacro_stop(device, true);
 			wemacro_batch_state(device, INDIGO_ALERT_STATE);
 		}
 	} else if (result == 0 && indigo_monotonic_time() < PRIVATE_DATA->deadline) {
@@ -248,7 +284,7 @@ static void batch_finalizer(indigo_device *device) {
 	} else {
 		PRIVATE_DATA->batch_active = false;
 		PRIVATE_DATA->uncertain = true;
-		wemacro_stop(device);
+		wemacro_stop(device, true);
 		wemacro_batch_state(device, INDIGO_ALERT_STATE);
 	}
 }
@@ -268,17 +304,25 @@ static void batch_start_finalizer(indigo_device *device) {
 	}
 }
 
+static bool wemacro_drain(indigo_device *device) {
+	// The status that follows a stop can arrive after the status of the preceding move, read until the line is quiet.
+	uint8_t status = 0;
+	for (int i = 0; i < 10 && wemacro_read_status(device, 0.1, &status) > 0; i++) {
+	}
+	return indigo_uni_discard(PRIVATE_DATA->handle) >= 0;
+}
+
 static bool wemacro_initialise(indigo_device *device) {
 	uint8_t status = 0;
 	if (wemacro_read_status(device, 2, &status) > 0 && status == WEMACRO_STATUS_INITIAL) {
 		return wemacro_write(device, wemacro_options(device, true), wemacro_speed(device), 0, 0, 0);
 	}
 	indigo_uni_discard(PRIVATE_DATA->handle);
-	return wemacro_write(device, 0x40, 0, 0, 0, 0) && wemacro_write(device, 0x20, 0, 0, 0, 0) && wemacro_wait_status(device, WEMACRO_STATUS_FORWARD, 2) && indigo_uni_discard(PRIVATE_DATA->handle) >= 0 && wemacro_write(device, 0x40, 0, 0, 0, 0) && wemacro_wait_status(device, WEMACRO_STATUS_FORWARD, 2) && wemacro_write(device, wemacro_options(device, true), wemacro_speed(device), 0, 0, 0);
+	return wemacro_write(device, 0x40, 0, 0, 0, 0) && wemacro_write(device, 0x20, 0, 0, 0, 0) && wemacro_wait_status(device, WEMACRO_STATUS_FORWARD, 2) && wemacro_drain(device) && wemacro_write(device, 0x40, 0, 0, 0, 0) && wemacro_wait_status(device, WEMACRO_STATUS_FORWARD, 2) && wemacro_write(device, wemacro_options(device, true), wemacro_speed(device), 0, 0, 0);
 }
 
-static bool wemacro_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 9600, INDIGO_LOG_DEBUG | BINARY_LOG);
+static bool wemacro_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 9600, INDIGO_LOG_DEBUG | BINARY_LOG, error_message);
 	if (PRIVATE_DATA->handle && wemacro_initialise(device)) {
 		return true;
 	}
@@ -297,10 +341,14 @@ static void wemacro_close(indigo_device *device) {
 static void focuser_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = wemacro_open(device);
+		const char *error_message = NULL;
+		connection_result = wemacro_open(device, &error_message);
 		if (connection_result) {
 			//+ focuser.on_connect
 			PRIVATE_DATA->motion_active = PRIVATE_DATA->batch_active = PRIVATE_DATA->batch_start_pending = PRIVATE_DATA->uncertain = false;
+			PRIVATE_DATA->reversed = FOCUSER_REVERSE_MOTION_ENABLED_ITEM->sw.value;
+			PRIVATE_DATA->back = X_RAIL_CONFIG_BACK_ITEM->sw.value;
+			PRIVATE_DATA->beep = X_RAIL_CONFIG_BEEP_ITEM->sw.value;
 			indigo_update_property(device, INFO_PROPERTY, NULL);
 			//- focuser.on_connect
 		}
@@ -311,7 +359,11 @@ static void focuser_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -322,7 +374,7 @@ static void focuser_connection_handler(indigo_device *device) {
 		indigo_cancel_pending_handler(device, batch_start_finalizer);
 		indigo_cancel_pending_handler(device, batch_finalizer);
 		if (PRIVATE_DATA->motion_active || PRIVATE_DATA->batch_active || PRIVATE_DATA->batch_start_pending || PRIVATE_DATA->uncertain) {
-			wemacro_stop(device);
+			wemacro_stop(device, PRIVATE_DATA->batch_active || PRIVATE_DATA->batch_start_pending);
 		}
 		if (FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE) {
 			wemacro_motion_state(device, INDIGO_ALERT_STATE);
@@ -359,6 +411,20 @@ static void focuser_connection_handler(indigo_device *device) {
 	indigo_focuser_change_property(device, NULL, CONNECTION_PROPERTY);
 }
 
+static void focuser_reverse_motion_handler(indigo_device *device) {
+	FOCUSER_REVERSE_MOTION_PROPERTY->state = INDIGO_OK_STATE;
+	//+ focuser.FOCUSER_REVERSE_MOTION.on_change
+	// The driver owns the reversal; it is refused during a move or batch and keeps the previous item.
+	if (PRIVATE_DATA->motion_active || PRIVATE_DATA->batch_active || PRIVATE_DATA->batch_start_pending || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || X_RAIL_EXECUTE_PROPERTY->state == INDIGO_BUSY_STATE) {
+		indigo_set_switch(FOCUSER_REVERSE_MOTION_PROPERTY, PRIVATE_DATA->reversed ? FOCUSER_REVERSE_MOTION_ENABLED_ITEM : FOCUSER_REVERSE_MOTION_DISABLED_ITEM, true);
+		FOCUSER_REVERSE_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else {
+		PRIVATE_DATA->reversed = FOCUSER_REVERSE_MOTION_ENABLED_ITEM->sw.value;
+	}
+	//- focuser.FOCUSER_REVERSE_MOTION.on_change
+	indigo_update_property(device, FOCUSER_REVERSE_MOTION_PROPERTY, NULL);
+}
+
 static void focuser_speed_handler(indigo_device *device) {
 	FOCUSER_SPEED_PROPERTY->state = INDIGO_OK_STATE;
 	//+ focuser.FOCUSER_SPEED.on_change
@@ -381,10 +447,10 @@ static void focuser_steps_handler(indigo_device *device) {
 		wemacro_motion_state(device, INDIGO_ALERT_STATE);
 	} else if (steps == 0) {
 		wemacro_motion_state(device, INDIGO_OK_STATE);
-	} else if (indigo_uni_discard(PRIVATE_DATA->handle) >= 0 && wemacro_write(device, command, 0, 0, 0, steps)) {
+	} else if (wemacro_settle(device) && wemacro_write(device, command, 0, 0, 0, steps)) {
 		PRIVATE_DATA->motion_active = true;
 		PRIVATE_DATA->expected_status = command == 0x40 ? WEMACRO_STATUS_FORWARD : WEMACRO_STATUS_BACKWARD;
-		PRIVATE_DATA->deadline = indigo_monotonic_time() + 5 + steps / (FOCUSER_SPEED_ITEM->number.value == 2 ? 4000.0 : 2000.0);
+		PRIVATE_DATA->deadline = indigo_monotonic_time() + 5 + steps / (FOCUSER_SPEED_ITEM->number.value == 2 ? 2000.0 : 1000.0);
 		wemacro_motion_state(device, INDIGO_BUSY_STATE);
 		indigo_execute_handler_in(device, 0.1, motion_finalizer);
 	} else {
@@ -404,9 +470,11 @@ static void focuser_abort_motion_handler(indigo_device *device) {
 		indigo_cancel_pending_handler(device, motion_finalizer);
 		indigo_cancel_pending_handler(device, batch_start_finalizer);
 		indigo_cancel_pending_handler(device, batch_finalizer);
-		bool active = PRIVATE_DATA->motion_active || PRIVATE_DATA->batch_active || PRIVATE_DATA->batch_start_pending || PRIVATE_DATA->uncertain;
+		// A move or batch still queued is cancelled and the stop is sent for it as well.
+		bool active = pending || PRIVATE_DATA->motion_active || PRIVATE_DATA->batch_active || PRIVATE_DATA->batch_start_pending || PRIVATE_DATA->uncertain;
+		bool batch = X_RAIL_EXECUTE_PROPERTY->state == INDIGO_BUSY_STATE || PRIVATE_DATA->batch_active || PRIVATE_DATA->batch_start_pending;
 		PRIVATE_DATA->motion_active = PRIVATE_DATA->batch_active = PRIVATE_DATA->batch_start_pending = false;
-		if (active && (!IS_CONNECTED || !wemacro_stop(device))) {
+		if (active && (!IS_CONNECTED || !wemacro_stop(device, batch))) {
 			PRIVATE_DATA->uncertain = true;
 			FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
 		} else {
@@ -426,13 +494,32 @@ static void focuser_abort_motion_handler(indigo_device *device) {
 	//- focuser.FOCUSER_ABORT_MOTION.on_change
 }
 
+static void focuser_x_rail_config_handler(indigo_device *device) {
+	X_RAIL_CONFIG_PROPERTY->state = INDIGO_OK_STATE;
+	//+ focuser.X_RAIL_CONFIG.on_change
+	// The batch completion depends on BACK, so the configuration is refused during a move or batch.
+	if (PRIVATE_DATA->motion_active || PRIVATE_DATA->batch_active || PRIVATE_DATA->batch_start_pending || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || X_RAIL_EXECUTE_PROPERTY->state == INDIGO_BUSY_STATE) {
+		X_RAIL_CONFIG_BACK_ITEM->sw.value = PRIVATE_DATA->back;
+		X_RAIL_CONFIG_BEEP_ITEM->sw.value = PRIVATE_DATA->beep;
+		X_RAIL_CONFIG_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else {
+		PRIVATE_DATA->back = X_RAIL_CONFIG_BACK_ITEM->sw.value;
+		PRIVATE_DATA->beep = X_RAIL_CONFIG_BEEP_ITEM->sw.value;
+	}
+	//- focuser.X_RAIL_CONFIG.on_change
+	indigo_update_property(device, X_RAIL_CONFIG_PROPERTY, NULL);
+}
+
 static void focuser_x_rail_shutter_handler(indigo_device *device) {
 	X_RAIL_SHUTTER_PROPERTY->state = INDIGO_OK_STATE;
 	//+ focuser.X_RAIL_SHUTTER.on_change
 	bool requested = X_RAIL_SHUTTER_ITEM->sw.value;
 	X_RAIL_SHUTTER_ITEM->sw.value = false;
-	if (requested && (!IS_CONNECTED || !wemacro_write(device, 0x04, 0, 0, 0, 0))) {
+	// The shutter status would end a move or batch that runs, so the shutter is refused meanwhile.
+	if (requested && (!IS_CONNECTED || PRIVATE_DATA->motion_active || PRIVATE_DATA->batch_active || PRIVATE_DATA->batch_start_pending || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || X_RAIL_EXECUTE_PROPERTY->state == INDIGO_BUSY_STATE || !wemacro_write(device, 0x04, 0, 0, 0, 0))) {
 		X_RAIL_SHUTTER_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else if (requested) {
+		PRIVATE_DATA->owed_deadline = indigo_monotonic_time() + WEMACRO_SHUTTER_STATUS;
 	}
 	//- focuser.X_RAIL_SHUTTER.on_change
 	indigo_update_property(device, X_RAIL_SHUTTER_PROPERTY, NULL);
@@ -445,15 +532,16 @@ static void focuser_x_rail_execute_handler(indigo_device *device) {
 	PRIVATE_DATA->batch_interval = (uint8_t)X_RAIL_EXECUTE_INTERVAL_ITEM->number.target;
 	PRIVATE_DATA->batch_length = (uint32_t)X_RAIL_EXECUTE_LENGTH_ITEM->number.target;
 	PRIVATE_DATA->batch_count = (uint32_t)X_RAIL_EXECUTE_COUNT_ITEM->number.target;
-	if (!IS_CONNECTED || PRIVATE_DATA->motion_active || PRIVATE_DATA->batch_active || PRIVATE_DATA->batch_start_pending || PRIVATE_DATA->uncertain || indigo_uni_discard(PRIVATE_DATA->handle) < 0 || !wemacro_write(device, wemacro_options(device, false), wemacro_speed(device), 0, 0, PRIVATE_DATA->batch_length)) {
+	if (!IS_CONNECTED || PRIVATE_DATA->motion_active || PRIVATE_DATA->batch_active || PRIVATE_DATA->batch_start_pending || PRIVATE_DATA->uncertain || !wemacro_settle(device) || !wemacro_write(device, wemacro_options(device, false), wemacro_speed(device), 0, 0, PRIVATE_DATA->batch_length)) {
 		wemacro_batch_state(device, INDIGO_ALERT_STATE);
 	} else {
 		for (int i = 0; i < X_RAIL_EXECUTE_PROPERTY->count; i++) {
 			X_RAIL_EXECUTE_PROPERTY->items[i].number.value = X_RAIL_EXECUTE_PROPERTY->items[i].number.target;
 		}
 		PRIVATE_DATA->batch_remaining = PRIVATE_DATA->batch_count;
+		PRIVATE_DATA->batch_shots = PRIVATE_DATA->batch_per_step;
 		PRIVATE_DATA->batch_command = 0x10 | (X_RAIL_CONFIG_BEEP_ITEM->sw.value ? 0x02 : 0) | (X_RAIL_CONFIG_BACK_ITEM->sw.value ? 0x08 : 0);
-		PRIVATE_DATA->deadline = indigo_monotonic_time() + 10 + PRIVATE_DATA->batch_count * (PRIVATE_DATA->batch_settle + PRIVATE_DATA->batch_per_step * PRIVATE_DATA->batch_interval + 1);
+		PRIVATE_DATA->deadline = indigo_monotonic_time() + 10 + PRIVATE_DATA->batch_count * (PRIVATE_DATA->batch_settle + PRIVATE_DATA->batch_per_step * PRIVATE_DATA->batch_interval + 1 + PRIVATE_DATA->batch_length / 1000.0);
 		PRIVATE_DATA->batch_start_pending = true;
 		PRIVATE_DATA->uncertain = false;
 		wemacro_batch_state(device, INDIGO_BUSY_STATE);
@@ -532,12 +620,10 @@ static indigo_result focuser_change_property(indigo_device *device, indigo_clien
 		INDIGO_PROCESS_CONNECT(focuser_connection_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_REVERSE_MOTION_PROPERTY, property)) {
-		indigo_property_copy_values(FOCUSER_REVERSE_MOTION_PROPERTY, property, false);
-		FOCUSER_REVERSE_MOTION_PROPERTY->state = INDIGO_OK_STATE;
-		indigo_update_property(device, FOCUSER_REVERSE_MOTION_PROPERTY, NULL);
+		INDIGO_COPY_VALUES_PROCESS_CHANGE(FOCUSER_REVERSE_MOTION_PROPERTY, focuser_reverse_motion_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_SPEED_PROPERTY, property)) {
-		INDIGO_COPY_VALUES_PROCESS_CHANGE(FOCUSER_SPEED_PROPERTY, focuser_speed_handler);
+		INDIGO_COPY_TARGETS_PROCESS_CHANGE(FOCUSER_SPEED_PROPERTY, focuser_speed_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_STEPS_PROPERTY, property)) {
 		INDIGO_REJECT_CHANGE_IF(X_RAIL_EXECUTE_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_ABORT_MOTION_PROPERTY->state == INDIGO_BUSY_STATE, FOCUSER_STEPS_PROPERTY, "Another rail operation is in progress");
@@ -547,9 +633,7 @@ static indigo_result focuser_change_property(indigo_device *device, indigo_clien
 		INDIGO_COPY_VALUES_PROCESS_URGENT_CHANGE(FOCUSER_ABORT_MOTION_PROPERTY, focuser_abort_motion_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(X_RAIL_CONFIG_PROPERTY, property)) {
-		indigo_property_copy_values(X_RAIL_CONFIG_PROPERTY, property, false);
-		X_RAIL_CONFIG_PROPERTY->state = INDIGO_OK_STATE;
-		indigo_update_property(device, X_RAIL_CONFIG_PROPERTY, NULL);
+		INDIGO_COPY_VALUES_PROCESS_CHANGE(X_RAIL_CONFIG_PROPERTY, focuser_x_rail_config_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(X_RAIL_SHUTTER_PROPERTY, property)) {
 		INDIGO_COPY_VALUES_PROCESS_CHANGE(X_RAIL_SHUTTER_PROPERTY, focuser_x_rail_shutter_handler);

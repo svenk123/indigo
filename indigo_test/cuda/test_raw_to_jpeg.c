@@ -138,7 +138,7 @@ static void check(const char *label, int bpp, const char *bayer, const void *dat
 	const bool gpu_possible = indigo_cuda_available();
 	if (gpu_possible) { // the reference run without the GPU
 		indigo_cuda_set_enabled(false);
-		indigo_raw_to_jpeg(device, (void *)data, width, height, bpp, bayer, &cpu_jpeg, &cpu_size, NULL, NULL, B, C);
+		indigo_raw_to_jpeg(device, (void *)data, width, height, bpp, bayer, &cpu_jpeg, &cpu_size, NULL, NULL, B, C, 0);
 		indigo_cuda_set_enabled(true);
 	}
 	double cpu_ms = 0, gpu_ms = 0;
@@ -147,9 +147,9 @@ static void check(const char *label, int bpp, const char *bayer, const void *dat
 		for (int r = 0; r < 3; r++) {
 			void *j = NULL; unsigned long n = 0;
 			indigo_cuda_set_enabled(false);
-			double t = now_ms(); indigo_raw_to_jpeg(device, (void *)data, width, height, bpp, bayer, &j, &n, NULL, NULL, B, C); t_cpu[r] = now_ms() - t; free(j);
+			double t = now_ms(); indigo_raw_to_jpeg(device, (void *)data, width, height, bpp, bayer, &j, &n, NULL, NULL, B, C, 0); t_cpu[r] = now_ms() - t; free(j);
 			indigo_cuda_set_enabled(true);
-			t = now_ms(); indigo_raw_to_jpeg(device, (void *)data, width, height, bpp, bayer, &j, &n, NULL, NULL, B, C); t_gpu[r] = now_ms() - t; free(j);
+			t = now_ms(); indigo_raw_to_jpeg(device, (void *)data, width, height, bpp, bayer, &j, &n, NULL, NULL, B, C, 0); t_gpu[r] = now_ms() - t; free(j);
 		}
 		qsort(t_cpu, 3, sizeof(double), compare_double);
 		qsort(t_gpu, 3, sizeof(double), compare_double);
@@ -157,7 +157,7 @@ static void check(const char *label, int bpp, const char *bayer, const void *dat
 		gpu_ms = t_gpu[1];
 	}
 	const unsigned long calls_before = indigo_cuda_stretch_calls();
-	indigo_raw_to_jpeg(device, (void *)data, width, height, bpp, bayer, &jpeg, &jpeg_size, histogram ? &histogram_jpeg : NULL, histogram ? &histogram_size : NULL, B, C);
+	indigo_raw_to_jpeg(device, (void *)data, width, height, bpp, bayer, &jpeg, &jpeg_size, histogram ? &histogram_jpeg : NULL, histogram ? &histogram_size : NULL, B, C, 0);
 	const bool on_gpu = indigo_cuda_stretch_calls() > calls_before;
 	checks++;
 	if (!gpu_possible) {

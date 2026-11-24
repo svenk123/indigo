@@ -15,7 +15,7 @@ This document explains how INDIGO drivers, and the framework code they depend on
 * [AGENTS.md](../AGENTS.md), section *Driver Testing*: the four run modes, commit units, and the rule that the final, recorded run is always made with `tools/run_driver_test.py`.
 * [indigo_test/AGENTS.md](../indigo_test/AGENTS.md): test layout, harness conventions, Makefile wiring, configuration isolation, parallel runners, hardware hosts and the `README.md` test record format.
 * [indigo_test/DRIVER_TESTING_RULES.md](../indigo_test/DRIVER_TESTING_RULES.md): the acceptance checklist for each driver class (CCD, wheel, focuser, guider, AO, GPS, rotator, dome, mount, polar aligner, AUX).
-* [indigo_drivers/AGENTS.override.md](../indigo_drivers/AGENTS.override.md): the refactoring workflow (`REFACTOR.md`, baseline, reference traces, MountSim).
+* [indigo_drivers/AGENTS.md](../indigo_drivers/AGENTS.md): the refactoring workflow (task record, baseline, reference traces, MountSim).
 * [SERIAL_DEVICE_SIMULATORS.md](SERIAL_DEVICE_SIMULATORS.md): the contract for host-side serial simulators.
 
 ---
@@ -37,10 +37,10 @@ This document explains how INDIGO drivers, and the framework code they depend on
 | MountSim acceptance | `indigo_test/mountsim/` | MountSim macOS application | no, macOS only |
 | Physical hardware | `indigo_test/hardware/test_<driver>_hw.c` | the real device | no |
 | Benchmarks | `indigo_test/benchmark/` and `-D*_TIMING_BENCHMARK` builds | any | no (`make benchmark`) |
-| Shell compliance scripts | `indigo_tests/*_compliance.sh` | a running `indigo_server`, via `indigo_prop_tool` | no |
+| Shell compliance scripts | `indigo_test/shell_compliance/*_compliance.sh` | a running `indigo_server`, via `indigo_prop_tool` | no |
 | Manual testing | `indigo_server` with drivers, a client or `indigo_prop_tool` | simulator or hardware | no |
 
-`indigo_test/` (singular) contains the automated C suite. `indigo_tests/` (plural) is a separate bash framework described in [End-to-End Tests With indigo_server](#end-to-end-tests-with-indigo_server).
+`indigo_test/` contains the automated C suite. Its `shell_compliance/` subdirectory contains the separate Bash framework described in [End-to-End Tests With indigo_server](#end-to-end-tests-with-indigo_server).
 
 ### Unit tests
 
@@ -68,6 +68,8 @@ Drivers that talk to a vendor SDK, libusb, hidapi or sysfs are tested against a 
 
 ### Agent tests
 
+The [native INDIGO solver reference](../indigo_drivers/agent_platesolver/doc/PLATESOLVER.md) describes native plate-solving behavior and links its focused tests.
+
 `test_agent_imager`, `test_agent_guider`, `test_agent_mount`, `test_agent_config`, `test_agent_astrometry`, `test_agent_scripting`, `test_agent_scripting_sequencer`, `test_agent_imager_guider_mount` and `test_agent_imager_instances` build the real agent source, plus `indigo_driver.c` and `indigo_filter.c` where needed, into test objects and link them with simulator driver archives. Time, sleeps, sockets or file replacement are redirected with `-D` where a scenario needs it. For example `test_agent_mount` replaces `time`, `indigo_usleep` and the `indigo_uni_*` socket calls with a scripted LX200 transport, so no socket is opened. These tests are the place to check how drivers and agents cooperate.
 
 ### Client-detach motion release
@@ -82,8 +84,9 @@ Drivers that talk to a vendor SDK, libusb, hidapi or sysfs are tested against a 
 ### Opt-in variants: network, sanitizers, MountSim, hardware
 
 * **Network:** targets such as `test-mount-lx200-tcp`, `test-mount-ioptron-tcp`, `test-detach-abort-network` and `test-dome-<name>-simulator-network` run the `--tcp` or `--network` mode of a suite. Some bind fixed loopback ports; `test-dome-baader-simulator-network` uses 8080, for example. They are not part of `test-integration`.
-* **Sanitizers:** many suites have a `$(INTEGRATION_BUILD)/test_<driver>_simulator_sanitize` (or `_asan`) build that compiles the driver source with `-O1 -fsanitize=address,undefined -fno-omit-frame-pointer`. A `test-<driver>-sanitize` phony target runs it with `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1`. Coverage is per driver, not global; check `indigo_test/Makefile` for the driver you are working on. Several sanitize rules hard-code `-arch arm64`, so they target Apple Silicon as written. Valgrind is not used or wired anywhere in the repository.
-* **MountSim:** `make -C indigo_test test-mount-<driver>-mountsim` (temma, rainbow, ioptron, lx200, nexstar, synscan) drives the real driver against the MountSim macOS application through `mountsim/run_mountsim.py`. It needs macOS, a GUI session and a built MountSim (`MOUNTSIM_APP`). See [MountSim harness usage](../indigo_test/mountsim/USAGE.md) and *Testing mounts with MountSim* in [indigo_drivers/AGENTS.override.md](../indigo_drivers/AGENTS.override.md).
+* **Sanitizers:** many suites have a `$(INTEGRATION_BUILD)/test_<driver>_simulator_sanitize` (or `_asan`) build that compiles the driver source with `-O1 -fsanitize=address,undefined -fno-omit-frame-pointer`. A `test-<driver>-sanitize` phony target runs it with `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1`. Coverage is per driver, not global; check `indigo_test/Makefile` for the driver you are working on. Several sanitize rules hard-code `-arch arm64`, so they target Apple Silicon as written.
+* **Leaks:** `test-server-leaks` runs the `indigo_server` executable with the simulator drivers under Valgrind memcheck (`indigo_test/leak/run_server_leak_check.py`); it is opt-in and slow. No other suite checks for leaks.
+* **MountSim:** `make -C indigo_test test-mount-<driver>-mountsim` (temma, rainbow, ioptron, lx200, nexstar, synscan) drives the real driver against the MountSim macOS application through `mountsim/run_mountsim.py`. It needs macOS, a GUI session and a built MountSim (`MOUNTSIM_APP`). See [MountSim harness usage](../indigo_test/mountsim/USAGE.md) and *Testing mounts with MountSim* in [indigo_drivers/AGENTS.md](../indigo_drivers/AGENTS.md).
 * **Hardware:** `make -C indigo_test test-<driver>-hw` builds `indigo_test/hardware/test_<driver>_hw.c`, most of them on top of `hardware/hardware_test_common.h`. The binaries refuse to run without `--run`, which the targets pass. Options come from per-driver environment variables documented above each target, such as `HW_DEBUG=1`, `HW_PARK=1` and `HW_TRACE=1`. The device port or URL comes from the suite's own variable, such as `MOUNT_PMC8_HW_PORT`, or from the common `INDIGO_TEST_PORT` that `run_driver_test.py --port` sets. Camera suites select the camera with `INDIGO_TEST_DEVICE` (`--device`) when more than one is attached and use the only one otherwise (ASI wants the exact discovered name, Atik a unique substring). The opt-in unplug and replug case runs with `HW_HOTPLUG=1` or through a separate `test-<driver>-hotplug-hw` target. Mounts and focusers move during these tests. A hardware run is started only when explicitly requested, in one of the four modes defined in [AGENTS.md](../AGENTS.md), and its recorded run goes through [`tools/run_driver_test.py`](#running-and-recording-with-run_driver_testpy) with `--hw` or `--hot-plug`.
 
 ---
@@ -192,7 +195,7 @@ In `indigo_test/Makefile` (see *Makefile Rules* and *Wiring a Host-Side Serial S
 4. Add the test rule. List the shared headers, the simulator binary **and the driver archive** as prerequisites, so a rebuilt driver relinks the test.
 5. Optionally add a `test-<driver>-...` phony target, and a `_sanitize` build for drivers with non-trivial state.
 
-Then add every new source, header and fixture to its group in `indigo.xcodeproj/project.pbxproj`. After changing a driver's test coverage, update the driver's `REFACTOR.md` and the *Automated Tests (Sim / HW)* counts in the root `MIGRATION_STATUS.md`.
+Then add every new source, header and fixture to its group in `indigo.xcodeproj/project.pbxproj`. After changing a driver's test coverage, record it in the task's `verification.md` and update the *Automated Tests (Sim / HW)* counts in the root `MIGRATION_STATUS.md`.
 
 ---
 
@@ -235,7 +238,7 @@ The automated suite is POSIX only. It uses `fork()`, pseudo terminals, `nftw()` 
 
 ### Continuous integration
 
-The repository has no active CI test job. There is no `.github/workflows`. The legacy `.travis.yml` builds on Linux, macOS and Windows and calls `indigo_test/test_suite.sh --driver-test`, but that script does not exist in the repository, so the Travis test step is stale. Run the suite locally, or on the hardware host as described in *Driving the Hardware Test Host Over SSH* in [indigo_test/AGENTS.md](../indigo_test/AGENTS.md).
+The repository has no active CI test job. There is no `.github/workflows`. Run the suite locally, or on the hardware host as described in *Driving the Hardware Test Host Over SSH* in [indigo_test/AGENTS.md](../indigo_test/AGENTS.md).
 
 ---
 
@@ -347,12 +350,12 @@ indigo_prop_tool get_state "<Device>.CONNECTION"
 
 `-r host[:port]` selects a remote server, `-w OK|BUSY|ALERT|IDLE|ANY` waits for a state, `-t` sets the wait in seconds (default 2), and `-v`/`-vv`/`-vvv` enable logging. Run `indigo_prop_tool -h` for the full list.
 
-### Shell compliance scripts (`indigo_tests/`)
+### Shell compliance scripts (`indigo_test/shell_compliance/`)
 
-`indigo_tests/indigo_test_framework.sh` is a bash library on top of `indigo_prop_tool`, documented in [indigo_tests/INDIGO_TEST_FRAMEWORK.md](../indigo_tests/INDIGO_TEST_FRAMEWORK.md). Class scripts (`ao_`, `filter_wheel_`, `focuser_`, `gps_`, `guider_`, `rotator_compliance.sh`) run against any device on a running server:
+`indigo_test/shell_compliance/indigo_test_framework.sh` is a bash library on top of `indigo_prop_tool`, documented in [indigo_test/shell_compliance/INDIGO_TEST_FRAMEWORK.md](../indigo_test/shell_compliance/INDIGO_TEST_FRAMEWORK.md). Class scripts (`ao_`, `filter_wheel_`, `focuser_`, `gps_`, `guider_`, `rotator_compliance.sh`) run against any device on a running server:
 
 ```sh
-INDIGO_PROP_TOOL=build/bin/indigo_prop_tool indigo_tests/focuser_compliance.sh "Focuser Simulator" localhost:7624
+INDIGO_PROP_TOOL=build/bin/indigo_prop_tool indigo_test/shell_compliance/focuser_compliance.sh "Focuser Simulator" localhost:7624
 ```
 
 They are useful for a quick check of a real device or a server build. They are not part of `make test`, and [DRIVER_TESTING_RULES.md](../indigo_test/DRIVER_TESTING_RULES.md) folds their scenarios into the C suite.
@@ -364,13 +367,13 @@ They are useful for a quick check of a real device or a server build. They are n
 How the generator itself works is in [DRIVER_GENERATOR_BASICS.md](DRIVER_GENERATOR_BASICS.md). For testing a generated driver:
 
 1. **Backend first.** A serial or hidapi driver gets a PTY simulator (`indigo_drivers/<driver>/<driver>_simulator/`, using `serial_motion.h` for motion). A libusb or SDK driver gets a fake at the SDK/USB boundary using `-D` replacements. A virtual driver is tested directly.
-2. **Baseline for migrations.** When a hand-written driver is converted, the suite must first pass against the original driver, and its reference trace must be recorded (`INDIGO_SIMULATOR_TRACE_DIR`, `fixtures/<driver>/original_reference_trace.txt`) before reverse extraction. See [indigo_drivers/AGENTS.override.md](../indigo_drivers/AGENTS.override.md) and [DRIVER_GENERATOR_MIGRATION.md](DRIVER_GENERATOR_MIGRATION.md).
+2. **Baseline for migrations.** When a hand-written driver is converted, the suite must first pass against the original driver, and its reference trace must be recorded (`INDIGO_SIMULATOR_TRACE_DIR`, `fixtures/<driver>/original_reference_trace.txt`) before reverse extraction. See [indigo_drivers/AGENTS.md](../indigo_drivers/AGENTS.md) and [DRIVER_GENERATOR_MIGRATION.md](DRIVER_GENERATOR_MIGRATION.md).
 3. **Use public names.** Generated headers expose only the entry point. Tests use the generated device names and public property names, not removed private macros.
 4. **Cover generator semantics.** Beyond the class checklist, test the paths the generator owns: connect failure rollback and reconnect, shared-connection reference counting for multi-device drivers (both connection orders, last close), the BUSY guard that rejects overlapping requests, finalizer completion versus abort and disconnect, persistent properties through a save/load cycle in a private `HOME`, the mount parked-mount guard, and hot-plug attach, detach and duplicate events for `libusb`/`hid`/`sdk` drivers.
-   For an `sdk` hot-plug driver, include several devices arriving together while the fake SDK enumerates them in reverse. Most vendor SDKs cannot say which USB device a camera or wheel enumerates from, so the `plug` block binds each USB device to the first SDK device not attached yet, and the pointer in `PRIVATE_DATA->usbdev` can belong to another device. The generated code therefore lets `unplug_match` decide every removal, preset with the libusb identity, and a case must show that unplugging one device leaves the other attached (`simultaneous arrivals and SDK-based removal identity` in `test_wheel_playerone_sdk.c`). A driver that has to trust the libusb identity guards its own block with `if (!unplug_result)`, as `ccd_qhy2` does, and says in `REFACTOR.md` what that costs.
+   For an `sdk` hot-plug driver, include several devices arriving together while the fake SDK enumerates them in reverse. Most vendor SDKs cannot say which USB device a camera or wheel enumerates from, so the `plug` block binds each USB device to the first SDK device not attached yet, and the pointer in `PRIVATE_DATA->usbdev` can belong to another device. The generated code therefore lets `unplug_match` decide every removal, preset with the libusb identity, and a case must show that unplugging one device leaves the other attached (`simultaneous arrivals and SDK-based removal identity` in `test_wheel_playerone_sdk.c`). A driver that has to trust the libusb identity guards its own block with `if (!unplug_result)`, as `ccd_qhy2` does, and says in the task's `verification.md` what that costs.
 5. **Regenerate, build, run narrow, then full.** After each `.driver` edit, regenerate, build the driver archive (the test rule relinks because the archive is a prerequisite), inspect the generated diff, run the narrowest case with `INDIGO_TEST_CASE_FILTER`, and then the driver's full suite and its sanitize target if present.
 6. **Generator changes** are validated by `test_generator_architecture`, which runs `build/bin/indigo_generator` on fixture `.driver` files and compiles the output. Generator changes need explicit user approval ([AGENTS.md](../AGENTS.md)).
-7. **Record.** Make the final run with `python3 tools/run_driver_test.py <driver>` (and `--hw` or `--hot-plug` for hardware), which writes the driver `README.md` `## Testing` line and regenerates `TEST_SUMMARY.md`. Update `REFACTOR.md` (scenario-to-test mapping, gaps) and the `MIGRATION_STATUS.md` status columns and test counts by hand.
+7. **Record.** Make the final run with `python3 tools/run_driver_test.py <driver>` (and `--hw` or `--hot-plug` for hardware), which writes the driver `README.md` `## Testing` line and regenerates `TEST_SUMMARY.md`. Record the scenario-to-test mapping and gaps in the task's `verification.md` and update the `MIGRATION_STATUS.md` status columns and test counts by hand.
 
 ---
 
@@ -385,9 +388,9 @@ How the generator itself works is in [DRIVER_GENERATOR_BASICS.md](DRIVER_GENERAT
 * Cleanup runs on every path: disconnect, shutdown, detach, `indigo_stop()`, simulator stop and directory removal.
 * No exact `DRIVER_VERSION` asserts. Only the API generation is asserted.
 * The Makefile lists the executable and has prerequisites for the headers, the simulator binary and the driver archive. Sources, headers and fixtures are registered in `indigo.xcodeproj`.
-* Guider-capable drivers have a pulse-duration measurement recorded in `REFACTOR.md`.
+* Guider-capable drivers have a pulse-duration measurement recorded in the task's `verification.md`.
 * Full suite clean, plus the sanitize target where present. Run `make -C indigo_test test-clean` afterwards.
-* The final run is made with `tools/run_driver_test.py`, which updates the driver `README.md` `## Testing` line and `TEST_SUMMARY.md`. `REFACTOR.md` and `MIGRATION_STATUS.md` are updated. One driver per commit.
+* The final run is made with `tools/run_driver_test.py`, which updates the driver `README.md` `## Testing` line and `TEST_SUMMARY.md`. The task's `verification.md` and `MIGRATION_STATUS.md` are updated. One driver per commit.
 
 ---
 
@@ -395,14 +398,14 @@ How the generator itself works is in [DRIVER_GENERATOR_BASICS.md](DRIVER_GENERAT
 
 * **Client-detach motion release is exercised on two mount drivers only.** [`test_detach_abort`](#client-detach-motion-release) detaches motion owners on `mount_simulator`, `mount_lx200` (serial simulator) and through `agent_mount`. The other eight generated mount drivers are covered for this path only by compilation and by their own suites, which never detach the owner of a running motion. See [issue 10 in DRIVER_GENERATOR_BASICS.md](DRIVER_GENERATOR_BASICS.md#ki-10).
 * **The simulator test cache tracks one device.** Tests that need to observe two logical devices at once must run separate lifecycles or keep their own cache.
-* **No CI.** `.travis.yml` refers to a non-existent `indigo_test/test_suite.sh`, and no workflow runs `make -C indigo_test test`.
+* **No CI.** No hosted workflow runs `make -C indigo_test test`.
 * **No Windows tests.** The suite depends on POSIX facilities, and nothing exercises drivers on Windows automatically.
-* **Sanitizer coverage is selective and partly arm64-specific.** Only drivers with explicit `_sanitize`/`_asan` rules get it, and several of those rules force `-arch arm64`. There is no Valgrind or leak-checking target (`detect_leaks=0`).
+* **Sanitizer coverage is selective and partly arm64-specific.** Only drivers with explicit `_sanitize`/`_asan` rules get it, and several of those rules force `-arch arm64`. Leak checking is limited to the opt-in `test-server-leaks` (Valgrind on `indigo_server` with the simulator drivers); the sanitize builds run with `detect_leaks=0`.
 * **Inconsistent diagnostics switches.** Log level and case filters differ between suites (`INDIGO_TEST_CASE_FILTER`, `INDIGO_TEST_FILTER`, driver-specific `*_TEST_FILTER`, `INDIGO_TEST_DEBUG`, ad hoc `*_DEBUG`).
 * **Hand-typed hardware records do not match detected names.** Records written before `tools/run_driver_test.py` name the hardware by hand, for example `ASI120MC-S`, while the script records the detected model, `ZWO ASI120MC-S`. The first script run of such hardware adds a line next to the old one instead of replacing it; remove the old line once.
 * **Record timestamps are local to each host.** A run on a host set to UTC and one on a host in another zone are written in different zones, so their order in `## Testing` can be off by the difference.
 * **Older fork loops do not plan in the parent.** About forty suites fork their cases in a loop of their own and do not call `indigo_test_plan()`, so a child that dies before `indigo_run_tests()` is missing from the recorded total. The run is still recorded as failed through the exit code.
-* **`indigo_server` path untested automatically.** Network protocol, BLOB transfer and server-side driver loading are covered by unit parser tests and manual or `indigo_tests/` scripts, not by the default suite. The opt-in `test-detach-abort-network` runs the server's TCP listener and XML adapter in process, but only for connection loss during manual motion; it does not start the `indigo_server` executable.
+* **`indigo_server` path untested automatically.** Network protocol, BLOB transfer and server-side driver loading are covered by unit parser tests and manual or `indigo_test/shell_compliance/` scripts, not by the default suite. The opt-in `test-detach-abort-network` runs the server's TCP listener and XML adapter in process, but only for connection loss during manual motion; it does not start the `indigo_server` executable.
 
 ---
 
@@ -416,4 +419,4 @@ How the generator itself works is in [DRIVER_GENERATOR_BASICS.md](DRIVER_GENERAT
 * [Makefiles](MAKEFILES.md)
 * [Server and Drivers Guide](INDIGO_SERVER_AND_DRIVERS_GUIDE.md)
 * [indigo_test/AGENTS.md](../indigo_test/AGENTS.md), [indigo_test/DRIVER_TESTING_RULES.md](../indigo_test/DRIVER_TESTING_RULES.md), [indigo_test/mountsim/USAGE.md](../indigo_test/mountsim/USAGE.md)
-* [indigo_tests/INDIGO_TEST_FRAMEWORK.md](../indigo_tests/INDIGO_TEST_FRAMEWORK.md)
+* [indigo_test/shell_compliance/INDIGO_TEST_FRAMEWORK.md](../indigo_test/shell_compliance/INDIGO_TEST_FRAMEWORK.md)

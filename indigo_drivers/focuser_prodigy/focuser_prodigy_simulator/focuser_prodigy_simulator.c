@@ -168,6 +168,16 @@ static void handle_command(const char *command) {
 	if (!strncmp(action, "temp=", 5)) {
 		temperature = atof(action + 5);
 	}
+	if (!strncmp(action, "external=", 9)) {
+		// a hand controller starts a move the driver did not command
+		start_motion(atoi(action + 9));
+		position = (int)serial_motion_update(&motion);
+	}
+	if (!strcmp(action, "slow")) {
+		// the reply keeps the state from before the delay and still arrives within the
+		// driver's timeout, so a request can be accepted while it is outstanding
+		usleep(300000);
+	}
 	if (!strcmp(action, "reject")) {
 		send_line("ERR");
 		return;
@@ -295,6 +305,10 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 	serial_motion_sync(&motion, !strcmp(profile, "alternate") ? 500 : 50);
+	if (!strcmp(profile, "no-probe")) {
+		// the firmware reports -127 without a temperature probe
+		temperature = -127;
+	}
 	const char *journal = getenv("INDIGO_PRODIGY_EVENTS");
 	events = journal ? fopen(journal, "w") : NULL;
 	signal(SIGTERM, signal_handler);

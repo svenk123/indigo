@@ -330,11 +330,11 @@ function enumerateProperties() {
 function changeProperty(deviceName, propertyName, values) {
 	var dev = INDIGO.devices[deviceName];
 	if (dev == null) {
-		return;
+		return false;
 	}
 	var prop = dev[propertyName];
 	if (prop == null) {
-		return;
+		return false;
 	}
 	var hints = prop.hints;
 	if (hints != null) {
@@ -345,7 +345,27 @@ function changeProperty(deviceName, propertyName, values) {
 				if (confirm(hint.substring(16, hint.length - 1))) {
 					break;
 				} else {
-					return;
+					return false;
+				}
+			}
+		}
+	}
+	for (var name in values) {
+		if (values[name] !== true) {
+			continue;
+		}
+		var item = prop.item(name);
+		var itemHints = item != null ? item.hints : null;
+		if (itemHints != null) {
+			itemHints = itemHints.split(";")
+			for (var i in itemHints) {
+				var hint = itemHints[i];
+				if (hint.startsWith("warn_on_set:")) {
+					if (confirm(hint.substring(13, hint.length - 1))) {
+						break;
+					} else {
+						return false;
+					}
 				}
 			}
 		}
@@ -362,6 +382,7 @@ function changeProperty(deviceName, propertyName, values) {
 	else if (typeof value == "boolean")
 		message = { "newSwitchVector": property };
 	doSend(JSON.stringify(message));
+	return true;
 }
 
 function doSend(message) {
@@ -460,24 +481,26 @@ function processDeleteProperty(property) {
 }
 
 function dtos(value) {
+	// the sign is kept apart from the degrees, -0.5 has zero whole degrees and must still print as -0:30:00
+	var sign = value < 0 ? '-' : '';
 	var d = Math.abs(value);
 	var m = 60.0 * (d - Math.floor(d));
 	var s = 60.0 * (m - Math.floor(m));
-	if (value < 0)
-		d = -d;
 	d = d | 0;
 	m = m | 0;
 	s = s | 0;
-	return d.toString() + ':' + (m < 10 ? 0 + m.toString() : m.toString()) + ':' + (s < 10 ? 0 + s.toString() : s.toString())
+	return sign + d.toString() + ':' + (m < 10 ? 0 + m.toString() : m.toString()) + ':' + (s < 10 ? 0 + s.toString() : s.toString())
 }
 
 function stod(str) {
+	// the sign comes from the text, parseInt('-0') is -0 and does not compare below zero
+	var negative = str.trim().charAt(0) == '-';
 	var strs = str.split(':');
 	var d = 0;
 	var m = 0;
 	var s = 0;
 	if (strs.length > 0) {
-		d = parseInt(strs[0]);
+		d = Math.abs(parseInt(strs[0]));
 	}
 	if (strs.length > 1) {
 		m = parseInt(strs[1]);
@@ -485,9 +508,8 @@ function stod(str) {
 	if (strs.length > 2) {
 		s = parseInt(strs[2]);
 	}
-	if (d < 0)
-		return d - m / 60.0 - s / 3600.0;
-	return d + m / 60.0 + s / 3600.0;
+	var value = d + m / 60.0 + s / 3600.0;
+	return negative ? -value : value;
 }
 
 function timestamp() {
@@ -505,5 +527,6 @@ function timestamp() {
 	'T' + pad(d.getHours()) +
 	':' + pad(d.getMinutes()) +
 	':' + pad(d.getSeconds()) +
-	(o >= 0 ? '-' + pad(o / 60) : '+' + pad(-o / 60)) + '00';
+	// %z style offset, whole hours and remaining minutes, e.g. +0530 for UTC+05:30
+	(o >= 0 ? '-' : '+') + pad(Math.floor(Math.abs(o) / 60)) + pad(Math.abs(o) % 60);
 }

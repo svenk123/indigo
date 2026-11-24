@@ -24,6 +24,7 @@
 #include <indigo/indigo_client.h>
 
 #include <indigo/indigo_bus.h>
+#include <indigo/indigo_names.h>
 
 #include "../test_runner.h"
 
@@ -36,6 +37,26 @@ static void numeric_string_helpers_parse_and_format_values(void) {
 	ASSERT_NEAR(123.45, indigo_atod("123,45"), 1e-12);
 	ASSERT_NEAR(-1200, indigo_atod("-1.2e3"), 1e-12);
 	ASSERT_STREQ("123.456", indigo_dtoa(123.456, buffer));
+}
+
+static void numeric_zero_exponents_and_format_status(void) {
+	char buffer[64];
+	const char *zeroes[] = { "0e0", "0e5", "-0e3", "+0.0E-4", "0e999" };
+	for (int i = 0; i < ARRAY_SIZE(zeroes); i++) {
+		double value = indigo_atod(zeroes[i]);
+		ASSERT_TRUE(isfinite(value));
+		ASSERT_TRUE(value == 0);
+	}
+	ASSERT_NEAR(0.0125, indigo_atod("1.25e-2"), 1e-12);
+	ASSERT_EQ_INT(INDIGO_OK, indigo_format_number(buffer, sizeof(buffer), "%.2f", 12.5));
+	ASSERT_STREQ("12.50", buffer);
+	ASSERT_EQ_INT(INDIGO_OK, indigo_format_number(buffer, sizeof(buffer), "%g", 0));
+	ASSERT_STREQ("0", buffer);
+	ASSERT_EQ_INT(INDIGO_FAILED, indigo_format_number(buffer, 3, "%.2f", 12.5));
+	ASSERT_STREQ("12", buffer);
+	ASSERT_EQ_INT(INDIGO_FAILED, indigo_format_number(buffer, 0, "%g", 1));
+	ASSERT_EQ_INT(INDIGO_OK, indigo_format_number(buffer, sizeof(buffer), "%6.3m", 12.5));
+	ASSERT_STREQ("12:30", buffer);
 }
 
 static void sexagesimal_helpers_parse_and_format_values(void) {
@@ -212,8 +233,155 @@ static void message_properties_survive_bus_restarts(void) {
 	ASSERT_EQ_INT(INDIGO_ALERT_STATE, ALERT_PROPERTY->state);
 }
 
+// indigo_reject_change(): a property that is not BUSY is published in ALERT with the message and its values restated; a BUSY
+// property belongs to a running operation, so it is left untouched and the refusal is only a BUSY message
+static int refusal_updates, refusal_messages;
+static indigo_property_state refusal_state;
+static char refusal_text[INDIGO_VALUE_SIZE], refusal_name[INDIGO_NAME_SIZE];
+
+static indigo_result refusal_update(indigo_client *client, indigo_device *device, indigo_property *property, const char *message) {
+	refusal_updates++;
+	refusal_state = property->state;
+	snprintf(refusal_text, sizeof(refusal_text), "%s", message ? message : "");
+	return INDIGO_OK;
+}
+
+static indigo_result refusal_message(indigo_client *client, indigo_device *device, indigo_property *property, const char *message) {
+	refusal_messages++;
+	snprintf(refusal_name, sizeof(refusal_name), "%s", property ? property->name : "");
+	snprintf(refusal_text, sizeof(refusal_text), "%s", message ? message : "");
+	return INDIGO_OK;
+}
+
+static indigo_client refusal_client = { .name = "Refusal test client", .version = INDIGO_VERSION_CURRENT, .update_property = refusal_update, .send_message = refusal_message };
+
+static indigo_property *refusal_setup(indigo_device *device, indigo_property_state state) {
+	memset(device, 0, sizeof(*device));
+	snprintf(device->name, sizeof(device->name), "%s", "Refusal test device");
+	indigo_property *property = indigo_init_number_property(NULL, device->name, "TEST_NUMBER", "Group", "Label", state, INDIGO_RW_PERM, 1);
+	indigo_init_number_item(property->items, "VALUE", "Value", 0, 100, 1, 42);
+	refusal_updates = refusal_messages = 0;
+	refusal_text[0] = refusal_name[0] = 0;
+	return property;
+}
+
+static void refusal_of_an_idle_property_publishes_alert(void) {
+	ASSERT_EQ_INT(INDIGO_OK, indigo_start());
+	ASSERT_EQ_INT(INDIGO_OK, indigo_attach_client(&refusal_client));
+	indigo_device device;
+	indigo_property *property = refusal_setup(&device, INDIGO_OK_STATE);
+	ASSERT_EQ_INT(INDIGO_OK, indigo_reject_change(&device, property, "Gain can not be changed during an exposure (%d)", 1));
+	ASSERT_EQ_INT(1, refusal_updates);
+	ASSERT_EQ_INT(INDIGO_ALERT_STATE, refusal_state);
+	ASSERT_EQ_INT(INDIGO_ALERT_STATE, property->state);
+	// the bus also delivers the message of the update through send_message, tagged with the property, not as a BUSY message
+	ASSERT_EQ_INT(1, refusal_messages);
+	ASSERT_STREQ("TEST_NUMBER", refusal_name);
+	ASSERT_STREQ("Gain can not be changed during an exposure (1)", refusal_text);
+	ASSERT_NEAR(42, property->items[0].number.value, 1e-12);
+	indigo_release_property(property);
+	ASSERT_EQ_INT(INDIGO_OK, indigo_detach_client(&refusal_client));
+	ASSERT_EQ_INT(INDIGO_OK, indigo_stop());
+}
+
+static void refusal_of_a_busy_property_is_only_a_message(void) {
+	ASSERT_EQ_INT(INDIGO_OK, indigo_start());
+	ASSERT_EQ_INT(INDIGO_OK, indigo_attach_client(&refusal_client));
+	indigo_device device;
+	indigo_property *property = refusal_setup(&device, INDIGO_BUSY_STATE);
+	ASSERT_EQ_INT(INDIGO_OK, indigo_reject_change(&device, property, "Focuser is moving"));
+	ASSERT_EQ_INT(0, refusal_updates);
+	ASSERT_EQ_INT(1, refusal_messages);
+	ASSERT_STREQ(BUSY_PROPERTY->name, refusal_name);
+	ASSERT_STREQ("Focuser is moving", refusal_text);
+	ASSERT_EQ_INT(INDIGO_BUSY_STATE, property->state);
+	ASSERT_NEAR(42, property->items[0].number.value, 1e-12);
+	indigo_release_property(property);
+	ASSERT_EQ_INT(INDIGO_OK, indigo_detach_client(&refusal_client));
+	ASSERT_EQ_INT(INDIGO_OK, indigo_stop());
+}
+
+// indigo_query_slave_devices() stored a slave before it checked the capacity, so it wrote one entry past max
+static void slave_query_stores_at_most_max_devices(void) {
+	ASSERT_EQ_INT(INDIGO_OK, indigo_start());
+	static indigo_device master = INDIGO_DEVICE_INITIALIZER("Slave query master", NULL, NULL, NULL, NULL, NULL);
+	static indigo_device slave_devices[3] = {
+		INDIGO_DEVICE_INITIALIZER("Slave query slave 1", NULL, NULL, NULL, NULL, NULL),
+		INDIGO_DEVICE_INITIALIZER("Slave query slave 2", NULL, NULL, NULL, NULL, NULL),
+		INDIGO_DEVICE_INITIALIZER("Slave query slave 3", NULL, NULL, NULL, NULL, NULL)
+	};
+	master.master_device = &master;
+	ASSERT_EQ_INT(INDIGO_OK, indigo_attach_device(&master));
+	for (int i = 0; i < 3; i++) {
+		slave_devices[i].master_device = &master;
+		ASSERT_EQ_INT(INDIGO_OK, indigo_attach_device(slave_devices + i));
+	}
+	indigo_device *sentinel = (indigo_device *)&sentinel;
+	indigo_device *slaves[5] = { sentinel, sentinel, sentinel, sentinel, sentinel };
+	int none = indigo_query_slave_devices(&master, slaves, 0);
+	bool none_untouched = slaves[0] == sentinel;
+	int two = indigo_query_slave_devices(&master, slaves, 2);
+	bool two_bounded = slaves[0] != sentinel && slaves[1] != sentinel && slaves[2] == sentinel;
+	int all = indigo_query_slave_devices(&master, slaves, 5);
+	bool all_bounded = slaves[2] != sentinel && slaves[3] == sentinel;
+	for (int i = 0; i < 3; i++) {
+		indigo_detach_device(slave_devices + i);
+	}
+	indigo_detach_device(&master);
+	ASSERT_EQ_INT(INDIGO_OK, indigo_stop());
+	ASSERT_EQ_INT(0, none);
+	ASSERT_TRUE(none_untouched);
+	ASSERT_EQ_INT(2, two);
+	ASSERT_TRUE(two_bounded);
+	ASSERT_EQ_INT(3, all);
+	ASSERT_TRUE(all_bounded);
+}
+
+// SESSION_FEATURES is one property shared by all clients: a change naming one item kept the other item of the client
+// that enumerated last instead of the value of the client that sent the change
+static bool session_reply_property_updates, session_reply_item_updates;
+
+static indigo_result session_update(indigo_client *client, indigo_device *device, indigo_property *property, const char *message) {
+	if (!strcmp(property->name, SESSION_FEATURES_PROPERTY_NAME)) {
+		session_reply_property_updates = indigo_get_switch(property, SESSION_FORCE_PROPERTY_UPDATES_ITEM_NAME);
+		session_reply_item_updates = indigo_get_switch(property, SESSION_FORCE_ITEM_UPDATES_ITEM_NAME);
+	}
+	return INDIGO_OK;
+}
+
+static void session_feature_change_keeps_unnamed_feature_of_its_client(void) {
+	static indigo_client client_a = { .name = "Session client A", .version = INDIGO_VERSION_CURRENT, .update_property = session_update };
+	static indigo_client client_b = { .name = "Session client B", .version = INDIGO_VERSION_CURRENT, .update_property = session_update };
+	ASSERT_EQ_INT(INDIGO_OK, indigo_start());
+	ASSERT_EQ_INT(INDIGO_OK, indigo_attach_client(&client_a));
+	ASSERT_EQ_INT(INDIGO_OK, indigo_attach_client(&client_b));
+	client_a.force_property_updates = false;
+	client_a.force_item_updates = true;
+	client_b.force_property_updates = false;
+	client_b.force_item_updates = false;
+	indigo_enumerate_properties(&client_b, &INDIGO_ALL_PROPERTIES);
+	ASSERT_EQ_INT(INDIGO_OK, indigo_change_switch_property_1(&client_a, "Server", SESSION_FEATURES_PROPERTY_NAME, SESSION_FORCE_PROPERTY_UPDATES_ITEM_NAME, true));
+	bool a_property_updates = client_a.force_property_updates, a_item_updates = client_a.force_item_updates;
+	bool reply_property_updates = session_reply_property_updates, reply_item_updates = session_reply_item_updates;
+	bool b_property_updates = client_b.force_property_updates, b_item_updates = client_b.force_item_updates;
+	indigo_detach_client(&client_b);
+	indigo_detach_client(&client_a);
+	ASSERT_EQ_INT(INDIGO_OK, indigo_stop());
+	ASSERT_TRUE(a_property_updates);
+	ASSERT_TRUE(a_item_updates);
+	ASSERT_TRUE(reply_property_updates);
+	ASSERT_TRUE(reply_item_updates);
+	ASSERT_FALSE(b_property_updates);
+	ASSERT_FALSE(b_item_updates);
+}
+
 int main(void) {
 	const indigo_test_case tests[] = {
+		{ "slave_query_stores_at_most_max_devices", slave_query_stores_at_most_max_devices },
+		{ "session_feature_change_keeps_unnamed_feature_of_its_client", session_feature_change_keeps_unnamed_feature_of_its_client },
+		{ "numeric_zero_exponents_and_format_status", numeric_zero_exponents_and_format_status },
+		{ "refusal_of_an_idle_property_publishes_alert", refusal_of_an_idle_property_publishes_alert },
+		{ "refusal_of_a_busy_property_is_only_a_message", refusal_of_a_busy_property_is_only_a_message },
 		{ "numeric_string_helpers_parse_and_format_values", numeric_string_helpers_parse_and_format_values },
 		{ "sexagesimal_helpers_parse_and_format_values", sexagesimal_helpers_parse_and_format_values },
 		{ "sexagesimal_rounding_follows_format", sexagesimal_rounding_follows_format },

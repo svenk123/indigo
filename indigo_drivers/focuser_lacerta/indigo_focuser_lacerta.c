@@ -41,7 +41,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000008
+#define DRIVER_VERSION       0x0300000B
 #define DRIVER_NAME          "indigo_focuser_lacerta"
 #define DRIVER_LABEL         "LACERTA Motorfocus Focuser"
 #define FOCUSER_DEVICE_NAME  "LACERTA Motorfocus"
@@ -61,7 +61,7 @@ typedef struct {
 	char response[96];
 	int maximum, capability_maximum;
 	int last_position, stalled;
-	bool moving, motion_uncertain, reverse;
+	bool moving, motion_uncertain, reverse, external, poll_failed, settling;
 	//- data
 } lacerta_private_data;
 
@@ -113,11 +113,11 @@ static bool lacerta_command(indigo_device *device, char expected, const char *co
 	return false;
 }
 
-static bool lacerta_open(indigo_device *device) {
+static bool lacerta_open(indigo_device *device, const char **error_message) {
 	char tail;
 	int major, minor, revision;
 	PRIVATE_DATA->capability_maximum = 250000;
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 9600, INDIGO_LOG_DEBUG);
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 9600, INDIGO_LOG_DEBUG, error_message);
 	if (!PRIVATE_DATA->handle) {
 		return false;
 	}
@@ -179,6 +179,7 @@ static void motion_finalizer(indigo_device *device) {
 	int position = 0;
 	if (!(lacerta_command(device, 'p', ": q #") && lacerta_integer(device, 0, PRIVATE_DATA->maximum, &position))) {
 		PRIVATE_DATA->moving = false;
+		PRIVATE_DATA->settling = true;
 		PRIVATE_DATA->motion_uncertain = !lacerta_halt(device);
 		lacerta_motion_state(device, INDIGO_ALERT_STATE);
 		return;
@@ -194,6 +195,7 @@ static void motion_finalizer(indigo_device *device) {
 	} else if (++PRIVATE_DATA->stalled >= 100) {
 		// No progress for about ten seconds: stop before releasing the operation.
 		PRIVATE_DATA->moving = false;
+		PRIVATE_DATA->settling = true;
 		PRIVATE_DATA->motion_uncertain = !lacerta_halt(device);
 		lacerta_motion_state(device, INDIGO_ALERT_STATE);
 	} else {
@@ -221,6 +223,7 @@ static void lacerta_start_motion(indigo_device *device, int position) {
 	PRIVATE_DATA->last_position = (int)FOCUSER_POSITION_ITEM->number.value;
 	PRIVATE_DATA->stalled = 0;
 	PRIVATE_DATA->moving = true;
+	PRIVATE_DATA->external = PRIVATE_DATA->settling = false;
 	lacerta_motion_state(device, INDIGO_BUSY_STATE);
 }
 
@@ -233,7 +236,12 @@ static void lacerta_limits(indigo_device *device, int maximum) {
 
 static void lacerta_temperature(indigo_device *device) {
 	double temperature;
-	if ((lacerta_command(device, 't', ": t #") && lacerta_number(device, -100, 100, &temperature)) && temperature != 99.9 && temperature >= FOCUSER_TEMPERATURE_ITEM->number.min && temperature <= FOCUSER_TEMPERATURE_ITEM->number.max) {
+	if (!(lacerta_command(device, 't', ": t #") && lacerta_number(device, -100, 100, &temperature))) {
+		FOCUSER_TEMPERATURE_PROPERTY->state = INDIGO_ALERT_STATE;
+	} else if (temperature == 99.9) {
+		// Workbook Munka1 row 32: 99.9 means no sensor is connected, which is not a failure.
+		FOCUSER_TEMPERATURE_PROPERTY->state = INDIGO_IDLE_STATE;
+	} else if (temperature >= FOCUSER_TEMPERATURE_ITEM->number.min && temperature <= FOCUSER_TEMPERATURE_ITEM->number.max) {
 		FOCUSER_TEMPERATURE_ITEM->number.value = temperature;
 		FOCUSER_TEMPERATURE_PROPERTY->state = INDIGO_OK_STATE;
 	} else {
@@ -252,17 +260,37 @@ static void focuser_timer_callback(indigo_device *device) {
 	}
 	//+ focuser.on_timer
 	lacerta_temperature(device);
-	if (!PRIVATE_DATA->moving && FOCUSER_POSITION_PROPERTY->state != INDIGO_BUSY_STATE && FOCUSER_STEPS_PROPERTY->state != INDIGO_BUSY_STATE) {
+	if (!PRIVATE_DATA->moving && (PRIVATE_DATA->external || (FOCUSER_POSITION_PROPERTY->state != INDIGO_BUSY_STATE && FOCUSER_STEPS_PROPERTY->state != INDIGO_BUSY_STATE))) {
 		int position = 0;
 		if ((lacerta_command(device, 'p', ": q #") && lacerta_integer(device, 0, PRIVATE_DATA->maximum, &position))) {
+			if (PRIVATE_DATA->poll_failed) {
+				// A good poll after a failed one restores the state the failed poll took away.
+				PRIVATE_DATA->poll_failed = false;
+				if (FOCUSER_POSITION_PROPERTY->state == INDIGO_ALERT_STATE) {
+					lacerta_motion_state(device, INDIGO_OK_STATE);
+				}
+			}
 			if (position != (int)FOCUSER_POSITION_ITEM->number.value) {
 				FOCUSER_POSITION_ITEM->number.value = position;
-				if (!PRIVATE_DATA->motion_uncertain) {
+				// The first reading after the driver ended its own move only settles the value; the target keeps the request.
+				if (!PRIVATE_DATA->motion_uncertain && !PRIVATE_DATA->settling) {
 					FOCUSER_POSITION_ITEM->number.target = position;
+					// Motion the driver did not command (hand controller, running at connect) is BUSY until it settles; a failed move stays ALERT.
+					if (FOCUSER_POSITION_PROPERTY->state != INDIGO_ALERT_STATE) {
+						PRIVATE_DATA->external = true;
+						FOCUSER_POSITION_PROPERTY->state = INDIGO_BUSY_STATE;
+					}
 				}
 				indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
+			} else if (PRIVATE_DATA->external) {
+				PRIVATE_DATA->external = false;
+				FOCUSER_POSITION_PROPERTY->state = INDIGO_OK_STATE;
+				indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
 			}
+			PRIVATE_DATA->settling = false;
 		} else {
+			PRIVATE_DATA->poll_failed = true;
+			PRIVATE_DATA->external = false;
 			lacerta_motion_state(device, INDIGO_ALERT_STATE);
 		}
 	}
@@ -273,7 +301,8 @@ static void focuser_timer_callback(indigo_device *device) {
 static void focuser_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = lacerta_open(device);
+		const char *error_message = NULL;
+		connection_result = lacerta_open(device, &error_message);
 		if (connection_result) {
 			//+ focuser.on_connect
 			int reverse = 0, position = 0, backlash = 0, maximum = 0;
@@ -285,7 +314,8 @@ static void focuser_connection_handler(indigo_device *device) {
 				FOCUSER_BACKLASH_ITEM->number.value = FOCUSER_BACKLASH_ITEM->number.target = backlash;
 				FOCUSER_LIMITS_MAX_POSITION_ITEM->number.max = PRIVATE_DATA->capability_maximum;
 				lacerta_limits(device, maximum);
-				PRIVATE_DATA->moving = PRIVATE_DATA->motion_uncertain = false;
+				PRIVATE_DATA->moving = PRIVATE_DATA->motion_uncertain = PRIVATE_DATA->external = PRIVATE_DATA->poll_failed = PRIVATE_DATA->settling = false;
+				FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = INDIGO_OK_STATE;
 				FOCUSER_TEMPERATURE_PROPERTY->state = INDIGO_BUSY_STATE;
 			} else {
 				// Single-device generated connection failure does not close a successful open.
@@ -297,17 +327,21 @@ static void focuser_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
 	} else {
 		indigo_cancel_pending_handlers(device);
 		//+ focuser.on_disconnect
-		if (PRIVATE_DATA->moving || PRIVATE_DATA->motion_uncertain) {
+		if (PRIVATE_DATA->moving || PRIVATE_DATA->motion_uncertain || PRIVATE_DATA->external) {
 			lacerta_halt(device);
 		}
-		PRIVATE_DATA->moving = PRIVATE_DATA->motion_uncertain = false;
+		PRIVATE_DATA->moving = PRIVATE_DATA->motion_uncertain = PRIVATE_DATA->external = false;
 		FOCUSER_ABORT_MOTION_ITEM->sw.value = false;
 		//- focuser.on_disconnect
 		// Cancelled change handlers must not leave properties BUSY: a new session starts in a clean state.
@@ -370,7 +404,11 @@ static void focuser_steps_handler(indigo_device *device) {
 
 static void focuser_abort_motion_handler(indigo_device *device) {
 	//+ focuser.FOCUSER_ABORT_MOTION.on_change
-	if (FOCUSER_ABORT_MOTION_ITEM->sw.value && IS_CONNECTED) {
+	bool active = PRIVATE_DATA->moving || PRIVATE_DATA->motion_uncertain || PRIVATE_DATA->external || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE;
+	if (FOCUSER_ABORT_MOTION_ITEM->sw.value && IS_CONNECTED && !active) {
+		// Nothing is moving: no stop command, the position stays as it is.
+		FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
+	} else if (FOCUSER_ABORT_MOTION_ITEM->sw.value && IS_CONNECTED) {
 		indigo_cancel_pending_handler(device, focuser_position_handler);
 		indigo_cancel_pending_handler(device, focuser_steps_handler);
 		if (!PRIVATE_DATA->moving && (FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE)) {
@@ -378,12 +416,18 @@ static void focuser_abort_motion_handler(indigo_device *device) {
 		}
 		if (lacerta_halt(device)) {
 			indigo_cancel_pending_handler(device, motion_finalizer);
-			PRIVATE_DATA->moving = PRIVATE_DATA->motion_uncertain = false;
+			bool external = PRIVATE_DATA->external;
+			PRIVATE_DATA->moving = PRIVATE_DATA->motion_uncertain = PRIVATE_DATA->external = false;
+			PRIVATE_DATA->settling = true;
 			int position = 0;
 			if ((lacerta_command(device, 'p', ": q #") && lacerta_integer(device, 0, PRIVATE_DATA->maximum, &position))) {
-				FOCUSER_POSITION_ITEM->number.value = FOCUSER_POSITION_ITEM->number.target = position;
+				// An aborted move ends ALERT at the stopped position and keeps the requested target; uncommanded motion has none.
+				FOCUSER_POSITION_ITEM->number.value = position;
+				if (external) {
+					FOCUSER_POSITION_ITEM->number.target = position;
+				}
 				FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
-				lacerta_motion_state(device, INDIGO_OK_STATE);
+				lacerta_motion_state(device, INDIGO_ALERT_STATE);
 			} else {
 				PRIVATE_DATA->motion_uncertain = true;
 				FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;

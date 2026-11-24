@@ -26,4 +26,5 @@ indigo_server indigo_focuser_optec
 
 ## Testing
 
-2026-09-27 23:09 3.0.0.9 mac arm64 simulator 32/32 OK
+- 2026-10-09 21:33 3.0.0.12 linux arm64 Optec TCF-S3 Arduino simulator (ESP32-S3) 9/9 OK
+- 2026-10-26 19:24 3.0.0.15 mac arm64 simulator 43/43 OK

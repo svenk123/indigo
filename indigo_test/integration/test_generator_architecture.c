@@ -341,9 +341,7 @@ static void all_supported_attributes(void) {
 		{ PROPERTY_ATTRIBUTE, "code {\n/* marker_property_code */\n}", "marker_property_code" },
 		{ PROPERTY_ATTRIBUTE, "on_attach {\n/* marker_property_attach */\n}", "marker_property_attach" },
 		{ PROPERTY_ATTRIBUTE, "on_change_request {\n/* marker_property_request */\n}", "marker_property_request" },
-		{ PROPERTY_ATTRIBUTE, "reject_change {\ncondition = PROBE_REJECT_MARKER;\nmessage = \"Probe rejected\";\n}", "if (PROBE_REJECT_MARKER) {" },
-		{ PROPERTY_ATTRIBUTE, "reject_change {\ncondition = PROBE_REJECT_MARKER;\nmessage = \"Probe rejected\";\n}", "X_PROBE_PROPERTY->items[i].do_update = true;" },
-		{ PROPERTY_ATTRIBUTE, "reject_change {\ncondition = PROBE_REJECT_MARKER;\nmessage = \"Probe rejected\";\n}", "X_PROBE_PROPERTY->state = INDIGO_ALERT_STATE;\n\t\t\tindigo_update_property(device, X_PROBE_PROPERTY, \"Probe rejected\");\n\t\t\treturn INDIGO_OK;" },
+		{ PROPERTY_ATTRIBUTE, "reject_change {\ncondition = PROBE_REJECT_MARKER;\nmessage = \"Probe rejected\";\n}", "INDIGO_REJECT_CHANGE_IF(PROBE_REJECT_MARKER, X_PROBE_PROPERTY, \"Probe rejected\");" },
 		{ PROPERTY_ATTRIBUTE, "on_change {\n/* marker_property_change */\n}", "marker_property_change" },
 		{ PROPERTY_ATTRIBUTE, "on_detach {\n/* marker_property_detach */\n}", "marker_property_detach" },
 		{ ITEM_ATTRIBUTE, "label = \"Item marker\";", "Item marker" },
@@ -502,6 +500,59 @@ static void abort_dispatch_uses_urgent_priority(void) {
 	}
 }
 
+// The change branch of MOUNT_EQUATORIAL_COORDINATES publishes the BUSY of the request through indigo_update_coordinates(),
+// with the copy of the values or of the targets kept as preserve_values selects; other mount properties keep the plain macro.
+// Its refusals (the parked-mount admission check, every reject_change block and the parked check in the handler) are published
+// through indigo_reject_coordinates_change(), so they are kept; motion and tracking keep the plain refusal.
+static void mount_coordinates_busy_goes_through_update_coordinates(void) {
+	for (int preserve = 0; preserve < 2; preserve++) {
+		char definition[4096], generated[131072];
+		snprintf(definition, sizeof(definition), "driver architecture_test {\nlabel = \"Coordinates test\";\nauthor = \"INDIGO tests\";\ncopyright = \"INDIGO tests\";\nversion = 1;\nmount { name = \"Mount\";\ninherited MOUNT_EQUATORIAL_COORDINATES { reject_change {\ncondition = COORDINATES_REJECT_MARKER;\nmessage = \"Coordinates rejected\";\n}\npreserve_values = %s; on_change { indigo_send_message(device, \"goto\"); } }\ninherited MOUNT_HOME { on_change { indigo_send_message(device, \"home\"); } }\ninherited MOUNT_MOTION_DEC { reject_change {\ncondition = MOTION_REJECT_MARKER;\nmessage = \"Motion rejected\";\n}\non_change { indigo_send_message(device, \"dec\"); } }\ninherited MOUNT_MOTION_RA { on_change { indigo_send_message(device, \"ra\"); } }\ninherited MOUNT_TRACKING { on_change { indigo_send_message(device, \"tracking\"); } }\n}\n}\n", preserve ? "true" : "false");
+		ASSERT_TRUE(write_text(DEFINITION, definition));
+		char *arguments[] = { TEST_GENERATOR, DEFINITION, NULL };
+		ASSERT_TRUE(run(arguments));
+		ASSERT_TRUE(read_text("indigo_mount_architecture_test.c", generated, sizeof(generated)));
+		ASSERT_TRUE(strstr(generated, preserve ? "INDIGO_COPY_TARGETS_PROCESS_COORDINATES_CHANGE(mount_equatorial_coordinates_handler);" : "INDIGO_COPY_VALUES_PROCESS_COORDINATES_CHANGE(mount_equatorial_coordinates_handler);") != NULL);
+		ASSERT_TRUE(strstr(generated, "PROCESS_CHANGE(MOUNT_EQUATORIAL_COORDINATES_PROPERTY") == NULL);
+		ASSERT_TRUE(strstr(generated, "INDIGO_COPY_VALUES_PROCESS_CHANGE(MOUNT_HOME_PROPERTY, mount_home_handler);") != NULL);
+		// the parked-mount admission check and the reject_change block precede the copy and keep their refusal
+		ASSERT_TRUE(strstr(generated, "INDIGO_REJECT_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, MOUNT_EQUATORIAL_COORDINATES_PROPERTY") == NULL);
+		ASSERT_TRUE(strstr(generated, "INDIGO_REJECT_CHANGE_IF(COORDINATES_REJECT_MARKER") == NULL);
+		char *parked = strstr(generated, "INDIGO_REJECT_COORDINATES_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, \"Mount is parked!\");");
+		char *rejected = strstr(generated, "INDIGO_REJECT_COORDINATES_CHANGE_IF(COORDINATES_REJECT_MARKER, \"Coordinates rejected\");");
+		char *copy = strstr(generated, "_PROCESS_COORDINATES_CHANGE(");
+		ASSERT_TRUE(parked && rejected && copy && parked < rejected && rejected < copy);
+		// the handler refuses a request admitted just before a park through indigo_reject_coordinates_change() and still ends
+		// with the coordinates publication
+		char *handler = strstr(generated, "static void mount_equatorial_coordinates_handler(indigo_device *device) {");
+		ASSERT_TRUE(handler != NULL);
+		char *end = strstr(handler, "\n}\n");
+		char *guard = strstr(handler, "if (!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value) {\n\t\tindigo_reject_coordinates_change(device, \"Mount is parked!\");\n\t\treturn;\n\t}");
+		char *publication = strstr(handler, "indigo_update_coordinates(device, NULL);");
+		ASSERT_TRUE(end && guard && publication && guard < publication && publication < end);
+		// motion and tracking keep the plain refusal at admission and in the handler
+		const char *others[] = { "MOUNT_MOTION_DEC", "MOUNT_MOTION_RA", "MOUNT_TRACKING" };
+		const char *handlers[] = { "mount_motion_dec_handler", "mount_motion_ra_handler", "mount_tracking_handler" };
+		for (int i = 0; i < 3; i++) {
+			char expected[512];
+			snprintf(expected, sizeof(expected), "INDIGO_REJECT_CHANGE_IF(!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value, %s_PROPERTY, \"Mount is parked!\");", others[i]);
+			ASSERT_TRUE(strstr(generated, expected) != NULL);
+			snprintf(expected, sizeof(expected), "static void %s(indigo_device *device) {", handlers[i]);
+			char *other_handler = strstr(generated, expected);
+			ASSERT_TRUE(other_handler != NULL);
+			char *other_end = strstr(other_handler, "\n}\n");
+			snprintf(expected, sizeof(expected), "\t\tindigo_send_message(device, %s_PROPERTY, \"Mount is parked!\");\n\t\tINDIGO_UPDATE_PROPERTY_STATE(%s_PROPERTY, INDIGO_ALERT_STATE, NULL);", others[i], others[i]);
+			char *other_guard = strstr(other_handler, expected);
+			ASSERT_TRUE(other_end && other_guard && other_guard < other_end);
+		}
+		ASSERT_TRUE(strstr(generated, "INDIGO_REJECT_CHANGE_IF(MOTION_REJECT_MARKER, MOUNT_MOTION_DEC_PROPERTY, \"Motion rejected\");") != NULL);
+		// indigo_reject_coordinates_change() is used for MOUNT_EQUATORIAL_COORDINATES only
+		char *first = strstr(generated, "indigo_reject_coordinates_change(");
+		ASSERT_TRUE(first == guard + strlen("if (!MOUNT_PARK_PROPERTY->hidden && MOUNT_PARK_PARKED_ITEM->sw.value) {\n\t\t"));
+		ASSERT_TRUE(strstr(first + 1, "indigo_reject_coordinates_change(") == NULL);
+	}
+}
+
 static void polaralign_device_generation(void) {
 	const char *definition = "driver architecture_test {\nlabel = \"Polar align test\";\nauthor = \"INDIGO tests\";\ncopyright = \"INDIGO tests\";\nversion = 1;\npolaralign { name = \"Polar align test device\"; }\n}\n";
 	ASSERT_TRUE(write_text(DEFINITION, definition));
@@ -650,8 +701,8 @@ static void sdk_startup_discovery_without_hotplug(void) {
 	ASSERT_TRUE(strstr(generated, "libusb_get_device_list(NULL, &list)") != NULL);
 	ASSERT_TRUE(strstr(generated, "libusb_free_device_list(list, 1)") != NULL);
 	ASSERT_TRUE(strstr(generated, "discover_devices_handler, &driver_queue_mutex)") != NULL);
-	ASSERT_TRUE(strstr(generated, "ccd_connection_handler, &driver_queue_mutex)") != NULL);
-	ASSERT_TRUE(strstr(generated, "guider_connection_handler, &driver_queue_mutex)") != NULL);
+	ASSERT_TRUE(strstr(generated, "INDIGO_PROCESS_QUEUED_CONNECT(driver_queue, &driver_queue_mutex, ccd_connection_handler);") != NULL);
+	ASSERT_TRUE(strstr(generated, "INDIGO_PROCESS_QUEUED_CONNECT(driver_queue, &driver_queue_mutex, guider_connection_handler);") != NULL);
 	char *shutdown = strstr(generated, "case INDIGO_DRIVER_SHUTDOWN:");
 	ASSERT_TRUE(shutdown != NULL);
 	char *verify = strstr(shutdown, "verify_devices_disconnected()");
@@ -661,11 +712,59 @@ static void sdk_startup_discovery_without_hotplug(void) {
 	ASSERT_TRUE(verify && drain && detach && destroy && verify < drain && drain < detach && detach < destroy);
 }
 
+// Devices an SDK enumerates without a USB device behind them, such as libcamera CSI cameras.
+static void sdk_discovery_without_usb(void) {
+	ASSERT_TRUE(write_text(DEFINITION, "driver architecture_test { label = \"No USB\"; version = 1; code { static int handles[2]; static bool architecture_test_open(indigo_device *device) { return true; } static void architecture_test_close(indigo_device *device) { } } sdk { hotplug = false; usb = false; discover { for (int i = 0; i < 2; i++) { process_plug_event_handler(NULL, handles + i); } } plug { plug_result = dev != NULL; } unplug { (void)dev; } } ccd { name = \"%s\"; } }\n"));
+	char *arguments[] = { TEST_GENERATOR, DEFINITION, NULL };
+	ASSERT_TRUE(run(arguments));
+	char generated[65536];
+	ASSERT_TRUE(read_text("indigo_ccd_architecture_test.c", generated, sizeof(generated)));
+	const char *absent[] = { "libusb_ref_device", "libusb_unref_device", "libusb_get_device_list", "libusb_get_device_descriptor", "libusb_hotplug_register_callback", "libusb_hotplug_deregister_callback", "indigo_start_usb_event_handler", "usbdev" };
+	for (unsigned i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+		if (strstr(generated, absent[i])) {
+			fprintf(stderr, "    unexpected %s\n", absent[i]);
+		}
+		ASSERT_TRUE(strstr(generated, absent[i]) == NULL);
+	}
+	ASSERT_TRUE(strstr(generated, "\tvoid *sdkdev;") != NULL);
+	ASSERT_TRUE(strstr(generated, "\tvoid *dev = data;") != NULL);
+	ASSERT_TRUE(strstr(generated, "private_data->sdkdev = dev;") != NULL);
+	ASSERT_TRUE(strstr(generated, "process_plug_event_handler(NULL, handles + i);") != NULL);
+	ASSERT_TRUE(strstr(generated, "discover_devices_handler, &driver_queue_mutex)") != NULL);
+	char *shutdown = strstr(generated, "case INDIGO_DRIVER_SHUTDOWN:");
+	ASSERT_TRUE(shutdown != NULL);
+	char *verify = strstr(shutdown, "verify_devices_disconnected()");
+	char *drain = strstr(shutdown, "indigo_queue_drain(driver_queue)");
+	char *detach = strstr(shutdown, "process_unplug_event_handler(NULL, PRIVATE_DATA->sdkdev);");
+	char *destroy = strstr(shutdown, "indigo_queue_delete(&driver_queue)");
+	ASSERT_TRUE(verify && drain && detach && destroy && verify < drain && drain < detach && detach < destroy);
+	for (int cpp = 0; cpp < 2; cpp++) {
+		char *compile[] = { TEST_CC, "-x", cpp ? "c++" : "c", cpp ? "-std=gnu++11" : "-std=gnu11", "-fsyntax-only", TEST_PLATFORM, "-I" TEST_INCLUDE, "-I" TEST_USB_INCLUDE, "indigo_ccd_architecture_test.c", NULL };
+		ASSERT_TRUE(run(compile));
+	}
+	// The USB-free path has no libusb events or descriptors, so the attributes that need them are refused.
+	const char *invalid[] = {
+		"sdk { usb = false; discover { } }",
+		"sdk { hotplug = false; usb = false; }",
+		"sdk { hotplug = false; usb = false; vid = 1; discover { } }",
+		"sdk { hotplug = false; usb = false; pid = 1; discover { } }",
+		"sdk { hotplug = false; usb = false; discovery_retries = 2; discover { } }",
+		"sdk { hotplug = false; discover { } }"
+	};
+	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+		char definition[1024];
+		snprintf(definition, sizeof(definition), "driver architecture_test { %s ccd { name = \"%%s\"; } }\n", invalid[i]);
+		ASSERT_TRUE(write_text(DEFINITION, definition));
+		printf("    refused: %s\n", invalid[i]);
+		ASSERT_TRUE(!run(arguments));
+	}
+}
+
 static void generated_code_compiles_as_c_and_cpp(void) {
 	const char *transports[] = { "serial;", "", "libusb { vid = 0x1618; }", "sdk { vid = 0x1618; }", "sdk { vid = 0x1618; discovery_retries = 2; unplug_match { unplug_result = false; } }", "hid { vid = 0x1618; }", "sdk { hotplug = false; vid = 0x1618; }" };
 	for (unsigned i = 0; i < sizeof(transports) / sizeof(transports[0]); i++) {
 		char definition[4096];
-		snprintf(definition, sizeof(definition), "driver architecture_test {\nlabel = \"C++ test\";\nversion = 1;\n%s\ncode {\nstatic bool architecture_test_open(indigo_device *device) { return true; }\nstatic void architecture_test_close(indigo_device *device) { }\nstatic bool architecture_test_match(struct libusb_device *dev, const char **name) { *name = \"Probe\"; return true; }\n}\non_init { int init_local = 0; (void)init_local; }\non_shutdown { int shutdown_local = 0; (void)shutdown_local; }\nccd { name = \"%%s\"; }\n%s\n}\n", transports[i], i == 5 ? "" : "guider { name = \"%s guider\"; }");
+		snprintf(definition, sizeof(definition), "driver architecture_test {\nlabel = \"C++ test\";\nversion = 1;\n%s\ncode {\nstatic bool architecture_test_open(indigo_device *device%s) { return true; }\nstatic void architecture_test_close(indigo_device *device) { }\nstatic bool architecture_test_match(struct libusb_device *dev, const char **name) { *name = \"Probe\"; return true; }\n}\non_init { int init_local = 0; (void)init_local; }\non_shutdown { int shutdown_local = 0; (void)shutdown_local; }\nccd { name = \"%%s\"; }\n%s\n}\n", transports[i], i == 0 ? ", const char **error_message" : "", i == 5 ? "" : "guider { name = \"%s guider\"; }");
 		ASSERT_TRUE(write_text(DEFINITION, definition));
 		char *generate_arguments[] = { TEST_GENERATOR, DEFINITION, NULL };
 		ASSERT_TRUE(run(generate_arguments));
@@ -735,10 +834,12 @@ int main(void) {
 		{ "Device capacity defaults to five and survives extraction", max_devices_defaults_to_five_and_survives_extraction },
 		{ "Virtual connection_result controls success and preserves legacy output", virtual_connection_result_controls_completion },
 		{ "SDK startup discovery without hot-plug", sdk_startup_discovery_without_hotplug },
+		{ "SDK discovery without USB", sdk_discovery_without_usb },
 		{ "C++ output selection, C linkage, extraction and unchanged C default", cpp_output_selection_and_extraction },
 		{ "Generated transport scaffolding compiles as C11 and C++11", generated_code_compiles_as_c_and_cpp },
 		{ "Old and C++ compatible USB registration preserve VID/PID on extraction", usb_registration_reverse_extraction },
 		{ "Abort priority and unchanged synchronous, normal and guiding dispatch", abort_dispatch_uses_urgent_priority },
+		{ "Mount coordinates BUSY is published through indigo_update_coordinates()", mount_coordinates_busy_goes_through_update_coordinates },
 		{ "nine platform/CPU conditions and three reverse extractions", conditions_and_reverse_extraction },
 		{ "unsupported fallback without SDK headers or linkage", unsupported_fallback },
 		{ "unrestricted default", unrestricted_default },

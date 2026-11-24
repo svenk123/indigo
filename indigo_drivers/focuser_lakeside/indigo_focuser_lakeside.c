@@ -41,7 +41,7 @@
 
 #pragma mark - Common definitions
 
-#define DRIVER_VERSION       0x03000009
+#define DRIVER_VERSION       0x0300000F
 #define DRIVER_NAME          "indigo_focuser_lakeside"
 #define DRIVER_LABEL         "LakesideAstro Focuser"
 #define FOCUSER_DEVICE_NAME  "LakesideAstro Focuser"
@@ -52,6 +52,10 @@
 #define RESPONSE             (PRIVATE_DATA->response)
 #define X_FOCUSER_DEADBAND_ITEM (FOCUSER_COMPENSATION_PROPERTY->items + 1)
 #define X_FOCUSER_PERIOD_ITEM (FOCUSER_COMPENSATION_PROPERTY->items + 2)
+// A report count cannot distinguish a stalled motor from slow motion/backlash take-up.
+#ifndef LAKESIDE_NO_PROGRESS_TIMEOUT
+#define LAKESIDE_NO_PROGRESS_TIMEOUT 30
+#endif
 
 //- define
 
@@ -72,8 +76,9 @@ typedef struct {
 	indigo_property *x_focuser_active_slope_property;
 	//+ data
 	char response[64];
-	int position, expected_position, last_position, stalled, active_slope, abort_position;
-	bool active, uncertain;
+	int position, expected_position, last_position, active_slope, abort_position;
+	double progress_deadline;
+	bool active, uncertain, external, poll_failed, abort_moving;
 	//- data
 } lakeside_private_data;
 
@@ -117,7 +122,12 @@ static bool lakeside_ack(indigo_device *device, const char *command, ...) {
 	return result > 0 && lakeside_read(device, 1) && !strcmp(RESPONSE, "OK");
 }
 
+// The controller pads numbers with spaces on the left ("T   45#", as INDI documents), the 2.0 driver read them
+// with atol; the padding is skipped.
 static bool lakeside_integer(const char *text, int minimum, int maximum, int *value) {
+	while (text && *text == ' ') {
+		text++;
+	}
 	if (!text || !*text || isspace((unsigned char)*text)) {
 		return false;
 	}
@@ -135,8 +145,8 @@ static bool lakeside_value(indigo_device *device, char prefix, int minimum, int 
 	return lakeside_command(device, true, "%s", command) && RESPONSE[0] == prefix && lakeside_integer(RESPONSE + 1, minimum, maximum, value);
 }
 
-static bool lakeside_open(indigo_device *device) {
-	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed(DEVICE_PORT_ITEM->text.value, 9600, INDIGO_LOG_DEBUG);
+static bool lakeside_open(indigo_device *device, const char **error_message) {
+	PRIVATE_DATA->handle = indigo_uni_open_serial_with_speed2(DEVICE_PORT_ITEM->text.value, 9600, INDIGO_LOG_DEBUG, error_message);
 	if (PRIVATE_DATA->handle && lakeside_command(device, true, "??#") && !strcmp(RESPONSE, "OK")) {
 		return true;
 	}
@@ -159,21 +169,26 @@ static bool lakeside_position(indigo_device *device) {
 	if (!lakeside_value(device, 'P', 0, 65535, &position, "?P#")) {
 		return false;
 	}
+	// Only the value: the target keeps the last request, uncommanded motion sets it in the poll.
 	PRIVATE_DATA->position = position;
 	FOCUSER_POSITION_ITEM->number.value = position;
-	if (!PRIVATE_DATA->active && !PRIVATE_DATA->uncertain) {
-		FOCUSER_POSITION_ITEM->number.target = position;
-	}
 	return true;
 }
 
-static bool lakeside_temperature(indigo_device *device) {
+// "TN/A#" is the answer without a probe: no reading, but no failure either.
+static indigo_property_state lakeside_temperature(indigo_device *device) {
 	int half_degrees = 0;
-	if (!lakeside_value(device, 'T', -200, 200, &half_degrees, "?T#")) {
-		return false;
+	if (!lakeside_command(device, true, "?T#")) {
+		return INDIGO_ALERT_STATE;
+	}
+	if (!strcmp(RESPONSE, "TN/A")) {
+		return INDIGO_IDLE_STATE;
+	}
+	if (RESPONSE[0] != 'T' || !lakeside_integer(RESPONSE + 1, -200, 200, &half_degrees)) {
+		return INDIGO_ALERT_STATE;
 	}
 	FOCUSER_TEMPERATURE_ITEM->number.value = FOCUSER_TEMPERATURE_ITEM->number.target = half_degrees / 2.0;
-	return true;
+	return INDIGO_OK_STATE;
 }
 
 static bool lakeside_read_slope(indigo_device *device, int profile) {
@@ -209,7 +224,7 @@ static void motion_finalizer(indigo_device *device) {
 		return;
 	}
 	if (!lakeside_read(device, 0.2)) {
-		if (++PRIVATE_DATA->stalled < 40) {
+		if (indigo_monotonic_time() < PRIVATE_DATA->progress_deadline) {
 			indigo_execute_handler_in(device, 0.1, motion_finalizer);
 			return;
 		}
@@ -232,6 +247,13 @@ static void motion_finalizer(indigo_device *device) {
 	}
 	int position = 0;
 	if (RESPONSE[0] != 'P' || !lakeside_integer(RESPONSE + 1, 0, 65535, &position)) {
+		// Anything else the controller reports during a move is skipped, as the 2.0 driver and INDI did; the
+		// stall bound still ends a move that never reports DONE.
+		INDIGO_DRIVER_DEBUG(DRIVER_NAME, "Skipped '%s' during the move", RESPONSE);
+		if (indigo_monotonic_time() < PRIVATE_DATA->progress_deadline) {
+			indigo_execute_handler_in(device, 0.1, motion_finalizer);
+			return;
+		}
 		lakeside_command(device, false, "CH#");
 		PRIVATE_DATA->active = false;
 		PRIVATE_DATA->uncertain = true;
@@ -242,7 +264,14 @@ static void motion_finalizer(indigo_device *device) {
 	FOCUSER_POSITION_ITEM->number.value = position;
 	if (position != PRIVATE_DATA->last_position) {
 		PRIVATE_DATA->last_position = position;
-		PRIVATE_DATA->stalled = 0;
+		PRIVATE_DATA->progress_deadline = indigo_monotonic_time() + LAKESIDE_NO_PROGRESS_TIMEOUT;
+	} else if (indigo_monotonic_time() >= PRIVATE_DATA->progress_deadline) {
+		// Only elapsed time without a changed valid position ends the move, independent of report cadence.
+		lakeside_command(device, false, "CH#");
+		PRIVATE_DATA->active = false;
+		PRIVATE_DATA->uncertain = true;
+		lakeside_motion_state(device, INDIGO_ALERT_STATE);
+		return;
 	}
 	lakeside_motion_state(device, INDIGO_BUSY_STATE);
 	indigo_execute_handler(device, motion_finalizer);
@@ -251,9 +280,9 @@ static void motion_finalizer(indigo_device *device) {
 static void abort_finalizer(indigo_device *device) {
 	if (IS_CONNECTED && lakeside_position(device) && PRIVATE_DATA->position == PRIVATE_DATA->abort_position) {
 		PRIVATE_DATA->uncertain = false;
-		FOCUSER_POSITION_ITEM->number.target = PRIVATE_DATA->position;
 		FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
-		lakeside_motion_state(device, INDIGO_OK_STATE);
+		// An aborted move ends ALERT with the stopped position as value; the target keeps the request.
+		lakeside_motion_state(device, PRIVATE_DATA->abort_moving ? INDIGO_ALERT_STATE : INDIGO_OK_STATE);
 	} else {
 		PRIVATE_DATA->uncertain = true;
 		FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_ALERT_STATE;
@@ -273,15 +302,31 @@ static void focuser_timer_callback(indigo_device *device) {
 		return;
 	}
 	//+ focuser.on_timer
-	if (!PRIVATE_DATA->active && FOCUSER_POSITION_PROPERTY->state != INDIGO_BUSY_STATE && FOCUSER_STEPS_PROPERTY->state != INDIGO_BUSY_STATE) {
+	if (!PRIVATE_DATA->active && (PRIVATE_DATA->external || (FOCUSER_POSITION_PROPERTY->state != INDIGO_BUSY_STATE && FOCUSER_STEPS_PROPERTY->state != INDIGO_BUSY_STATE))) {
+		int previous = PRIVATE_DATA->position;
 		if (lakeside_position(device)) {
 			PRIVATE_DATA->uncertain = false;
-			FOCUSER_POSITION_PROPERTY->state = INDIGO_OK_STATE;
+			if (PRIVATE_DATA->poll_failed) {
+				// A good poll restores only the state a failed poll took away; a failed or aborted move stays ALERT.
+				PRIVATE_DATA->poll_failed = false;
+				FOCUSER_POSITION_PROPERTY->state = INDIGO_OK_STATE;
+			}
+			if (PRIVATE_DATA->position != previous && FOCUSER_POSITION_PROPERTY->state != INDIGO_ALERT_STATE) {
+				// Motion the driver did not command (handset, compensation, running at connect): BUSY until it settles.
+				PRIVATE_DATA->external = true;
+				FOCUSER_POSITION_ITEM->number.target = PRIVATE_DATA->position;
+				FOCUSER_POSITION_PROPERTY->state = INDIGO_BUSY_STATE;
+			} else if (PRIVATE_DATA->position == previous && PRIVATE_DATA->external) {
+				PRIVATE_DATA->external = false;
+				FOCUSER_POSITION_PROPERTY->state = INDIGO_OK_STATE;
+			}
 		} else {
+			PRIVATE_DATA->poll_failed = true;
+			PRIVATE_DATA->external = false;
 			FOCUSER_POSITION_PROPERTY->state = INDIGO_ALERT_STATE;
 		}
 		indigo_update_property(device, FOCUSER_POSITION_PROPERTY, NULL);
-		FOCUSER_TEMPERATURE_PROPERTY->state = lakeside_temperature(device) ? INDIGO_OK_STATE : INDIGO_ALERT_STATE;
+		FOCUSER_TEMPERATURE_PROPERTY->state = lakeside_temperature(device);
 		indigo_update_property(device, FOCUSER_TEMPERATURE_PROPERTY, NULL);
 	}
 	indigo_execute_handler_in(device, 1, focuser_timer_callback);
@@ -291,19 +336,24 @@ static void focuser_timer_callback(indigo_device *device) {
 static void focuser_connection_handler(indigo_device *device) {
 	if (CONNECTION_CONNECTED_ITEM->sw.value) {
 		bool connection_result = true;
-		connection_result = lakeside_open(device);
+		const char *error_message = NULL;
+		connection_result = lakeside_open(device, &error_message);
 		if (connection_result) {
 			//+ focuser.on_connect
 			int position = 0, backlash = 0, reverse = 0;
-			connection_result = lakeside_command(device, false, "CTF#") && lakeside_ack(device, "CRg1#") && lakeside_value(device, 'P', 0, 65535, &position, "?P#") && lakeside_value(device, 'B', 0, 65535, &backlash, "?B#") && lakeside_value(device, 'D', 0, 1, &reverse, "?D#") && lakeside_temperature(device) && lakeside_read_slope(device, 1);
+			// a missing or unreadable probe does not refuse the focuser, as in the 2.0 driver
+			indigo_property_state temperature = INDIGO_ALERT_STATE;
+			connection_result = lakeside_command(device, false, "CTF#") && lakeside_ack(device, "CRg1#") && lakeside_value(device, 'P', 0, 65535, &position, "?P#") && lakeside_value(device, 'B', 0, 65535, &backlash, "?B#") && lakeside_value(device, 'D', 0, 1, &reverse, "?D#") && ((temperature = lakeside_temperature(device)), true) && lakeside_read_slope(device, 1);
 			if (connection_result) {
 				PRIVATE_DATA->position = position;
 				PRIVATE_DATA->active_slope = 1;
-				PRIVATE_DATA->active = PRIVATE_DATA->uncertain = false;
+				PRIVATE_DATA->active = PRIVATE_DATA->uncertain = PRIVATE_DATA->external = PRIVATE_DATA->poll_failed = false;
 				FOCUSER_POSITION_ITEM->number.value = FOCUSER_POSITION_ITEM->number.target = position;
+				FOCUSER_POSITION_PROPERTY->state = FOCUSER_STEPS_PROPERTY->state = INDIGO_OK_STATE;
 				FOCUSER_BACKLASH_ITEM->number.value = FOCUSER_BACKLASH_ITEM->number.target = backlash;
 				indigo_set_switch(FOCUSER_REVERSE_MOTION_PROPERTY, reverse ? FOCUSER_REVERSE_MOTION_DISABLED_ITEM : FOCUSER_REVERSE_MOTION_ENABLED_ITEM, true);
 				indigo_set_switch(FOCUSER_MODE_PROPERTY, FOCUSER_MODE_MANUAL_ITEM, true);
+				FOCUSER_TEMPERATURE_PROPERTY->state = temperature;
 				indigo_update_property(device, INFO_PROPERTY, NULL);
 			} else {
 				lakeside_close(device);
@@ -315,7 +365,11 @@ static void focuser_connection_handler(indigo_device *device) {
 			CONNECTION_PROPERTY->state = INDIGO_OK_STATE;
 			indigo_send_message(device, OK_PROPERTY, "Connected to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
 		} else {
-			indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			if (error_message != NULL) {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s (%s)", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value, error_message);
+			} else {
+				indigo_send_message(device, ALERT_PROPERTY, "Failed to connect to %s on %s", FOCUSER_DEVICE_NAME, DEVICE_PORT_ITEM->text.value);
+			}
 			CONNECTION_PROPERTY->state = INDIGO_ALERT_STATE;
 			indigo_set_switch(CONNECTION_PROPERTY, CONNECTION_DISCONNECTED_ITEM, true);
 		}
@@ -323,10 +377,10 @@ static void focuser_connection_handler(indigo_device *device) {
 		indigo_cancel_pending_handlers(device);
 		//+ focuser.on_disconnect
 		indigo_cancel_pending_handler(device, abort_finalizer);
-		if (PRIVATE_DATA->active || PRIVATE_DATA->uncertain) {
+		if (PRIVATE_DATA->active || PRIVATE_DATA->uncertain || PRIVATE_DATA->external) {
 			lakeside_command(device, false, "CH#");
 		}
-		PRIVATE_DATA->active = PRIVATE_DATA->uncertain = false;
+		PRIVATE_DATA->active = PRIVATE_DATA->uncertain = PRIVATE_DATA->external = false;
 		FOCUSER_ABORT_MOTION_ITEM->sw.value = false;
 		//- focuser.on_disconnect
 		// Cancelled change handlers must not leave properties BUSY: a new session starts in a clean state.
@@ -366,11 +420,13 @@ static void focuser_steps_handler(indigo_device *device) {
 		lakeside_motion_state(device, INDIGO_ALERT_STATE);
 	} else if (target == PRIVATE_DATA->position) {
 		lakeside_motion_state(device, INDIGO_OK_STATE);
-	} else if (lakeside_command(device, false, FOCUSER_DIRECTION_MOVE_INWARD_ITEM->sw.value ? "CI%d#" : "CO%d#", steps)) {
+	} else if (lakeside_command(device, false, FOCUSER_DIRECTION_MOVE_INWARD_ITEM->sw.value ? "CI%d#" : "CO%d#", abs(target - PRIVATE_DATA->position))) {
+		// A move past either end of travel is sent as a move to that end.
 		PRIVATE_DATA->expected_position = target;
 		PRIVATE_DATA->last_position = PRIVATE_DATA->position;
-		PRIVATE_DATA->stalled = 0;
+		PRIVATE_DATA->progress_deadline = indigo_monotonic_time() + LAKESIDE_NO_PROGRESS_TIMEOUT;
 		PRIVATE_DATA->active = true;
+		PRIVATE_DATA->external = false;
 		FOCUSER_POSITION_ITEM->number.target = target;
 		lakeside_motion_state(device, INDIGO_BUSY_STATE);
 		indigo_execute_handler_in(device, 0.1, motion_finalizer);
@@ -384,11 +440,16 @@ static void focuser_steps_handler(indigo_device *device) {
 static void focuser_abort_motion_handler(indigo_device *device) {
 	//+ focuser.FOCUSER_ABORT_MOTION.on_change
 	FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_OK_STATE;
-	if (FOCUSER_ABORT_MOTION_ITEM->sw.value) {
+	PRIVATE_DATA->abort_moving = PRIVATE_DATA->active || PRIVATE_DATA->external || FOCUSER_STEPS_PROPERTY->state == INDIGO_BUSY_STATE || FOCUSER_POSITION_PROPERTY->state == INDIGO_BUSY_STATE;
+	if (FOCUSER_ABORT_MOTION_ITEM->sw.value && IS_CONNECTED && !PRIVATE_DATA->abort_moving && !PRIVATE_DATA->uncertain) {
+		// Nothing is moving: no stop command, the position stays as it is.
+		FOCUSER_ABORT_MOTION_ITEM->sw.value = false;
+		indigo_update_property(device, FOCUSER_ABORT_MOTION_PROPERTY, NULL);
+	} else if (FOCUSER_ABORT_MOTION_ITEM->sw.value) {
 		indigo_cancel_pending_handler(device, focuser_steps_handler);
 		indigo_cancel_pending_handler(device, motion_finalizer);
 		bool stopped = IS_CONNECTED && lakeside_command(device, false, "CH#");
-		PRIVATE_DATA->active = false;
+		PRIVATE_DATA->active = PRIVATE_DATA->external = false;
 		if (stopped && lakeside_position(device)) {
 			PRIVATE_DATA->abort_position = PRIVATE_DATA->position;
 			FOCUSER_ABORT_MOTION_PROPERTY->state = INDIGO_BUSY_STATE;
@@ -536,7 +597,7 @@ static indigo_result focuser_change_property(indigo_device *device, indigo_clien
 		INDIGO_PROCESS_CONNECT(focuser_connection_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_STEPS_PROPERTY, property)) {
-		INDIGO_REJECT_CHANGE_IF(FOCUSER_ABORT_MOTION_PROPERTY->state == INDIGO_BUSY_STATE, FOCUSER_STEPS_PROPERTY, "Abort is unfinished");
+		INDIGO_REJECT_CHANGE_IF(FOCUSER_ABORT_MOTION_PROPERTY->state == INDIGO_BUSY_STATE || (PRIVATE_DATA->external && FOCUSER_STEPS_PROPERTY->state != INDIGO_BUSY_STATE), FOCUSER_STEPS_PROPERTY, "Abort or uncommanded motion is unfinished");
 		INDIGO_COPY_VALUES_PROCESS_CHANGE(FOCUSER_STEPS_PROPERTY, focuser_steps_handler);
 		return INDIGO_OK;
 	} else if (indigo_property_match_changeable(FOCUSER_ABORT_MOTION_PROPERTY, property)) {
