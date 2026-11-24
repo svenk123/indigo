@@ -17,6 +17,7 @@
 // Device detection, context pool and self test of the optional CUDA acceleration.
 // Must stay compilable with the CUDA toolkits of all supported JetPack releases (C++11).
 
+#include <atomic>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,7 +40,7 @@ struct indigo_cuda_context {
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static int state = 0; // 0 - not checked yet, 1 - available, -1 - not available
-static volatile bool enabled = true;
+static std::atomic<bool> enabled(true);
 static char device_name[256] = "";
 static int compute_capability = 0;
 static indigo_cuda_context *contexts[INDIGO_CUDA_MAX_CONTEXTS];

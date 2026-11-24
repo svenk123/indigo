@@ -3257,11 +3257,10 @@ indigo_result indigo_make_psf_map(indigo_raw_type image_raw_type, const void *im
 
 uint8_t* indigo_binarize(indigo_raw_type raw_type, const void *data, const int width, const int height, double sigma) {
 	int size = width * height;
-	uint8_t *gpu_result = indigo_safe_malloc(size);
-	if (indigo_cuda_binarize(raw_type, data, width, height, sigma, gpu_result)) {
-		return gpu_result;
+	uint8_t *target_pixels = indigo_safe_malloc(size);
+	if (indigo_cuda_binarize(raw_type, data, width, height, sigma, target_pixels)) {
+		return target_pixels;
 	}
-	indigo_safe_free(gpu_result);
 	int64_t sum = 0;
 	int64_t sum_sq = 0;
 	switch (raw_type) {
@@ -3328,7 +3327,6 @@ uint8_t* indigo_binarize(indigo_raw_type raw_type, const void *data, const int w
 	double stddev = sqrt((double)sum_sq / size - mean * mean);
 	int threshold = (int)(mean + (sigma * stddev));
 	sum = 0;
-	uint8_t *target_pixels = (uint8_t *)indigo_safe_malloc(size);
 	switch (raw_type) {
 		case INDIGO_RAW_MONO8: {
 			uint8_t *source_pixels = (uint8_t *)data;
