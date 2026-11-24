@@ -123,6 +123,7 @@ $(LIBINDIGO_FILES): | $(LIBUSB) $(LIBHIDAPI).a $(BUILD_LIB)/libjpeg.a $(BUILD_LI
 indigo_build.o: indigo_build_c
 
 $(BUILD_LIB)/libindigo.a: $(LIBINDIGO_FILES)
+	rm -f $@
 	$(AR) $(ARFLAGS) $@ $^
 
 $(BUILD_LIB)/libindigo.$(SOEXT): $(LIBINDIGO_FILES)
